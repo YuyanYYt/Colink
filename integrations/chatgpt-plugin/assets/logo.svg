@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Colink</title>
+  <desc id="desc">A centrally symmetric connected link with evenly spaced code brackets.</desc>
+  <defs>
+    <radialGradient id="tile" cx="128" cy="128" r="174" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#283F52"/>
+      <stop offset="1" stop-color="#10212D"/>
+    </radialGradient>
+    <linearGradient id="link" x1="88" y1="168" x2="168" y2="88" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#48D8C4"/>
+      <stop offset=".5" stop-color="#89EBE1"/>
+      <stop offset="1" stop-color="#48D8C4"/>
+    </linearGradient>
+  </defs>
+  <rect x="6" y="6" width="244" height="244" rx="62" fill="url(#tile)"/>
+  <rect x="7" y="7" width="242" height="242" rx="61" fill="none" stroke="#FFF" stroke-opacity=".13" stroke-width="2"/>
+  <g fill="none" stroke="#F0F7F8" stroke-width="14" stroke-linecap="round" stroke-linejoin="round">
+    <path id="bracket-left" d="M74 83 L41.24 120.8 Q35 128 41.24 135.2 L74 173"/>
+    <use id="bracket-right" href="#bracket-left" transform="rotate(180 128 128)"/>
+    <!-- One continuous stroke: every curve/line transition has a shared tangent. -->
+    <path id="connection" d="M126 104 C118.82 96.82 107.18 96.82 100 104 L82 122 C74.82 129.18 74.82 140.82 82 148 C89.18 155.18 100.82 155.18 108 148 L148 108 C155.18 100.82 166.82 100.82 174 108 C181.18 115.18 181.18 126.82 174 134 L156 152 C148.82 159.18 137.18 159.18 130 152" stroke="url(#link)" stroke-width="12"/>
+  </g>
+</svg>

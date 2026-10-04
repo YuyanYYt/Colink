@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="24 24 208 208">
+  <g fill="none" stroke="#000" stroke-width="16" stroke-linecap="round" stroke-linejoin="round">
+    <path id="bracket-left" d="M74 83 L41.24 120.8 Q35 128 41.24 135.2 L74 173"/>
+    <use id="bracket-right" href="#bracket-left" transform="rotate(180 128 128)"/>
+    <path id="connection" d="M126 104 C118.82 96.82 107.18 96.82 100 104 L82 122 C74.82 129.18 74.82 140.82 82 148 C89.18 155.18 100.82 155.18 108 148 L148 108 C155.18 100.82 166.82 100.82 174 108 C181.18 115.18 181.18 126.82 174 134 L156 152 C148.82 159.18 137.18 159.18 130 152"/>
+  </g>
+</svg>

@@ -1,0 +1,4 @@
+# Optional extra root rules, in addition to mandatory built-in exclusions.
+.code-context/
+.artifacts/
+dist/

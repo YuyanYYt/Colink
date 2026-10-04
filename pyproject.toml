@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "colink-mcp"
+version = "0.4.0"
+description = "Colink: a small code mirror, local sync client, and read-only MCP server."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "YuyanYYt"}]
+dependencies = [
+    "mcp>=2.3,<3",
+    "httpx>=0.28,<1",
+    "pathspec>=0.12,<1",
+    "pydantic>=2.11,<3",
+    "starlette>=0.47,<1",
+    "uvicorn>=0.35,<1",
+    "watchfiles>=1.1,<2",
+]
+
+[project.scripts]
+colink = "code_context.cli:main"
+code-context = "code_context.cli:main"
+
+[project.urls]
+Repository = "https://github.com/YuyanYYt/Colink"
+Issues = "https://github.com/YuyanYYt/Colink/issues"
+
+[dependency-groups]
+dev = ["pytest>=8.4,<10", "ruff>=0.12,<1"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/code_context"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src", "/tests", "/docs", "/macos", "/scripts", "/examples",
+    "/integrations/chatgpt-plugin/README.md", "/integrations/chatgpt-plugin/assets",
+    "/README.md", "/LICENSE", "/THIRD_PARTY_NOTICES.md", "/SECURITY.md",
+    "/CONTRIBUTING.md", "/CHANGELOG.md", "/AGENTS.md", "/pyproject.toml",
+    "/uv.lock", "/.gitignore", "/.codecontextignore", "/.python-version",
+    "/.env.example", "/.github/workflows/ci.yml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+tmp_path_retention_policy = "all"
+tmp_path_retention_count = 1000
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
