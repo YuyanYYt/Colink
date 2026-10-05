@@ -371,6 +371,8 @@ class RecoveryStore:
             states = {"ready", "pending", "retiring"} if _recovering else {"ready"}
             if not rows or rows[0]["state"] not in states:
                 raise RecoveryError("RECOVERY_NOT_READY: preserve materials and recover locally")
+            if not rows[0]["identity"]:
+                raise RecoveryError("RECOVERY_IDENTITY_UNAVAILABLE: preserve unconfirmed object")
             try:
                 with self.objects.root_fd() as parent:
                     fd = os.open(sha, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)

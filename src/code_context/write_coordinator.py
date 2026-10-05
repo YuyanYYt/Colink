@@ -81,9 +81,11 @@ class WriteCoordinator:
             )
         from code_context.write_diff import TaskDiff
         from code_context.write_operations import WriteOperations
+        from code_context.write_recovery import WriteRecovery
 
         self.operations = WriteOperations(self)
         self.diff = TaskDiff(self)
+        self.recovery = WriteRecovery(self)
 
     def _pending(self):
         return bool(
@@ -105,7 +107,9 @@ class WriteCoordinator:
 
     def enable(self, project_ids):
         """Local control only; never register this method as an MCP tool."""
+        self.stop_requested.set()
         with self.lock:
+            self.grants = {}
             if not self._alive():
                 raise WriteError("LOCAL_CONTROL_UNAVAILABLE: reconnect locally before enabling")
             if self._pending():
@@ -126,9 +130,9 @@ class WriteCoordinator:
                 source = self.source_provider(project)
                 source.ensure_available()
                 grants[project] = source.source_id
+            self._retire_expired()
             self.grants = grants
             self.stop_requested.clear()
-            self._retire_expired()
             return self.status()
 
     def disable(self):
@@ -390,6 +394,10 @@ class WriteCoordinator:
 
     def finish_write_task(self, project_id, task_id, request_id):
         return self.operations.finish_write_task(project_id, task_id, request_id)
+
+    def recover(self, project_id):
+        """Authenticated local control only. Never expose this method as an MCP tool."""
+        return self.recovery.recover(project_id)
 
     def get_diff(self, project_id, **parameters):
         return self.diff.get_diff(project_id, **parameters)

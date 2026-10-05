@@ -8,7 +8,9 @@ source mutation blindly. Quotas reserve space for the eventual whole-task undo.
 
 import hashlib
 import json
+import os
 import re
+import stat
 import uuid
 from dataclasses import asdict
 
@@ -16,6 +18,7 @@ from code_context.directory_mutation import commit_directory, prepare_directory
 from code_context.file_mutation import commit_file, discard_prepared, prepare_file
 from code_context.policy import MAX_FILE_BYTES, content_problem, validate_path
 from code_context.recovery_store import encode_metadata
+from code_context.scanner import _version
 from code_context.text_edits import apply_text_edit
 from code_context.write_coordinator import (
     MAX_OPERATIONS,
@@ -78,6 +81,19 @@ class WriteOperations:
         return rows[0] if rows else None
 
     def _previous(self, project, task_id, path, document):
+        source = self.c.source_provider(project)
+        with source.parent_fd(path) as (parent, name):
+            info = source.scanner._stat(parent, name, path)
+            if (
+                info is None
+                or not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) > 0o777
+            ):
+                raise WriteError("WRITE_UNSAFE_FILE: use an owned ordinary single-link file")
+            if _version(info) != document.version:
+                raise WriteError("WRITE_FILE_CONFLICT: source changed before task validation")
         previous = self._file(task_id, path)
         if previous is None:
             self.c.check_first_touch(project, task_id, path, document)
@@ -315,6 +331,8 @@ class WriteOperations:
             with source.lock, source.parent_fd(path) as (parent, name):
                 if source.scanner._stat(parent, name, path) is not None:
                     raise WriteError("WRITE_TARGET_EXISTS: new file must not overwrite any object")
+                if self._file(task_id, path) is not None:
+                    raise WriteError("WRITE_FILE_CONFLICT: a previously touched path disappeared")
                 self.c.check_first_touch(project, task_id, path, None)
                 return self._install(
                     project,
@@ -395,6 +413,10 @@ class WriteOperations:
             with source.lock, source.parent_fd(path, directory=True) as (parent, name):
                 if source.scanner._stat(parent, name, path) is not None:
                     raise WriteError("WRITE_TARGET_EXISTS: new directory must not adopt any object")
+                if self._file(task_id, path) is not None:
+                    raise WriteError(
+                        "WRITE_FILE_CONFLICT: a previously touched directory disappeared"
+                    )
                 self.c.check_first_touch(project, task_id, path, None)
                 self.store.reserve(source_temp_bytes=4096, metadata_bytes=64 * 1024)
                 metadata = {
