@@ -12,19 +12,26 @@ from code_context.source_page import source_page
 class LiveQueries:
     source_mode = "live"
 
-    def __init__(self, sources: dict[str, SourceAccess], contexts=None):
+    def __init__(
+        self, sources: dict[str, SourceAccess] | None = None, contexts=None, registry=None
+    ):
+        sources = sources or (registry.authorized_sources() if registry is not None else {})
         for project_id in sources:
             validate_project(project_id)
         self.sources = dict(sources)
+        self.registry = registry
         self.contexts = contexts or ReadContexts()
         self.index_service = None
         self.write_coordinator = None
+        self.watcher = None
 
     def source(self, project_id):
         try:
             validate_project(project_id)
         except ValueError:
             raise SourceError("INVALID_PROJECT: choose an authorized project") from None
+        if self.registry is not None:
+            return self.registry.source(project_id)
         if project_id not in self.sources:
             raise SourceError("PROJECT_NOT_AUTHORIZED: choose from list_projects")
         source = self.sources[project_id]
@@ -32,6 +39,12 @@ class LiveQueries:
         return source
 
     def list_projects(self):
+        if self.registry is not None:
+            result = self.registry.list_projects()
+            for project in result["projects"]:
+                project.pop("relative_root", None)
+                project.update(source_mode="live", file_count=None)
+            return result
         projects = []
         for project_id in sorted(self.sources):
             try:
@@ -49,6 +62,22 @@ class LiveQueries:
                 }
             )
         return {"projects": projects}
+
+    def project_name(self, project_id):
+        if self.registry is not None:
+            return self.registry.names().get(project_id, project_id)
+        return self.sources[project_id].root.name if project_id in self.sources else project_id
+
+    def refresh_sources(self):
+        if self.registry is not None:
+            previous = set(self.sources)
+            self.sources = self.registry.authorized_sources()
+            self.contexts.clear()
+            if self.index_service is not None:
+                for project in previous | self.sources.keys():
+                    self.index_service.invalidate(project)
+            if self.watcher is not None:
+                self.watcher.reconfigure(self.sources)
 
     def resolve_snapshot(self, project_id, snapshot=None):
         source = self.source(project_id)
@@ -212,6 +241,8 @@ class LiveQueries:
             "history_available": False,
             "last_seen": datetime.now(UTC).isoformat(),
             "last_sync_at": None,
+            "watcher": self.watcher.status() if self.watcher is not None else None,
+            "write_enabled": False,
         }
 
     def close(self):

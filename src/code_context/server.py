@@ -80,7 +80,10 @@ def build_mcp(
                 raise ToolError(str(exc)) from None
 
     def display_name(project_id: str) -> str:
-        name = (project_names or {}).get(project_id, project_id)
+        name = (project_names or {}).get(project_id)
+        if name is None and live_mode and hasattr(store, "project_name"):
+            name = store.project_name(project_id)
+        name = name or project_id
         return "".join(c for c in name if ord(c) >= 32 and ord(c) != 127)[:120] or project_id
 
     mcp = CodeMCPServer(
@@ -160,10 +163,13 @@ def build_mcp(
             "project_count": len(projects),
             "limits": {
                 "max_file_bytes": MAX_FILE_BYTES,
-                "max_project_bytes": MAX_TOTAL_BYTES,
+                "max_project_bytes": None if live_mode else MAX_TOTAL_BYTES,
+                "max_text_search_bytes": MAX_TOTAL_BYTES if live_mode else None,
                 "max_files": MAX_FILES,
                 "max_sync_request_bytes": MAX_REQUEST_BYTES,
             },
+            "watcher": status.get("watcher"),
+            "write_enabled": bool(status.get("write_enabled", False)),
             "filters": {
                 "excluded_directories": sorted(EXCLUDED_DIRS),
                 "excluded_file_patterns": list(EXCLUDED_NAMES),

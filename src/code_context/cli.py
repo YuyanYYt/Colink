@@ -50,6 +50,18 @@ def parser() -> argparse.ArgumentParser:
     live.add_argument("--project", required=True)
     live.add_argument("--data-dir", type=Path, default=Path(".code-context/live"))
 
+    workspace = commands.add_parser("workspace", help="运行已本机授权的多项目直读 MCP")
+    workspace.add_argument("--root", type=Path, required=True)
+    workspace.add_argument("--project", default="workspace", help="连接标签，不替代项目 ID")
+    workspace.add_argument("--data-dir", type=Path, default=Path(".code-context/workspace"))
+    initialize = commands.add_parser("workspace-init", help="本机登记选定目录并发现待确认子项目")
+    initialize.add_argument("--root", type=Path, required=True)
+    initialize.add_argument("--name")
+    initialize.add_argument("--data-dir", type=Path, default=Path(".code-context/workspace"))
+    control = commands.add_parser("workspace-control", help="通过私有本机通道管理项目/状态")
+    control.add_argument("--data-dir", type=Path, required=True)
+    control.add_argument("--action", required=True)
+
     for name in ("desktop-status", "desktop-run"):
         command = commands.add_parser(name, help="CoLink 菜单栏应用的本机生命周期接口")
         command.add_argument("--workspace", type=Path, default=Path.cwd())
@@ -113,6 +125,32 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        if args.command == "workspace-init":
+            from code_context.workspace import initialize_workspace
+
+            emit(initialize_workspace(args.root, args.data_dir, args.name))
+            return 0
+        if args.command == "workspace-control":
+            from code_context.local_control import control_request
+
+            payload = sys.stdin.read(65537)
+            if len(payload) > 65536:
+                raise ValueError("local control input exceeds its size limit")
+            parameters = json.loads(payload) if payload.strip() else {}
+            if not isinstance(parameters, dict):
+                raise ValueError("local control requires an object")
+            emit(control_request(args.data_dir, args.action, parameters))
+            return 0
+        if args.command == "workspace":
+            from code_context.workspace import WorkspaceRuntime
+
+            os.environ.pop("CONTROL_PLANE_API_KEY", None)
+            os.environ.pop("OPENAI_API_KEY", None)
+            with WorkspaceRuntime(args.root, args.data_dir) as runtime:
+                build_mcp(runtime.backend, status_provider=runtime.backend.mcp_status).run(
+                    transport="stdio"
+                )
+            return 0
         if args.command == "desktop-setup":
             from code_context.onboarding import configure_desktop
 
