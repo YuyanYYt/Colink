@@ -119,6 +119,7 @@ class LiveQueries:
 
     def resolve_snapshot(self, project_id, snapshot=None):
         source = self.source(project_id)
+        self.guard_read(project_id)
         try:
             if snapshot is None or snapshot == "current":
                 handle = self.contexts.create(project_id, source.source_id)
@@ -132,7 +133,13 @@ class LiveQueries:
                 "LIVE_CONTEXT_INVALID: restart analysis from repo_overview; "
                 "historical snapshots are not available in direct mode"
             ) from None
+        self.guard_read(project_id)
         return handle, handle
+
+    def guard_read(self, project_id):
+        """Publication guard; never acquire the coordinator lock under Source locks."""
+        if self.write_coordinator is not None:
+            self.write_coordinator.guard_read(project_id)
 
     @contextmanager
     def fingerprint_batch(self, project_id, source=None):
@@ -171,6 +178,7 @@ class LiveQueries:
         metadata = source.manifest()
         files = metadata["files"]
         page = [{"path": f["path"], "size": f["size"]} for f in files[offset : offset + limit]]
+        self.resolve_snapshot(project_id, handle)
         return {
             "project_id": project_id,
             "snapshot": handle,
@@ -288,7 +296,9 @@ class LiveQueries:
         handle, _ = self.resolve_snapshot(project_id, snapshot)
         if self.index_service is None:
             raise SourceError("INDEX_NOT_READY: live structural indexing is not attached")
-        return self.index_service.query(self, project_id, handle, operation, **parameters)
+        result = self.index_service.query(self, project_id, handle, operation, **parameters)
+        self.resolve_snapshot(project_id, handle)
+        return result
 
     def mcp_status(self):
         return {

@@ -220,5 +220,10 @@
   LF/CRLF 物理行；原始字符保留，旧 mirror 默认分行不变。专项及相关
   **278 passed（4.07 秒）**、Ruff 通过；不将此源码测试当网页行定位已验证。
 
+- W/R2 直读发布隔离：查询上下文前后使用无 coordinator 锁的持久 pending 检查；
+  概览/关系结果返回前重新验证当前上下文。待恢复项目拒绝正常源码结果、不阻止
+  B 等其他来源。相关 **101 passed（4.76 秒）**、Ruff 通过；目前尚未运行真实
+  Runtime/MCP 写权限，局部集成证明不作为网页门槛通过。
+
 关联：[读取重构计划](LIVE_WORKSPACE_REFACTOR.md)、[写入契约](WRITE_CONTRACT.md)、
 [维护路线](ROADMAP.md)、[验证记录](VALIDATION.md)。

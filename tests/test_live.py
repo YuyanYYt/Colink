@@ -91,6 +91,56 @@ def test_live_read_search_lines_match_precise_edit_lines(backend):
     assert edited.content == original.replace("TARGET = 1", "TARGET = 2")
 
 
+def test_prepared_write_blocks_only_its_project_publication(backend, tmp_path):
+    from code_context.recovery_store import RecoveryStore
+    from code_context.write_coordinator import WriteCoordinator
+
+    with RecoveryStore(tmp_path / "recovery") as store:
+        c = WriteCoordinator(store, backend.source, control_alive=lambda: True)
+        backend.write_coordinator = c
+        try:
+            c.enable(["a"])
+            task = c.begin_write_task("a", c.status()["next_task_request_id"])["task_id"]
+            with store.transaction() as db:
+                db.execute("UPDATE tasks SET state='recovery_required' WHERE task_id=?", (task,))
+            for query in (
+                lambda: backend.repo_overview("a", "current"),
+                lambda: backend.read_file("a", "a.py"),
+                lambda: backend.search_code("a", "before"),
+            ):
+                with pytest.raises(SourceError, match="WRITE_RECOVERY_REQUIRED"):
+                    query()
+            assert backend.read_file("b", "b.py")["content"] == "other project\n"
+        finally:
+            backend.write_coordinator = None
+            c.close()
+
+
+def test_overview_checks_publication_again_after_collection(backend, monkeypatch):
+    from code_context.write_coordinator import WriteError
+
+    class Guard:
+        pending = False
+
+        def guard_read(self, project):
+            if project == "a" and self.pending:
+                raise WriteError("WRITE_RECOVERY_REQUIRED: test pending")
+
+    guard = Guard()
+    backend.write_coordinator = guard
+    actual = backend.sources["a"].manifest
+
+    def manifest():
+        result = actual()
+        guard.pending = True
+        return result
+
+    monkeypatch.setattr(backend.sources["a"], "manifest", manifest)
+    with pytest.raises(SourceError, match="WRITE_RECOVERY_REQUIRED"):
+        backend.repo_overview("a", "current")
+    backend.write_coordinator = None
+
+
 def test_live_mcp_keeps_read_annotations_and_explains_contexts(backend):
     async def inspect():
         mcp = build_mcp(
