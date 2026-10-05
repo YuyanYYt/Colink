@@ -169,5 +169,11 @@
   原 MCP get_diff，回退后的对象校验仍待回退层，不能提前宣称原十五工具任务 Diff
   或完整 W/网页已验收。
 
+- W 目录原语候选：准备/持久身份回调/原子 EXCL 不覆盖安装、仅登记且为空的临时
+  清理，以及本任务目录先隔离/记录/再 rmdir 已实现。不递归删除、不自动反移，
+  提交后冲突保留材料并标 pending。macOS **134 passed（执行者 Euler）**，主线
+  合并相关 **210 passed（5.93 秒）**、Ruff 通过；Linux 原生分支未验收，任务目录
+  协调器与完整 W 仍待实现。
+
 关联：[读取重构计划](LIVE_WORKSPACE_REFACTOR.md)、[写入契约](WRITE_CONTRACT.md)、
 [维护路线](ROADMAP.md)、[验证记录](VALIDATION.md)。
