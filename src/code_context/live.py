@@ -1,5 +1,6 @@
 """Query backend for saved local files, without permanent source-text snapshots."""
 
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from threading import RLock
 
@@ -124,13 +125,29 @@ class LiveQueries:
             else:
                 handle = snapshot
                 self.contexts.get(project_id, source.source_id, handle)
-            self.contexts.validate(project_id, source.source_id, handle, source.fingerprint)
+            with self.fingerprint_batch(project_id, source):
+                self.contexts.validate(project_id, source.source_id, handle, source.fingerprint)
         except ContextError:
             raise SourceError(
                 "LIVE_CONTEXT_INVALID: restart analysis from repo_overview; "
                 "historical snapshots are not available in direct mode"
             ) from None
         return handle, handle
+
+    @contextmanager
+    def fingerprint_batch(self, project_id, source=None):
+        """Pin one source's metadata pass and recheck backend authorization/binding."""
+        source = self.source(project_id) if source is None else source
+        try:
+            with source.fingerprint_batch():
+                if self.source(project_id) is not source:
+                    raise SourceError("SOURCE_REPLACED: source changed before validation")
+                yield source
+                if self.source(project_id) is not source:
+                    raise SourceError("SOURCE_REPLACED: source changed during validation")
+        except SourceError:
+            self.contexts.invalidate_project(project_id)
+            raise
 
     def _observe(self, project_id, handle, document):
         source = self.source(project_id)

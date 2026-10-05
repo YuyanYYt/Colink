@@ -550,6 +550,7 @@ def phase_worker(output, phase):
     from code_context.live_index import LiveIndexService
     from code_context.live_watch import WatchCoordinator
     from code_context.project_registry import ProjectRegistry
+    from code_context.source_access import MAX_BATCH_PARENT_FDS, MAX_BATCH_PARENTS
 
     workspace = output / "workspace"
     ledger = ReadLedger(workspace)
@@ -584,6 +585,12 @@ def phase_worker(output, phase):
         )
         backend.index_service = service
         report["fingerprint_cache_before"] = backend.fingerprint_cache.stats()
+        report["fingerprint_batch_limits"] = {
+            "parent_items": MAX_BATCH_PARENTS,
+            "retained_directory_fds_including_root_ancestors": MAX_BATCH_PARENT_FDS,
+            "scope": "source/thread nested pools; closed on batch exit",
+            "fallback": "deep paths retain no pooled parents; original single-path checks",
+        }
         report["configured_limits"] = index_status(service, ids["A"])["limits"]
         report["structure_wait_seconds"] = service.wait_seconds
         report["a_index_before_query"] = index_status(service, ids["A"])
@@ -991,6 +998,10 @@ def main():
             "root_ignore": "includes policy loading and explicit index config reads",
             "source_metrics": "body_reads omits actual root-ignore policy loading",
             "fingerprint_budget": "backend-wide entries and estimated charged metadata, not RSS",
+            "fingerprint_batch": (
+                "bounded nofollow parent FD stacks, double leaf stat; not a body cache; "
+                "deep paths use original transient single-path access"
+            ),
             "process_metrics": "RSS sampled and lifetime high-water; FDs include probe pipes",
             "kernel_watch": "not instrumented; directory count is not native watch resources",
             "disk_peak": "post-operation DB/sidecar samples, not transient journal peak",

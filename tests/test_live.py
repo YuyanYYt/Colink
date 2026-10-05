@@ -7,6 +7,7 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 
 from code_context.live import LiveQueries
 from code_context.project_registry import ProjectRegistry
+from code_context.read_context import ContextError
 from code_context.server import build_mcp
 from code_context.source_access import SourceAccess, SourceError
 
@@ -263,3 +264,76 @@ def test_64_sources_share_one_global_budget_not_64_independent_50000_caches(tmp_
     assert backend.fingerprint_cache.stats()["active_sources"] == 64
     assert backend.fingerprint_cache.stats()["charged_bytes"] <= 32 * 1024 * 1024
     backend.close()
+
+
+@pytest.mark.parametrize("change", ["disable", "nested_boundary"])
+def test_batch_rechecks_registry_authorization_and_scope_after_last_leaf(
+    tmp_path, monkeypatch, change
+):
+    backend, registry, ids = registered_backend(tmp_path)
+    a, b = backend.source(ids["a"]), backend.source(ids["b"])
+    (a.root / "nested").mkdir()
+    snapshot = backend.read_file(ids["a"], "same.py")["snapshot"]
+    b_hash = b.fingerprint("same.py")
+    original = type(a._fingerprints).get
+    changed = False
+
+    def mutate(view, path):
+        nonlocal changed
+        result = original(view, path)
+        if view.source_id == a.source_id and not changed:
+            changed = True
+            if change == "disable":
+                registry.set_enabled(ids["a"], False)
+            else:
+                registry.register("a/nested", enabled=False)
+        return result
+
+    monkeypatch.setattr(type(a._fingerprints), "get", mutate)
+    with pytest.raises(SourceError):
+        backend.resolve_snapshot(ids["a"], snapshot)
+    with pytest.raises(ContextError, match="unknown|invalidated"):
+        backend.contexts.get(ids["a"], a.source_id, snapshot)
+    assert a._fingerprint_batches.stack == []
+    assert b.fingerprint("same.py") == b_hash and b.metrics["body_reads"] == 1
+
+
+def test_batch_rejects_backend_source_object_rebinding_at_end(backend, monkeypatch):
+    a = backend.source("a")
+    snapshot = backend.read_file("a", "a.py")["snapshot"]
+    replacement = SourceAccess(a.root)
+    original = type(a._fingerprints).get
+
+    def rebind(view, path):
+        result = original(view, path)
+        backend.sources["a"] = replacement
+        return result
+
+    monkeypatch.setattr(type(a._fingerprints), "get", rebind)
+    with pytest.raises(SourceError, match="SOURCE_REPLACED"):
+        backend.resolve_snapshot("a", snapshot)
+    assert a._fingerprint_batches.stack == []
+
+
+def test_context_validate_runs_inside_batch_without_repeated_root_opens(backend, monkeypatch):
+    source = backend.source("a")
+    for number in range(20):
+        path = source.root / f"file_{number}.py"
+        path.write_text("value = 1\n")
+    snapshot = backend.resolve_snapshot("a")[0]
+    for item in source.manifest()["files"]:
+        document = source.read(item["path"])
+        backend.contexts.observe("a", source.source_id, snapshot, document.path, document.sha256)
+    original = source._fingerprints.get
+    calls = []
+
+    def in_batch(view, path):
+        assert source._fingerprint_batches.stack
+        calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(type(source._fingerprints), "get", in_batch)
+    reads = source.metrics["body_reads"]
+    backend.resolve_snapshot("a", snapshot)
+    assert len(calls) == 21 and source.metrics["body_reads"] == reads
+    assert source._fingerprint_batches.stack == []

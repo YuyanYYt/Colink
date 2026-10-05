@@ -311,7 +311,10 @@ class LiveIndexService:
         try:
             backend.contexts.get(project_id, source.source_id, handle)
             if validate:
-                backend.contexts.validate(project_id, source.source_id, handle, source.fingerprint)
+                with backend.fingerprint_batch(project_id, source):
+                    backend.contexts.validate(
+                        project_id, source.source_id, handle, source.fingerprint
+                    )
         except ContextError:
             raise SourceError("LIVE_CONTEXT_INVALID: restart analysis from repo_overview") from None
 
@@ -719,6 +722,16 @@ class LiveIndexService:
                 }
             )
         files, parsed_files, parses = [], {}, []
+        # Batch the reusable parse hashes before the extraction loop acquires any
+        # index lock. The usual manifest/context guards still run before publish;
+        # no Source -> Index / Index -> Source inverse lock is introduced.
+        reusable = {
+            item["path"] for item in metadata["files"] if _language(item["path"]) != "unsupported"
+        }
+        with backend.fingerprint_batch(project_id, source):
+            for path in list(prior):
+                if path not in reusable or source.fingerprint(path) != prior[path][0]:
+                    del prior[path]
         source_bytes = parse_bytes = parse_facts = parsed_count = reused_count = file_bytes = 0
         configuration = read_root_configuration(None)
         partial = bool(metadata["partial"] or metadata.get("skipped"))
@@ -762,9 +775,9 @@ class LiveIndexService:
                 else:
                     cached = prior.pop(path, None) if supported else None
                     try:
-                        # Reuse facts after a real content hash check, which SourceAccess
-                        # may satisfy from its bounded, double-stat fingerprint cache.
-                        unchanged = cached is not None and source.fingerprint(path) == cached[0]
+                        # Every retained prior parse passed the batch's double-stat
+                        # and hash validation; changed files still need complete reads.
+                        unchanged = cached is not None
                         document = None if unchanged else source.read(path)
                     except SourceError as exc:
                         if not str(exc).startswith("FILE_EXCLUDED:"):

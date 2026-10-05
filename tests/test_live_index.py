@@ -3,6 +3,7 @@
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from threading import Event, Lock, current_thread
 
 import pytest
@@ -774,3 +775,34 @@ def test_exclusive_cache_owner_and_close_preserve_files(tmp_path, service_factor
     fresh = service_factory(backend, data_dir=data_dir)
     assert fresh.path == service.path
     find(backend, handle(backend), "value")
+
+
+def test_index_context_and_parse_reuse_batch_without_holding_index_lock(
+    tmp_path, service_factory, monkeypatch
+):
+    backend = backend_for(tmp_path, {"a": python_files(), "b": {"b.py": "def other(): pass\n"}})
+    service = service_factory(backend)
+    snapshot = handle(backend)
+    original = backend.fingerprint_batch
+    scopes = []
+
+    @contextmanager
+    def batch(project_id, source=None):
+        assert not service._lock._is_owned()
+        with original(project_id, source) as current:
+            scopes.append(project_id)
+            yield current
+
+    monkeypatch.setattr(backend, "fingerprint_batch", batch)
+    find(backend, snapshot, "normalize")
+    reads = backend.sources["a"].metrics["body_reads"]
+    scopes.clear()
+    query(backend, snapshot, "project_architecture")
+    assert len(scopes) >= 4 and set(scopes) == {"a"}
+    service.invalidate("a")
+    query(backend, snapshot, "project_architecture")
+    assert backend.sources["a"].metrics["body_reads"] == reads
+    assert backend.sources["b"].metrics["body_reads"] == 0
+    assert service.status("a")["stats"]["parsed_files"] == 0
+    assert service.status("a")["stats"]["reused_parse_files"] == 4
+    assert backend.sources["a"]._fingerprint_batches.stack == []

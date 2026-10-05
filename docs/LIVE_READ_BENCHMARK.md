@@ -1,8 +1,8 @@
 # Synthetic live-read / lazy-index resource baseline
 
 2026-10-06：100 定义文件基准与 5000 定义文件探针各一份独立 fixture、各运行一次；
-共享 fingerprint LRU 修复后，仅再执行一次相同 5000 文件分布的新 fixture。
-原两份结果保留且未重跑。所有测量都不是实际企业项目，
+共享 fingerprint LRU 修复后、批量指纹/父 FD 池优化后，各仅再执行一次相同 5000 文件
+分布的新 fixture。既有结果全部保留且未重跑。所有测量都不是实际企业项目，
 不表示 R6、desktop、隧道、网页、模型或整体重构已验收。
 
 ## 重现与输出保护
@@ -253,3 +253,96 @@ uv run --no-sync --frozen pytest -q -p no:cacheprovider \
 相关 7 个 Python 文件的 Ruff check / format --check 通过。
 基准输出、UV 临时目录与独立 pytest 目录均保留，未提交、未清理；仅提供本机 synthetic
 组件与资源证据，尚未完成整体重构、受控写入、desktop、隧道或网页验收。
+
+## 批量指纹与有界父 FD 池：一次独立优化后测量
+
+本小步仅改 SourceAccess / LiveQueries / LiveIndex 与三个对应测试，以及本脚本/文档。
+没有接 write barrier，没有改 coordinator / store / file_mutation，没有联网、全量测试、
+提交或清理。原 4.01 秒和 8.2 秒报告的 performance.json / summary.md SHA-256 前后相同。
+
+- [批量优化性能 JSON](../.artifacts/live-benchmark.yxF9lx/performance.json)
+- [自动短报告](../.artifacts/live-benchmark.yxF9lx/summary.md)
+- [cold 明细](../.artifacts/live-benchmark.yxF9lx/phase-cold.json)
+- [重启明细](../.artifacts/live-benchmark.yxF9lx/phase-restart.json)
+- [新 synthetic fixture](../.artifacts/live-benchmark.yxF9lx/fixture.json)
+
+只执行一次 `--definitions-a 5000 --definitions-per-file 1`，默认 warm 3 次。生成规模与前次
+相同：A 5000 定义文件 / 5000 函数，B 100 定义文件 / 100 函数，少量 Java、剪枝占位文件与
+普通 3 MiB 分页文件；初始内容总计 3,773,544 字节。不是实际企业代码或海量目录/依赖样本。
+实际运行前后 HEAD 均为 `b80dc1aba17a0c47d94f37b00951fcc399d6e36d`，使用本轮未提交补丁，
+所记模块运行期间没有变化。与前次相比仅 SourceAccess / LiveQueries / LiveIndex / benchmark
+的所记源码哈希不同；shared cache、Scanner、registry、解析器、watch、uv.lock 哈希相同。
+仍不是固定 HEAD、清空 OS 文件缓存的严格受控 A/B 实验。
+
+| 操作 | 本轮 wall ms | index_not_ready / index_partial |
+| --- | ---: | --- |
+| 发现候选 / A overview | 63.853 / 71.590 | 不适用；发现完整 |
+| cold A 结构请求 | 2738.470 | false / false |
+| warm A 第 1 / 2 / 3 次 | 744.080 / 753.393 / 733.328 | 均 false / false |
+| 修改一个 A 文件，新上下文重建 | 1600.128 | false / false |
+| 停机修改后的新进程请求 | 2671.627 | false / false |
+| 3 MiB 普通文件第 1 / 2 页 | 46.981 / 46.166 | 不适用 |
+
+warm 中位数 744.080 ms，前次为 4012.522 ms。本轮三个 synthetic warm 样本均 subsecond，
+且 code / other_text / root_ignore 读取计数与返回字节均为 0；不能据此推断企业项目、P95/
+P99 或网页延迟通过。cold、变化重建和重启仍超过 1 秒。10 秒 Future 等待、120 秒子进程
+保护、DB 64 MiB / managed_peak_config 128 MiB 均未提高。25 项脚本功能检查通过，两个
+独立进程退出码均为 0，无 partial / 未就绪 / 超时。
+
+### 本轮 API、安全和额度
+
+- `SourceAccess.fingerprint_batch()` 是 contextmanager，yield 当前 source；在范围内调用
+  原 `source.fingerprint(path)`。正文读取仍走原 `read`，不通过父池缓存或复用正文。
+- 批范围复用 nofollow 父目录 FD，保留每项完整祖先栈，合计最多 64 父项、128 retained
+  directory FD（计入根/祖先，并为退出授权检查另留根栈余量），不是“64 个叶 FD”冒充额度。
+  深的相对父链不能纳入池时，回退原单路径安全打开；该回退的临时单路径栈不属于池额度，
+  所以 128 也不是整个进程/任意深链的 FD 硬上限。根栈/嵌套本身超预算时安全拒绝。
+- 每个参与文件仍用当前缓存中的版本 + hash，并执行两次 leaf stat；缺失/变化走原完整
+  内容校验或失效，不跳过参与文件。LRU 淘汰和批末均验证被保留的父链接版本。
+- 批前/后检查 root、ancestor、ignore 版本、source ID 和当前范围；进入/退出虚拟 root_fd
+  保留 registry 的当前工作区/来源/启用授权检查。路径、父 symlink、替换、scope 或 ignore
+  变化拒绝整批。目录版本检查是保守的，批内相关目录元信息变化也可能要求重试；不是
+  文件系统原子快照，也不承诺检测两次观察之间所有可能的外部编辑。
+- 嵌套使用独立池、共享该 source/thread 的合计额度；线程状态独立，Source 锁串行来源
+  操作。异常、失效及正常退出均关闭所有批内 FD，不保留跨请求父 FD 或正文。
+- `LiveQueries.fingerprint_batch(project_id, source=None)` 包装来源批范围，入/出双检当前
+  backend 来源对象和授权；ReadContexts.validate 与 LiveIndex 的上下文校验都挂入它。
+  可复用 parse 的 hash 校验在提取循环获取 Index 锁前批量完成，发布前 manifest/context
+  guards 保留。锁顺序仍是 Source -> Registry -> Cache，cache 锁不做 I/O，不获取
+  coordinator.lock；本轮没有添加读写 barrier。
+
+shared cache 上限仍为全局 50,000 / 33,554,432 estimated charged metadata bytes，不是 RSS。
+warm 后 5007 条、charged 3,293,993 字节、淘汰 0；批池 metrics 在 cold 阶段为峰值 2 父项 /
+12 retained FD、60 个父/祖先 FD 打开、30 次批范围，回退/淘汰 0；重启为 2 父项 / 12 FD、
+12 个父/祖先打开、7 次批范围。这里是池元信息计数，不是内核 watch 资源数。
+
+### 资源和验证
+
+两阶段 B 正文读取、body_reads、六张事实表 B 行数均为 0，批范围数为 0；每阶段仍实际
+读取两个 root-ignore 文件、34 字节。在线/停机变化均只重解析 1 个文件、复用 5003 个，
+仍重绑定 5004 个。在线后 DB 文件 26,812,416 字节 / 分配 27,275,264；重启后两者均为
+26,738,688 字节；采样 journal/WAL/SHM 为 0，不是实测瞬时磁盘峰值。
+
+cold 空闲 RSS 54,198,272 字节，生命周期高水位 126,861,312 字节（约 120.984 MiB）；
+重启高水位 110,460,928 字节。空闲进程 FD 7，非递归 watch 目录 6，依赖/构建/缓存/
+.artifacts/.code-context/ignore 子树剪枝仍有效；没有计量内核原生 watch 资源。
+charged cache、FD 池额度和 managed DB peak 都不能作为整个进程 RSS 上限。
+
+相关五个模块最终 **173 passed in 3.07s**（此前既有三模块小回归 64 passed），没有运行
+全量。专项检查实际 os.open/close 记录、64 父项 / 128 FD 淘汰、130 层相对链回退、嵌套/
+线程隔离、异常收尾、父链接替换与移回、根/祖先/ignore/授权变化、最后一个 leaf 后的
+registry/来源对象复核，以及 batch 不持 Index 锁。相关 7 个 Python 文件 Ruff check /
+format --check 通过。实际 pytest 记录如下，已经使用的独立 basetemp 不得复用：
+
+```sh
+UV_NO_CACHE=1 PYTHONDONTWRITEBYTECODE=1 \
+TMPDIR=.artifacts/fingerprint-batch-validation.mMXD9o \
+uv run --no-sync --frozen pytest -q -p no:cacheprovider \
+  --basetemp .artifacts/fingerprint-batch-validation.mMXD9o/pytest.8nXjF9 \
+  tests/test_source_access.py tests/test_live.py tests/test_live_index.py \
+  tests/test_read_context.py tests/test_fingerprint_cache.py
+```
+
+基准新输出、UV 临时目录和 pytest 目录均保留。本轮到此冻结实现并交回 ownership；
+subsecond 结论只针对上述三个本机 synthetic warm 样本，不代表写入主线、desktop、
+隧道、网页或整体重构已完成。

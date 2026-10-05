@@ -1,4 +1,5 @@
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -216,3 +217,198 @@ def test_source_io_can_observe_cache_stats_without_inverse_lock(tmp_path, monkey
     monkeypatch.setattr(source.scanner, "_read_text", observed)
     with ThreadPoolExecutor(max_workers=1) as pool:
         assert pool.submit(source.fingerprint, "a.py").result(timeout=2)
+
+
+def warm_source(root, paths):
+    for path in paths:
+        target = root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("value = 1\n")
+    source = SourceAccess(root)
+    hashes = {path: source.fingerprint(path) for path in paths}
+    return source, hashes
+
+
+def track_directory_fds(monkeypatch):
+    original_open, original_close = os.open, os.close
+    state = {"live": set(), "peak": 0, "opens": 0}
+
+    def opening(path, flags, *args, **kwargs):
+        fd = original_open(path, flags, *args, **kwargs)
+        if flags & os.O_DIRECTORY:
+            state["live"].add(fd)
+            state["opens"] += 1
+            state["peak"] = max(state["peak"], len(state["live"]))
+        return fd
+
+    def closing(fd):
+        original_close(fd)
+        state["live"].discard(fd)
+
+    monkeypatch.setattr(os, "open", opening)
+    monkeypatch.setattr(os, "close", closing)
+    return state
+
+
+def test_batch_reuses_parent_but_keeps_two_leaf_stats_and_closes_fds(tmp_path, monkeypatch):
+    paths = [f"pkg/file_{n}.py" for n in range(80)]
+    source, hashes = warm_source(tmp_path, paths)
+    calls, original = [], source.scanner._stat
+
+    def count(fd, name, path):
+        if path in hashes:
+            calls.append(path)
+        return original(fd, name, path)
+
+    monkeypatch.setattr(source.scanner, "_stat", count)
+    tracked = track_directory_fds(monkeypatch)
+    with source.fingerprint_batch() as batch:
+        assert batch is source
+        assert {p: batch.fingerprint(p) for p in paths} == hashes
+        assert source.metrics["fingerprint_batch_parent_opens"] == 1
+    assert all(calls.count(p) == 2 for p in paths)
+    assert source.metrics["body_reads"] == len(paths)
+    assert not tracked["live"] and source._fingerprint_batches.stack == []
+
+
+@pytest.mark.parametrize("depth,count", [(1, 70), (10, 16)])
+def test_parent_lru_bounds_actual_ancestor_fds_not_only_parent_items(
+    tmp_path, monkeypatch, depth, count
+):
+    paths = ["/".join([f"p{n}"] + ["d"] * (depth - 1) + ["a.py"]) for n in range(count)]
+    source, hashes = warm_source(tmp_path, paths)
+    tracked = track_directory_fds(monkeypatch)
+    with source.fingerprint_batch():
+        for path in paths + [paths[0]]:
+            assert source.fingerprint(path) == hashes[path]
+        assert source.metrics["fingerprint_batch_parent_evictions"] > 0
+        assert source.metrics["fingerprint_batch_peak_parent_items"] <= 64
+        assert source.metrics["fingerprint_batch_peak_retained_fds"] <= 128
+    assert tracked["peak"] <= 128 and not tracked["live"]
+    assert source.metrics["body_reads"] == count
+
+
+def test_deep_chain_falls_back_to_original_single_path_without_retaining_parents(tmp_path):
+    path = "/".join(["d"] * 130 + ["a.py"])
+    source, hashes = warm_source(tmp_path, [path])
+    with source.fingerprint_batch():
+        assert source.fingerprint(path) == hashes[path]
+        assert source.metrics["fingerprint_batch_fallbacks"] == 1
+        assert not source._fingerprint_batches.stack[-1].parents
+    assert source.metrics["body_reads"] == 1
+
+
+def test_batch_nested_pools_are_independent_and_thread_state_does_not_leak(tmp_path, monkeypatch):
+    source, hashes = warm_source(tmp_path, ["pkg/a.py", "other/b.py"])
+    tracked = track_directory_fds(monkeypatch)
+    with source.fingerprint_batch():
+        assert source.fingerprint("pkg/a.py") == hashes["pkg/a.py"]
+        outer = source._fingerprint_batches.stack[-1]
+        outer_fd = outer.parents["pkg"][1]
+        with source.fingerprint_batch():
+            assert source._fingerprint_batches.stack[-1] is not outer
+            assert source.fingerprint("other/b.py") == hashes["other/b.py"]
+        assert os.fstat(outer_fd)
+        assert source.fingerprint("pkg/a.py") == hashes["pkg/a.py"]
+    assert tracked["peak"] <= 128 and not tracked["live"]
+
+    def validate(_):
+        with source.fingerprint_batch():
+            assert source.fingerprint("pkg/a.py") == hashes["pkg/a.py"]
+        assert source._fingerprint_batches.stack == []
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        list(pool.map(validate, range(6)))
+    assert not tracked["live"] and source.metrics["body_reads"] == 2
+
+
+def test_batch_body_exception_still_closes_every_fd(tmp_path, monkeypatch):
+    source, _ = warm_source(tmp_path, ["pkg/a.py"])
+    tracked = track_directory_fds(monkeypatch)
+    with pytest.raises(RuntimeError, match="caller aborted"):
+        with source.fingerprint_batch():
+            assert source.fingerprint("pkg/a.py")
+            raise RuntimeError("caller aborted")
+    assert not tracked["live"] and source._fingerprint_batches.stack == []
+
+
+@pytest.mark.parametrize("change", ["symlink", "replace", "rename_restore"])
+def test_parent_link_change_rejects_whole_batch_even_for_cached_leaf(tmp_path, monkeypatch, change):
+    source, hashes = warm_source(tmp_path, ["pkg/a.py", "other/b.py"])
+    tracked = track_directory_fds(monkeypatch)
+    with pytest.raises(SourceError, match="SOURCE_CHANGED") as error:
+        with source.fingerprint_batch():
+            assert source.fingerprint("pkg/a.py") == hashes["pkg/a.py"]
+            (tmp_path / "pkg").rename(tmp_path / "saved")
+            if change == "symlink":
+                (tmp_path / "pkg").symlink_to(tmp_path / "saved", target_is_directory=True)
+            elif change == "replace":
+                (tmp_path / "pkg").mkdir()
+                (tmp_path / "pkg/a.py").write_text("value = 9\n")
+            else:
+                (tmp_path / "saved").rename(tmp_path / "pkg")
+            assert source.fingerprint("other/b.py") == hashes["other/b.py"]
+    assert str(tmp_path) not in str(error.value)
+    assert not tracked["live"] and source.metrics["body_reads"] == 2
+
+
+@pytest.mark.parametrize(
+    "change", ["ignore", "scope", "identity", "root", "ancestor", "ancestor_restore"]
+)
+def test_batch_postcheck_rejects_policy_binding_root_and_ancestor_changes(tmp_path, change):
+    root = tmp_path / "container" / "source"
+    root.mkdir(parents=True)
+    (root / ".gitignore").write_text("other.py\n")
+    source, hashes = warm_source(root, ["pkg/a.py"])
+    with pytest.raises(SourceError):
+        with source.fingerprint_batch():
+            assert source.fingerprint("pkg/a.py") == hashes["pkg/a.py"]
+            if change == "ignore":
+                (root / ".gitignore").write_text("pkg/\n")
+            elif change == "scope":
+                source.scanner._excluded.add("pkg")
+            elif change == "identity":
+                source.source_id = "f" * 64
+            elif change == "root":
+                root.rename(root.with_name("saved"))
+                root.mkdir()
+            else:
+                root.parent.rename(tmp_path / "saved_container")
+                if change == "ancestor_restore":
+                    (tmp_path / "saved_container").rename(root.parent)
+                else:
+                    root.mkdir(parents=True)
+    assert source._fingerprint_batches.stack == []
+
+
+def test_batch_keeps_second_leaf_stat_changed_hash_and_missing_file_checks(tmp_path, monkeypatch):
+    source, hashes = warm_source(tmp_path, ["pkg/a.py"])
+    original = type(source._fingerprints).get
+
+    def changed(view, path):
+        value = original(view, path)
+        (tmp_path / path).write_text("value = 2\n")
+        return value
+
+    with monkeypatch.context() as patch:
+        patch.setattr(type(source._fingerprints), "get", changed)
+        with source.fingerprint_batch():
+            assert source.fingerprint("pkg/a.py") != hashes["pkg/a.py"]
+    assert source.metrics["body_reads"] == 2
+    (tmp_path / "pkg/a.py").unlink()
+    with pytest.raises(SourceError, match="batch scope changed"):
+        with source.fingerprint_batch():
+            assert source.fingerprint("pkg/a.py") is None
+
+
+def test_parent_lru_eviction_validates_link_before_discarding_it(tmp_path):
+    paths = [f"p{n}/a.py" for n in range(65)]
+    source, _ = warm_source(tmp_path, paths)
+    with pytest.raises(SourceError, match="SOURCE_CHANGED"):
+        with source.fingerprint_batch():
+            for path in paths[:64]:
+                assert source.fingerprint(path)
+            (tmp_path / "p0").rename(tmp_path / "saved")
+            (tmp_path / "p0").mkdir()
+            source.fingerprint(paths[-1])  # Eviction cannot hide the changed old link.
+    assert source._fingerprint_batches.stack == []

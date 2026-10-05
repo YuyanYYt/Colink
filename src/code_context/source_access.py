@@ -10,7 +10,8 @@ import os
 import stat
 import threading
 import time
-from contextlib import contextmanager
+from collections import OrderedDict
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +20,9 @@ from code_context.models import content_hash
 from code_context.policy import MAX_FILE_BYTES, MAX_FILES, validate_path
 from code_context.scanner import ScanError, Scanner, _identity, _version
 from code_context.storage import MirrorError
+
+MAX_BATCH_PARENT_FDS = 128
+MAX_BATCH_PARENTS = 64
 
 
 class SourceError(MirrorError):
@@ -33,6 +37,92 @@ class SourceDocument:
     size: int
     mode: int
     version: tuple
+
+
+class _FingerprintBatch:
+    """One thread/nesting scope's bounded FD pool, never a source-body cache.
+
+    Each parent owns its complete nofollow ancestor stack (not just its leaf FD).
+    Eviction and batch exit validate every retained link before closing it.
+    """
+
+    def __init__(self, source, root, spec, root_fds, max_fds, max_parents):
+        self.source, self.root, self.spec = source, root, spec
+        self.root_fds, self.max_fds, self.max_parents = root_fds, max_fds, max_parents
+        self.parents = OrderedDict()
+        self.fds = 0
+        self.failed = False
+
+    def parent(self, path):
+        parts = path.split("/")
+        parent_path, name = path.rpartition("/")[0], parts[-1]
+        if not parent_path:
+            return self.root, name
+        if parent_path in self.parents:
+            self.parents.move_to_end(parent_path)
+            return self.parents[parent_path][1], name
+        depth = len(parts) - 1
+        if depth > self.max_fds or not self.max_parents:
+            self.source.metrics["fingerprint_batch_fallbacks"] += 1
+            return None  # Deep chains use the original single-path safety checks.
+        while self.parents and (
+            len(self.parents) >= self.max_parents or self.fds + depth > self.max_fds
+        ):
+            self.release(next(iter(self.parents)))
+            self.source.metrics["fingerprint_batch_parent_evictions"] += 1
+        with ExitStack() as stack:
+            fd, links = self.root, []
+            for index, part in enumerate(parts[:-1]):
+                relative = "/".join(parts[: index + 1])
+                info = self.source.scanner._stat(fd, part, relative)
+                if info is None or not stat.S_ISDIR(info.st_mode):
+                    raise SourceError("INVALID_PARENT: parent must be a real directory")
+                child = stack.enter_context(
+                    self.source.scanner._directory(fd, part, relative, info)
+                )
+                if _version(os.fstat(child)) != _version(info):
+                    raise SourceError("SOURCE_CHANGED: parent changed during validation")
+                links.append((fd, part, relative, _version(info)))
+                fd = child
+            self.parents[parent_path] = stack.pop_all(), fd, links
+            self.fds += depth
+            self.source.metrics["fingerprint_batch_parent_opens"] += depth
+            batches = self.source._fingerprint_batches.stack
+            metrics = self.source.metrics
+            metrics["fingerprint_batch_peak_parent_items"] = max(
+                metrics["fingerprint_batch_peak_parent_items"], sum(len(b.parents) for b in batches)
+            )
+            metrics["fingerprint_batch_peak_retained_fds"] = max(
+                metrics["fingerprint_batch_peak_retained_fds"],
+                sum(b.root_fds + b.fds for b in batches),
+            )
+            return fd, name
+
+    def release(self, path, *, validate=True):
+        stack, _, links = self.parents.pop(path)
+        self.fds -= len(links)
+        try:
+            if validate:
+                for parent, name, relative, expected in links:
+                    actual = self.source.scanner._stat(parent, name, relative)
+                    if actual is None or _version(actual) != expected:
+                        raise SourceError("SOURCE_CHANGED: parent link changed during validation")
+        finally:
+            # A body failure already rejects the batch; skip link validation then.
+            if validate:
+                stack.close()
+            else:
+                stack.__exit__(SourceError, SourceError("validation aborted"), None)
+
+    def close(self, *, validate=True):
+        error = None
+        for path in list(self.parents):
+            try:
+                self.release(path, validate=validate)
+            except (OSError, ScanError, SourceError):
+                error = True
+        if error:
+            raise SourceError("SOURCE_CHANGED: parent changed during batch validation") from None
 
 
 class SourceAccess:
@@ -51,7 +141,16 @@ class SourceAccess:
         self.source_id = hashlib.sha256(raw).hexdigest()
         self.lock = threading.RLock()
         self.metrics = {"body_reads": 0, "metadata_walks": 0}
+        self.metrics.update(
+            fingerprint_batches=0,
+            fingerprint_batch_parent_opens=0,
+            fingerprint_batch_parent_evictions=0,
+            fingerprint_batch_fallbacks=0,
+            fingerprint_batch_peak_parent_items=0,
+            fingerprint_batch_peak_retained_fds=0,
+        )
         self._fingerprints = SourceFingerprints(FingerprintCache(max_entries=4096), self.source_id)
+        self._fingerprint_batches = threading.local()
         self._ignore_cache = None
 
     def attach_fingerprint_cache(self, cache: FingerprintCache):
@@ -66,21 +165,19 @@ class SourceAccess:
             if self._fingerprints.cache is not cache:
                 self._fingerprints = SourceFingerprints(cache, self.source_id)
 
+    def _ignore_versions(self, root):
+        return tuple(
+            _version(info) if (info := self.scanner._stat(root, name, name)) else None
+            for name in (".gitignore", ".codecontextignore")
+        )
+
     def _ignore(self, root):
-        names = (".gitignore", ".codecontextignore")
-
-        def versions():
-            return tuple(
-                _version(info) if (info := self.scanner._stat(root, name, name)) else None
-                for name in names
-            )
-
-        before = versions()
+        before = self._ignore_versions(root)
         if self._ignore_cache is not None and before == self._ignore_cache[0]:
-            if versions() == before:
+            if self._ignore_versions(root) == before:
                 return self._ignore_cache[1]
         spec = self.scanner._load_ignore(root)
-        if versions() != before:
+        if self._ignore_versions(root) != before:
             raise SourceError("SOURCE_CHANGED: ignore policy changed while reading")
         self._ignore_cache = (before, spec)
         return spec
@@ -109,6 +206,102 @@ class SourceAccess:
     def ensure_available(self):
         with self.root_fd():
             pass
+
+    def _fingerprint_scope(self):
+        return (
+            self.source_id,
+            self.root,
+            self.root_identity,
+            self.ancestor_identity,
+            self.scanner,
+            self.scanner.root,
+            frozenset(self.scanner._excluded),
+        )
+
+    @contextmanager
+    def fingerprint_batch(self):
+        """Validate cached hashes with batch-scoped, nofollow parent FD reuse.
+
+        Source -> Registry (registered root_fd) -> Cache ordering is unchanged.
+        Independent nesting pools share a 64-parent / 128-retained-FD ceiling,
+        including pinned root ancestors; reserve another root stack for the final
+        authorization check. No pool/descriptor survives this context manager.
+        """
+        with self.lock:
+            batches = getattr(self._fingerprint_batches, "stack", [])
+            self._fingerprint_batches.stack = batches
+            root_fds = len(self.scanner.root.parts)
+            available = (
+                MAX_BATCH_PARENT_FDS - sum(b.root_fds + b.fds for b in batches) - 2 * root_fds
+            )
+            if available < 0:
+                raise SourceError("SOURCE_CHANGED: nested validation FD budget exceeded")
+            with self.root_fd() as root:
+                spec = self._ignore(root)
+                scope, version = self._fingerprint_scope(), _version(os.fstat(root))
+                ancestors = tuple(
+                    _version(os.lstat(p)) for p in reversed(self.scanner.root.parents)
+                )
+                ignore = self._ignore_cache[0]
+                batch = _FingerprintBatch(
+                    self,
+                    root,
+                    spec,
+                    root_fds,
+                    available,
+                    MAX_BATCH_PARENTS - sum(len(b.parents) for b in batches),
+                )
+                batches.append(batch)
+                self.metrics["fingerprint_batches"] += 1
+                try:
+                    try:
+                        yield self
+                    except BaseException:
+                        batch.close(validate=False)
+                        raise
+                    else:
+                        batch.close()
+                        # Re-enter virtual root_fd: registered sources recheck the
+                        # current workspace, project authorization and exclusions.
+                        with self.root_fd() as current:
+                            if (
+                                batch.failed
+                                or scope != self._fingerprint_scope()
+                                or version != _version(os.fstat(root))
+                                or version != _version(os.fstat(current))
+                                or ancestors
+                                != tuple(
+                                    _version(os.lstat(p))
+                                    for p in reversed(self.scanner.root.parents)
+                                )
+                                or ignore != self._ignore_versions(current)
+                            ):
+                                raise SourceError("SOURCE_CHANGED: validation batch scope changed")
+                finally:
+                    batches.pop()
+
+    @contextmanager
+    def _fingerprint_parent(self, path):
+        batches = getattr(self._fingerprint_batches, "stack", ())
+        if not batches:
+            with self.parent_fd(path) as value:
+                yield value
+            return
+        batch = batches[-1]
+        if batch.failed:
+            raise SourceError("SOURCE_CHANGED: validation batch was invalidated")
+        try:
+            validate_path(path)
+        except ValueError:
+            raise SourceError("INVALID_PATH: use a normalized project-relative path") from None
+        if self.scanner._path_problem(path, batch.spec):
+            raise SourceError("PATH_EXCLUDED: path is outside the allowed source policy")
+        parent = batch.parent(path)
+        if parent is None:
+            with self.parent_fd(path) as value:
+                yield value
+        else:
+            yield parent
 
     @contextmanager
     def parent_fd(self, path: str, *, directory=False):
@@ -154,7 +347,7 @@ class SourceAccess:
             # Stable dev/inode/size/mtime/ctime let repeated context validation
             # avoid re-reading unchanged bodies. Actual source reads and every
             # write precondition still use the real complete content.
-            with self.parent_fd(path) as (parent, name):
+            with self._fingerprint_parent(path) as (parent, name):
                 before = self.scanner._stat(parent, name, path)
                 cached = self._fingerprints.get(path)
                 after = self.scanner._stat(parent, name, path)
@@ -168,6 +361,9 @@ class SourceAccess:
                     return cached[1]
             return self.read(path).sha256
         except SourceError as exc:
+            batches = getattr(self._fingerprint_batches, "stack", ())
+            if batches:
+                batches[-1].failed = True
             if str(exc).startswith(
                 ("FILE_UNAVAILABLE:", "FILE_EXCLUDED:", "PATH_EXCLUDED:", "INVALID_PARENT:")
             ):
