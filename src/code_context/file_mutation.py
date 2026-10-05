@@ -21,8 +21,14 @@ import re
 import stat
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
+from code_context.file_attributes import (
+    FileAttributes,
+    apply_prepared_file_attributes,
+    capture_file_attributes,
+    ensure_private_staging,
+)
 from code_context.policy import MAX_FILE_BYTES, content_problem
 from code_context.scanner import _version
 from code_context.source_access import SourceAccess, SourceDocument, SourceError
@@ -58,6 +64,7 @@ class PreparedFile:
     size: int
     mode: int
     source_id: str
+    attribute_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +72,7 @@ class _ReadFile:
     raw: bytes
     sha256: str
     info: os.stat_result
+    attributes: FileAttributes | None = None
 
 
 def _identity(info):
@@ -114,6 +122,7 @@ def _validate_prepared(source, prepared):
         or isinstance(prepared.size, bool)
         or not 0 <= prepared.size <= MAX_FILE_BYTES
         or not _valid_mode(prepared.mode)
+        or (prepared.attribute_sha256 is not None and not _valid_hash(prepared.attribute_sha256))
     ):
         raise FileMutationError("INVALID_PREPARED: invalid prepared file metadata")
     if prepared.source_id != source.source_id:
@@ -143,7 +152,7 @@ def _check_regular(info, links):
         raise FileMutationError("UNSAFE_FILE: expected an owned regular file with allowed links")
 
 
-def _read_opened(parent, name, fd, *, links=(1,)):
+def _read_opened(parent, name, fd, *, links=(1,), attributes=False):
     before = os.fstat(fd)
     _check_regular(before, links)
     if before.st_size > MAX_FILE_BYTES:
@@ -156,6 +165,7 @@ def _read_opened(parent, name, fd, *, links=(1,)):
             break
         chunks.append(chunk)
         remaining -= len(chunk)
+    attribute_record = capture_file_attributes(fd) if attributes else None
     after, named = os.fstat(fd), _stat(parent, name)
     _check_regular(after, links)
     _check_regular(named, links)
@@ -169,14 +179,14 @@ def _read_opened(parent, name, fd, *, links=(1,)):
     raw = b"".join(chunks)
     if len(raw) > MAX_FILE_BYTES or len(raw) != after.st_size:
         raise FileMutationError("FILE_CHANGED: complete bounded verification was not possible")
-    return _ReadFile(raw, hashlib.sha256(raw).hexdigest(), after)
+    return _ReadFile(raw, hashlib.sha256(raw).hexdigest(), after, attribute_record)
 
 
-def _read_named(parent, name, *, links=(1,)):
+def _read_named(parent, name, *, links=(1,), attributes=False):
     _check_regular(_stat(parent, name), links)
     fd = os.open(name, _READ_FLAGS, dir_fd=parent)
     try:
-        return _read_opened(parent, name, fd, links=links)
+        return _read_opened(parent, name, fd, links=links, attributes=attributes)
     finally:
         os.close(fd)
 
@@ -187,8 +197,21 @@ def _check_new(actual, prepared):
         or actual.sha256 != prepared.sha256
         or len(actual.raw) != prepared.size
         or stat.S_IMODE(actual.info.st_mode) != prepared.mode
+        or (
+            prepared.attribute_sha256 is not None
+            and (actual.attributes is None or actual.attributes.sha256 != prepared.attribute_sha256)
+        )
     ):
         raise FileMutationError("TEMP_CHANGED: prepared content or identity no longer matches")
+
+
+def read_file_attributes(source: SourceAccess, expected: SourceDocument) -> FileAttributes:
+    """Capture necessary attributes bound to this actual document and source path."""
+    with source.parent_fd(expected.path) as (parent, name):
+        actual = _read_named(parent, name, attributes=True)
+        if actual.sha256 != expected.sha256 or _version(actual.info) != expected.version:
+            raise FileMutationError("SOURCE_CHANGED: attribute origin and source do not agree")
+        return actual.attributes
 
 
 def _installation_observed(parent, target, prepared, expected):
@@ -254,6 +277,8 @@ def prepare_file(
     mode: int,
     temp_name: str,
     on_created: Callable[[PreparedFile], None],
+    attributes: FileAttributes | None = None,
+    on_attributes=None,
 ) -> PreparedFile:
     """Create/register a private temp, then write, chmod, fsync and verify it.
 
@@ -273,6 +298,11 @@ def prepare_file(
             or not isinstance(temp_name, str)
             or _TEMP_NAME.fullmatch(temp_name) is None
             or not callable(on_created)
+            or (on_attributes is not None and not callable(on_attributes))
+            or (
+                attributes is not None
+                and (not isinstance(attributes, FileAttributes) or attributes.mode != mode)
+            )
         ):
             raise FileMutationError("INVALID_PREPARE: invalid temporary file parameters")
         with source.parent_fd(path) as (parent, _):
@@ -289,6 +319,7 @@ def prepare_file(
                     len(raw),
                     mode,
                     source.source_id,
+                    attributes.sha256 if attributes is not None else None,
                 )
                 try:
                     on_created(prepared)
@@ -296,11 +327,28 @@ def prepare_file(
                     raise FileMutationError(
                         "TEMP_JOURNAL_FAILED: creation record was not confirmed"
                     ) from None
-                os.fchmod(fd, mode)
+                if attributes is None and on_attributes is None:
+                    os.fchmod(fd, mode)  # Historical low-level callers remain compatible.
+                else:
+                    creation = ensure_private_staging(fd)
+                    if attributes is None:
+                        attributes = replace(creation, mode=mode)
+                        prepared = replace(prepared, attribute_sha256=attributes.sha256)
+                        on_attributes(prepared, attributes)
                 _write_all(fd, raw)
+                if attributes is not None:
+                    apply_prepared_file_attributes(
+                        fd,
+                        attributes,
+                        identity=prepared.temp_identity,
+                        size=prepared.size,
+                        sha256=prepared.sha256,
+                    )
                 os.fsync(fd)
                 os.fsync(parent)
-                _check_new(_read_opened(parent, temp_name, fd), prepared)
+                _check_new(
+                    _read_opened(parent, temp_name, fd, attributes=attributes is not None), prepared
+                )
             finally:
                 os.close(fd)
         return prepared
@@ -313,7 +361,10 @@ def prepare_file(
 
 
 def commit_file(
-    source: SourceAccess, prepared: PreparedFile, expected: SourceDocument | None
+    source: SourceAccess,
+    prepared: PreparedFile,
+    expected: SourceDocument | None,
+    expected_attributes: FileAttributes | None = None,
 ) -> SourceDocument:
     """Install without blind overwrites, preserving the temporary entry.
 
@@ -331,6 +382,15 @@ def commit_file(
     committed = False
     try:
         _validate_prepared(source, prepared)
+        if (
+            prepared.attribute_sha256 is not None
+            and expected is not None
+            and (
+                not isinstance(expected_attributes, FileAttributes)
+                or expected_attributes.mode != expected.mode
+            )
+        ):
+            raise FileMutationError("INVALID_EXPECTED: complete original attributes required")
         if expected is not None and (
             not isinstance(expected, SourceDocument)
             or expected.path != prepared.path
@@ -340,7 +400,8 @@ def commit_file(
             raise FileMutationError("INVALID_EXPECTED: invalid expected source document")
         with source.parent_fd(prepared.path) as (parent, target):
             _check_parent(parent, prepared)
-            _check_new(_read_named(parent, prepared.temp_name), prepared)
+            attributes = prepared.attribute_sha256 is not None
+            _check_new(_read_named(parent, prepared.temp_name, attributes=attributes), prepared)
             if expected is None:
                 if _stat(parent, target) is not None:
                     raise FileMutationError("TARGET_EXISTS: new target must not already exist")
@@ -357,15 +418,21 @@ def commit_file(
                     raise
                 committed = True
                 os.fsync(parent)
-                _check_new(_read_named(parent, prepared.temp_name, links=(2,)), prepared)
-                installed = _read_named(parent, target, links=(2,))
+                _check_new(
+                    _read_named(parent, prepared.temp_name, links=(2,), attributes=attributes),
+                    prepared,
+                )
+                installed = _read_named(parent, target, links=(2,), attributes=attributes)
             else:
-                before = _read_named(parent, target)
+                before = _read_named(parent, target, attributes=expected_attributes is not None)
                 if (
                     before.sha256 != expected.sha256
                     or _version(before.info) != expected.version
                     or len(before.raw) != expected.size
                     or stat.S_IMODE(before.info.st_mode) != expected.mode
+                    or (
+                        expected_attributes is not None and before.attributes != expected_attributes
+                    )
                 ):
                     raise FileMutationError(
                         "SOURCE_CHANGED: target no longer matches the expected document"
@@ -377,17 +444,23 @@ def commit_file(
                     raise
                 committed = True
                 os.fsync(parent)
-                displaced = _read_named(parent, prepared.temp_name)
+                displaced = _read_named(
+                    parent, prepared.temp_name, attributes=expected_attributes is not None
+                )
                 if (
                     displaced.sha256 != expected.sha256
                     or _identity(displaced.info) != expected.version[:2]
                     or stat.S_IMODE(displaced.info.st_mode) != expected.mode
                     or len(displaced.raw) != expected.size
+                    or (
+                        expected_attributes is not None
+                        and displaced.attributes != expected_attributes
+                    )
                 ):
                     raise FileMutationError(
                         "SOURCE_CHANGED: exchanged target did not match the expected document"
                     )
-                installed = _read_named(parent, target)
+                installed = _read_named(parent, target, attributes=attributes)
             _check_new(installed, prepared)
             document = SourceDocument(
                 prepared.path,
@@ -415,6 +488,7 @@ def discard_prepared(
     prepared: PreparedFile,
     expected_sha: str,
     expected_identity: tuple[int, int],
+    expected_attributes: FileAttributes | None = None,
 ) -> None:
     """Unlink only the named, source/parent-bound, fully verified temporary entry.
 
@@ -431,18 +505,27 @@ def discard_prepared(
         _validate_prepared(source, prepared)
         if not _valid_hash(expected_sha) or not _valid_identity(expected_identity):
             raise FileMutationError("INVALID_DISCARD: invalid expected temporary metadata")
+        if prepared.attribute_sha256 is not None and not isinstance(
+            expected_attributes, FileAttributes
+        ):
+            raise FileMutationError("INVALID_DISCARD: complete registered attributes required")
         with source.parent_fd(prepared.path) as (parent, target):
             _check_parent(parent, prepared)
             if _stat(parent, prepared.temp_name) is not None:
-                actual = _read_named(parent, prepared.temp_name, links=(1, 2))
+                attributes = expected_attributes is not None
+                actual = _read_named(
+                    parent, prepared.temp_name, links=(1, 2), attributes=attributes
+                )
                 if actual.sha256 != expected_sha or _identity(actual.info) != expected_identity:
                     raise FileMutationError(
                         "TEMP_CHANGED: temporary object does not match its journaled state"
                     )
+                if attributes and actual.attributes != expected_attributes:
+                    raise FileMutationError("TEMP_CHANGED: temporary attributes changed")
                 linked = None
                 if actual.info.st_nlink == 2:
                     _check_new(actual, prepared)
-                    linked = _read_named(parent, target, links=(2,))
+                    linked = _read_named(parent, target, links=(2,), attributes=attributes)
                     _check_new(linked, prepared)
                 latest = _stat(parent, prepared.temp_name)
                 _check_regular(latest, (actual.info.st_nlink,))

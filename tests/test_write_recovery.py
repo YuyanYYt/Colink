@@ -140,7 +140,7 @@ def test_unknown_or_changed_material_is_preserved(parts, monkeypatch, kind):
     if kind == "unknown":
         task = begin(c)
 
-        def prepare(source, path, raw, mode, name, on_created):
+        def prepare(source, path, raw, mode, name, on_created, attributes=None, on_attributes=None):
             (source.root / name).write_text("unknown bytes")
             raise RuntimeError("creation identity never recorded")
 

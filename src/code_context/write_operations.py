@@ -15,7 +15,13 @@ import uuid
 from dataclasses import asdict
 
 from code_context.directory_mutation import commit_directory, prepare_directory
-from code_context.file_mutation import commit_file, discard_prepared, prepare_file
+from code_context.file_attributes import MAX_RECORD_BYTES
+from code_context.file_mutation import (
+    commit_file,
+    discard_prepared,
+    prepare_file,
+    read_file_attributes,
+)
 from code_context.policy import MAX_FILE_BYTES, content_problem, validate_path
 from code_context.recovery_store import encode_metadata
 from code_context.scanner import _version
@@ -106,7 +112,7 @@ class WriteOperations:
             raise WriteError("WRITE_FILE_CONFLICT: file differs from the task's last saved state")
         return previous
 
-    def _reserve(self, task_id, path, before, raw, previous, *, source):
+    def _reserve(self, task_id, path, before, raw, previous, *, source, attribute_bytes=0):
         bodies = {hashlib.sha256(raw).hexdigest(): raw}
         if before is not None:
             bodies[before.sha256] = before.content.encode("utf-8")
@@ -123,7 +129,7 @@ class WriteOperations:
             for row in touched
             if row["path"] != path and row["kind"] in {"modified", "created"}
         )
-        metadata = 64 * 1024 + (len(touched) + (previous is None)) * 1024
+        metadata = 64 * 1024 + (len(touched) + (previous is None)) * 1024 + 4 * attribute_bytes
         self.c.reserve_growth(
             task_id,
             object_bytes=missing,
@@ -161,7 +167,9 @@ class WriteOperations:
         except Exception:
             pass  # Existing pending operation still gates restart and publication.
 
-    def _touch(self, task_id, path, before, previous, after):
+    def _touch(
+        self, task_id, path, before, previous, after, *, attributes=None, origin_attributes=None
+    ):
         with self.store.transaction() as db:
             if previous is None:
                 db.execute(
@@ -181,11 +189,47 @@ class WriteOperations:
                     "UPDATE files SET last_hash=?,last_version=? WHERE task_id=? AND path=?",
                     (after.sha256, encode_metadata(after.version), task_id, path),
                 )
+            if attributes is not None:
+                db.execute(
+                    "INSERT INTO file_attributes VALUES(?,?,?,?) "
+                    "ON CONFLICT(task_id,path) DO UPDATE SET last_record=excluded.last_record",
+                    (
+                        task_id,
+                        path,
+                        encode_metadata(origin_attributes.to_record())
+                        if origin_attributes
+                        else None,
+                        encode_metadata(attributes.to_record()),
+                    ),
+                )
 
     def _install(self, project, task_id, request_id, path, digest, before, previous, raw, preview):
         c, source = self.c, self.c._authorized(project)
-        self._reserve(task_id, path, before, raw, previous, source=source)
+        from code_context.write_attributes import task_attributes, verify_created_parents
+
+        verify_created_parents(c, task_id, source, path)
         mode = before.mode if before is not None else 0o644
+        before_attributes = read_file_attributes(source, before) if before is not None else None
+        after_attributes = before_attributes
+        if previous is not None and before_attributes != task_attributes(c, task_id, path):
+            raise WriteError("WRITE_ATTRIBUTE_CONFLICT: source attributes differ from task state")
+        before_record = (
+            encode_metadata(before_attributes.to_record()) if before_attributes else None
+        )
+        after_record = encode_metadata(after_attributes.to_record()) if after_attributes else None
+        self._reserve(
+            task_id,
+            path,
+            before,
+            raw,
+            previous,
+            source=source,
+            attribute_bytes=(
+                len((before_record or "").encode()) + len(after_record.encode())
+                if after_record
+                else MAX_RECORD_BYTES
+            ),
+        )
         prefix = f"{task_id}:op:{request_id}:"
         metadata = {
             "kind": "apply_edit" if before is not None else "create_file",
@@ -199,11 +243,18 @@ class WriteOperations:
             "after_size": len(raw),
             "mode": mode,
             "first_touch": previous is None,
+            "attributes_required": True,
             "preview": preview,
         }
         self._record(task_id, request_id, digest, metadata)
         c.inflight_project = project
         try:
+            if after_record is not None:
+                with self.store.transaction() as db:
+                    db.execute(
+                        "INSERT INTO operation_attributes VALUES(?,?,?,?)",
+                        (task_id, request_id, before_record, after_record),
+                    )
             if before is not None:
                 body = before.content.encode("utf-8")
                 self.store.put_blob(body, prefix + "before")
@@ -217,26 +268,62 @@ class WriteOperations:
                 metadata["prepared"] = asdict(receipt)
                 self._metadata(task_id, request_id, metadata)
 
-            prepared = prepare_file(source, path, raw, mode, metadata["temp_name"], created)
+            def attributes_registered(receipt, attributes):
+                nonlocal after_attributes
+                after_attributes = attributes
+                metadata["prepared"] = asdict(receipt)
+                with self.store.transaction() as db:
+                    db.execute(
+                        "INSERT INTO operation_attributes VALUES(?,?,NULL,?)",
+                        (task_id, request_id, encode_metadata(attributes.to_record())),
+                    )
+                    db.execute(
+                        "UPDATE operations SET metadata=? WHERE task_id=? AND request_id=?",
+                        (encode_metadata(metadata), task_id, request_id),
+                    )
+
+            prepared = prepare_file(
+                source,
+                path,
+                raw,
+                mode,
+                metadata["temp_name"],
+                created,
+                after_attributes,
+                attributes_registered if before is None else None,
+            )
             c._authorized(project, _allow_pending=True)
             metadata["phase"] = "installing"
             self._metadata(task_id, request_id, metadata, state="committing")
-            after = commit_file(source, prepared, before)
+            after = commit_file(source, prepared, before, before_attributes)
             metadata["phase"] = "installed"
             metadata["installed_version"] = after.version
             self._metadata(task_id, request_id, metadata)
-            self._touch(task_id, path, before, previous, after)
+            self._touch(
+                task_id,
+                path,
+                before,
+                previous,
+                after,
+                attributes=after_attributes,
+                origin_attributes=before_attributes,
+            )
             # The installed result is durable before any source temp is removed.
             discard_prepared(
                 source,
                 prepared,
                 before.sha256 if before else prepared.sha256,
                 before.version[:2] if before else prepared.temp_identity,
+                before_attributes or after_attributes,
             )
             final = source.read(path)
             if final.sha256 != after.sha256 or final.version[:2] != after.version[:2]:
                 raise WriteError("WRITE_FILE_CONFLICT: installed file changed before final result")
-            self._touch(task_id, path, before, self._file(task_id, path), final)
+            if read_file_attributes(source, final) != after_attributes:
+                raise WriteError("WRITE_ATTRIBUTE_CONFLICT: installed attributes changed")
+            self._touch(
+                task_id, path, before, self._file(task_id, path), final, attributes=after_attributes
+            )
             result = {
                 "project_id": project,
                 "task_id": task_id,
@@ -260,6 +347,10 @@ class WriteOperations:
                 db.execute(
                     "DELETE FROM object_refs WHERE owner IN (?,?)",
                     (prefix + "before", prefix + "after"),
+                )
+                db.execute(
+                    "DELETE FROM operation_attributes WHERE task_id=? AND request_id=?",
+                    (task_id, request_id),
                 )
             self.store.collect_unreferenced()
             try:
@@ -416,6 +507,9 @@ class WriteOperations:
             if replay is not None:
                 return replay
             with source.lock, source.parent_fd(path, directory=True) as (parent, name):
+                from code_context.write_attributes import verify_created_parents
+
+                verify_created_parents(self.c, task_id, source, path)
                 if source.scanner._stat(parent, name, path) is not None:
                     raise WriteError("WRITE_TARGET_EXISTS: new directory must not adopt any object")
                 if self._file(task_id, path) is not None:
@@ -426,7 +520,7 @@ class WriteOperations:
                 self.c.reserve_growth(
                     task_id,
                     source_temp_bytes=4096,
-                    metadata_bytes=64 * 1024,
+                    metadata_bytes=64 * 1024 + 4 * MAX_RECORD_BYTES,
                     additional_files=1,
                     source=source,
                 )
@@ -436,6 +530,7 @@ class WriteOperations:
                     "phase": "preparing",
                     "temp_name": ".colink-write-" + uuid.uuid4().hex + ".tmp",
                     "mode": 0o755,
+                    "attributes_required": True,
                 }
                 self._record(task_id, request_id, digest, metadata)
                 self.c.inflight_project = project
@@ -445,8 +540,20 @@ class WriteOperations:
                         metadata["prepared"] = asdict(prepared)
                         self._metadata(task_id, request_id, metadata)
 
+                    def attributes_registered(prepared, attributes):
+                        metadata["prepared"] = asdict(prepared)
+                        with self.store.transaction() as db:
+                            db.execute(
+                                "INSERT INTO operation_attributes VALUES(?,?,NULL,?)",
+                                (task_id, request_id, encode_metadata(attributes.to_record())),
+                            )
+                            db.execute(
+                                "UPDATE operations SET metadata=? WHERE task_id=? AND request_id=?",
+                                (encode_metadata(metadata), task_id, request_id),
+                            )
+
                     prepared = prepare_directory(
-                        source, path, 0o755, metadata["temp_name"], created
+                        source, path, 0o755, metadata["temp_name"], created, attributes_registered
                     )
                     self.c._authorized(project, _allow_pending=True)
                     metadata["phase"] = "installing"
@@ -475,9 +582,16 @@ class WriteOperations:
                                         "identity": receipt.directory_identity,
                                         "mode": receipt.mode,
                                         "parent_identity": receipt.parent_identity,
+                                        "attribute_sha256": receipt.attribute_sha256,
                                     }
                                 ),
                             ),
+                        )
+                        db.execute(
+                            "INSERT INTO file_attributes "
+                            "SELECT task_id,?,NULL,after_record FROM operation_attributes "
+                            "WHERE task_id=? AND request_id=?",
+                            (path, task_id, request_id),
                         )
                         db.execute(
                             "UPDATE operations SET state='done',metadata=?,result=? "
@@ -488,6 +602,10 @@ class WriteOperations:
                                 task_id,
                                 request_id,
                             ),
+                        )
+                        db.execute(
+                            "DELETE FROM operation_attributes WHERE task_id=? AND request_id=?",
+                            (task_id, request_id),
                         )
                     try:
                         self.c.on_change(project)

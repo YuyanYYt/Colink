@@ -21,6 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from code_context.directory_mutation import _rename_excl
+from code_context.file_attributes import FileAttributes, capture_file_attributes
 from code_context.file_mutation import (
     _READ_FLAGS,
     FileMutationError,
@@ -62,6 +63,7 @@ class RemovedFile:
     sha256: str
     size: int
     source_id: str
+    attribute_sha256: str | None = None
 
 
 def _valid_temp(name):
@@ -110,6 +112,7 @@ def _validate_receipt(source, receipt):
         or not _valid_mode(receipt.mode)
         or not _valid_hash(receipt.sha256)
         or not _valid_size(receipt.size)
+        or (receipt.attribute_sha256 is not None and not _valid_hash(receipt.attribute_sha256))
     ):
         raise FileRemovalError("INVALID_RECEIPT: invalid registered removal bindings")
     if receipt.source_id != source.source_id:
@@ -132,6 +135,10 @@ def _check_isolated(actual, receipt):
         or actual.sha256 != receipt.sha256
         or len(actual.raw) != receipt.size
         or stat.S_IMODE(actual.info.st_mode) != receipt.mode
+        or (
+            receipt.attribute_sha256 is not None
+            and (actual.attributes is None or actual.attributes.sha256 != receipt.attribute_sha256)
+        )
     ):
         raise FileRemovalError(
             "ISOLATED_CHANGED: isolated file does not match its registered state"
@@ -157,7 +164,8 @@ def _unlink_isolated(parent, target, receipt):
     _check_regular(_stat(parent, receipt.temp_name), (1,))
     fd = os.open(receipt.temp_name, _READ_FLAGS, dir_fd=parent)
     try:
-        actual = _read_opened(parent, receipt.temp_name, fd)
+        attributes = receipt.attribute_sha256 is not None
+        actual = _read_opened(parent, receipt.temp_name, fd, attributes=attributes)
         _check_isolated(actual, receipt)
         latest, opened = _stat(parent, receipt.temp_name), os.fstat(fd)
         _check_regular(latest, (1,))
@@ -167,6 +175,8 @@ def _unlink_isolated(parent, target, receipt):
         _target_absent(parent, target)
         os.unlink(receipt.temp_name, dir_fd=parent)
         removed = os.fstat(fd)
+        if attributes and capture_file_attributes(fd).sha256 != receipt.attribute_sha256:
+            raise FileRemovalError("ISOLATED_CHANGED: removed attributes no longer agree")
         if (
             _identity(removed) != receipt.file_identity
             or removed.st_nlink != 0
@@ -212,6 +222,7 @@ def remove_created_file(
     expected: SourceDocument,
     temp_name: str,
     on_moved: Callable[[RemovedFile], None],
+    expected_attributes: FileAttributes | None = None,
 ) -> RemovedFile:
     """Remove one task-created file after caller authorization and before-blob.
 
@@ -232,12 +243,13 @@ def remove_created_file(
         if not _valid_temp(temp_name) or not callable(on_moved):
             raise FileRemovalError("INVALID_REMOVE: invalid isolation parameters")
         with source.parent_fd(expected.path) as (parent, target):
-            actual = _read_named(parent, target)
+            actual = _read_named(parent, target, attributes=expected_attributes is not None)
             if (
                 actual.sha256 != expected.sha256
                 or _version(actual.info) != expected.version
                 or len(actual.raw) != expected.size
                 or stat.S_IMODE(actual.info.st_mode) != expected.mode
+                or (expected_attributes is not None and actual.attributes != expected_attributes)
             ):
                 raise FileRemovalError(
                     "SOURCE_CHANGED: rollback file no longer matches expected state"
@@ -253,6 +265,7 @@ def remove_created_file(
                 expected.sha256,
                 expected.size,
                 source.source_id,
+                expected_attributes.sha256 if expected_attributes is not None else None,
             )
             try:
                 _rename_excl(parent, target, temp_name)

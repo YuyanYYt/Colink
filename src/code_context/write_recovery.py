@@ -14,6 +14,7 @@ import stat
 from code_context.directory_mutation import PreparedDirectory, discard_directory_temp
 from code_context.file_mutation import PreparedFile, _read_named, discard_prepared
 from code_context.recovery_store import encode_metadata
+from code_context.scanner import _version
 from code_context.source_access import SourceDocument
 from code_context.write_coordinator import WriteError
 
@@ -74,10 +75,15 @@ class WriteRecovery:
             if (info.st_dev, info.st_ino) != receipt.parent_identity:
                 raise WriteError("WRITE_RECOVERY_SCOPE: the registered parent was replaced")
 
-    def _verify_captured(self, source, receipt, before):
+    def _verify_captured(self, source, receipt, before, attributes=None):
         """Verify the real exchanged object before labeling a swap confirmed."""
         with source.parent_fd(receipt.path) as (parent, target):
-            actual = _read_named(parent, receipt.temp_name, links=(1,) if before else (1, 2))
+            actual = _read_named(
+                parent,
+                receipt.temp_name,
+                links=(1,) if before else (1, 2),
+                attributes=attributes is not None,
+            )
             expected_sha = before.sha256 if before else receipt.sha256
             expected_identity = before.version[:2] if before else receipt.temp_identity
             expected_mode = before.mode if before else receipt.mode
@@ -85,12 +91,29 @@ class WriteRecovery:
                 actual.sha256 != expected_sha
                 or (actual.info.st_dev, actual.info.st_ino) != expected_identity
                 or stat.S_IMODE(actual.info.st_mode) != expected_mode
+                or (attributes is not None and actual.attributes != attributes)
             ):
                 raise WriteError("WRITE_RECOVERY_CONFLICT: captured content was not confirmed")
             if actual.info.st_nlink == 2:
-                linked = _read_named(parent, target, links=(2,))
+                linked = _read_named(parent, target, links=(2,), attributes=attributes is not None)
                 if linked.sha256 != actual.sha256 or linked.info.st_ino != actual.info.st_ino:
                     raise WriteError("WRITE_RECOVERY_CONFLICT: installation links no longer agree")
+                if attributes is not None and linked.attributes != attributes:
+                    raise WriteError("WRITE_RECOVERY_CONFLICT: linked attributes no longer agree")
+
+    def _attributes(self, operation):
+        from code_context.write_attributes import recorded_attributes
+
+        rows = self.store.query(
+            "SELECT * FROM operation_attributes WHERE task_id=? AND request_id=?",
+            (operation["task_id"], operation["request_id"]),
+        )
+        if not rows:
+            return None, None
+        return (
+            recorded_attributes(rows[0]["before_record"]) if rows[0]["before_record"] else None,
+            recorded_attributes(rows[0]["after_record"]),
+        )
 
     def _confirm_objects(self, task_id, request_id):
         prefix = f"{task_id}:op:{request_id}:"
@@ -127,6 +150,10 @@ class WriteRecovery:
             owners.append(f"{task_id}:origin:{metadata['path']}")
         with self.store.transaction() as db:
             db.executemany("DELETE FROM object_refs WHERE owner=?", ((owner,) for owner in owners))
+            db.execute(
+                "DELETE FROM operation_attributes WHERE task_id=? AND request_id=?",
+                (task_id, request_id),
+            )
         self.store.collect_unreferenced()
 
     def _abort(self, operation, metadata):
@@ -150,21 +177,38 @@ class WriteRecovery:
         current = self._current(source, metadata["path"])
         temp = self._temp(source, metadata)
         receipt = prepared_file(metadata["prepared"]) if metadata.get("prepared") else None
+        before_attributes, after_attributes = self._attributes(operation)
         if receipt is not None:
             self._binding(source, metadata, receipt)
+            if metadata.get("attributes_required") and (
+                after_attributes is None or receipt.attribute_sha256 != after_attributes.sha256
+            ):
+                raise WriteError("WRITE_RECOVERY_METADATA: complete temporary attributes required")
         before_matches = (current is None and metadata["before_hash"] is None) or (
             current is not None
             and current.sha256 == metadata["before_hash"]
             and current.version == tuple(metadata["before_version"])
             and current.mode == metadata["before_mode"]
         )
+        if current is not None and after_attributes is not None:
+            with source.parent_fd(metadata["path"]) as (parent, name):
+                actual = _read_named(parent, name, links=(1, 2), attributes=True)
+                if actual.sha256 != current.sha256 or _version(actual.info) != current.version:
+                    raise WriteError("WRITE_RECOVERY_CONFLICT: source changed during capture")
+                current_attributes = actual.attributes
+            if before_matches and current_attributes != before_attributes:
+                raise WriteError("WRITE_RECOVERY_CONFLICT: original attributes changed")
+        else:
+            current_attributes = None
         if before_matches:
             if temp is not None:
                 if receipt is None:
                     raise WriteError("WRITE_RECOVERY_UNKNOWN_TEMP: preserve an unregistered inode")
                 if stat.S_IMODE(temp.st_mode) not in {receipt.mode, 0o600}:
                     raise WriteError("WRITE_RECOVERY_CONFLICT: temporary permissions changed")
-                discard_prepared(source, receipt, receipt.sha256, receipt.temp_identity)
+                discard_prepared(
+                    source, receipt, receipt.sha256, receipt.temp_identity, after_attributes
+                )
             return self._abort(operation, metadata)
         if (
             receipt is None
@@ -173,6 +217,7 @@ class WriteRecovery:
             or current.sha256 != metadata["after_hash"]
             or current.size != metadata["after_size"]
             or current.mode != metadata["mode"]
+            or (after_attributes is not None and current_attributes != after_attributes)
         ):
             raise WriteError(
                 "WRITE_RECOVERY_CONFLICT: current source is not a provable operation state"
@@ -199,19 +244,28 @@ class WriteRecovery:
         ):
             raise WriteError("WRITE_RECOVERY_CONFLICT: registered temporary permissions changed")
         if temp is not None:
-            self._verify_captured(source, receipt, before)
+            self._verify_captured(source, receipt, before, before_attributes or after_attributes)
         metadata["phase"] = "installed"
         self.c.operations._metadata(operation["task_id"], operation["request_id"], metadata)
         previous = self.c.operations._file(operation["task_id"], metadata["path"])
         if previous is None and not metadata["first_touch"]:
             raise WriteError("WRITE_RECOVERY_METADATA: missing earlier task ownership")
-        self.c.operations._touch(operation["task_id"], metadata["path"], before, previous, current)
+        self.c.operations._touch(
+            operation["task_id"],
+            metadata["path"],
+            before,
+            previous,
+            current,
+            attributes=after_attributes,
+            origin_attributes=before_attributes,
+        )
         if temp is not None:
             discard_prepared(
                 source,
                 receipt,
                 before.sha256 if before else receipt.sha256,
                 before.version[:2] if before else receipt.temp_identity,
+                before_attributes or after_attributes,
             )
         final = source.read(metadata["path"])
         if (
@@ -220,12 +274,19 @@ class WriteRecovery:
             or final.mode != current.mode
         ):
             raise WriteError("WRITE_RECOVERY_CONFLICT: source changed during confirmation")
+        if after_attributes is not None:
+            from code_context.file_mutation import read_file_attributes
+
+            if read_file_attributes(source, final) != after_attributes:
+                raise WriteError("WRITE_RECOVERY_CONFLICT: final source attributes changed")
         self.c.operations._touch(
             operation["task_id"],
             metadata["path"],
             before,
             self.c.operations._file(operation["task_id"], metadata["path"]),
             final,
+            attributes=after_attributes,
+            origin_attributes=before_attributes,
         )
         result = {
             "project_id": task["project_id"],
@@ -259,8 +320,13 @@ class WriteRecovery:
         current = self._current(source, metadata["path"], directory=True)
         temp = self._temp(source, metadata, directory=True)
         receipt = prepared_directory(metadata["prepared"]) if metadata.get("prepared") else None
+        _before_attributes, after_attributes = self._attributes(operation)
         if receipt is not None:
             self._binding(source, metadata, receipt, directory=True)
+            if metadata.get("attributes_required") and (
+                after_attributes is None or receipt.attribute_sha256 != after_attributes.sha256
+            ):
+                raise WriteError("WRITE_RECOVERY_METADATA: complete directory attributes required")
         if current is None:
             if temp is not None:
                 if receipt is None:
@@ -278,6 +344,16 @@ class WriteRecovery:
             or current.st_uid != os.geteuid()
         ):
             raise WriteError("WRITE_RECOVERY_CONFLICT: directory installation cannot be confirmed")
+        if after_attributes is not None:
+            from code_context.write_attributes import directory_attributes
+
+            if (
+                directory_attributes(
+                    source, metadata["path"], receipt.directory_identity, receipt.mode
+                )
+                != after_attributes
+            ):
+                raise WriteError("WRITE_RECOVERY_CONFLICT: installed directory attributes changed")
         result = {
             "project_id": task["project_id"],
             "task_id": task["task_id"],
@@ -300,6 +376,7 @@ class WriteRecovery:
                             "identity": receipt.directory_identity,
                             "mode": receipt.mode,
                             "parent_identity": receipt.parent_identity,
+                            "attribute_sha256": receipt.attribute_sha256,
                         }
                     ),
                 ),
@@ -313,6 +390,19 @@ class WriteRecovery:
                     task["task_id"],
                     operation["request_id"],
                 ),
+            )
+            if after_attributes is not None:
+                db.execute(
+                    "INSERT OR REPLACE INTO file_attributes VALUES(?,?,NULL,?)",
+                    (
+                        task["task_id"],
+                        metadata["path"],
+                        encode_metadata(after_attributes.to_record()),
+                    ),
+                )
+            db.execute(
+                "DELETE FROM operation_attributes WHERE task_id=? AND request_id=?",
+                (task["task_id"], operation["request_id"]),
             )
         return {"state": "created", "source_mutation_repeated": False}
 

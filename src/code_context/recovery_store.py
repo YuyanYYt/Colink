@@ -60,6 +60,12 @@ CREATE TABLE IF NOT EXISTS operations (
     metadata TEXT NOT NULL, result TEXT, sequence INTEGER NOT NULL,
     PRIMARY KEY (task_id, request_id), UNIQUE(task_id, sequence)
 );
+CREATE TABLE IF NOT EXISTS operation_attributes (
+    task_id TEXT NOT NULL, request_id TEXT NOT NULL,
+    before_record TEXT, after_record TEXT NOT NULL,
+    PRIMARY KEY (task_id, request_id),
+    FOREIGN KEY (task_id, request_id) REFERENCES operations(task_id, request_id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS objects (
     sha256 TEXT PRIMARY KEY, size INTEGER NOT NULL, state TEXT NOT NULL, identity TEXT
 );

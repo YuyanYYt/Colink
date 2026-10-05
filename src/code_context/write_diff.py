@@ -45,6 +45,9 @@ def verify_task_files(c, task, source):
             if after is None or _version(before) != _version(after):
                 raise WriteError("WRITE_DIFF_CONFLICT: a task path changed during validation")
     source.ensure_available()
+    from code_context.write_attributes import verify_task_attributes
+
+    verify_task_attributes(c, task, source, rows)
     return rows
 
 

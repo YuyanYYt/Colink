@@ -19,8 +19,9 @@ import re
 import stat
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
+from code_context.file_attributes import capture_directory_attributes
 from code_context.file_mutation import FileMutationError
 from code_context.scanner import _version
 from code_context.source_access import SourceAccess
@@ -48,6 +49,7 @@ class PreparedDirectory:
     directory_identity: tuple[int, int]
     mode: int
     source_id: str
+    attribute_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,7 @@ class DirectoryReceipt:
     directory_identity: tuple[int, int]
     mode: int
     source_id: str
+    attribute_sha256: str | None = None
 
 
 def _identity(info):
@@ -91,6 +94,10 @@ def _validate_prepared(source, prepared):
         or not _valid_identity(prepared.parent_identity)
         or not _valid_identity(prepared.directory_identity)
         or not _valid_mode(prepared.mode)
+        or (
+            prepared.attribute_sha256 is not None
+            and re.fullmatch(r"[a-f0-9]{64}", prepared.attribute_sha256) is None
+        )
     ):
         raise DirectoryMutationError("INVALID_PREPARED: invalid directory bindings")
     if prepared.source_id != source.source_id:
@@ -122,12 +129,14 @@ def _check_directory(info, identity=None, modes=None):
         )
 
 
-def _verify_opened(parent, name, fd, identity, modes):
+def _verify_opened(parent, name, fd, identity, modes, attribute_sha256=None):
     before = os.fstat(fd)
     _check_directory(before, identity, modes)
     with os.scandir(fd) as entries:
         if next(entries, None) is not None:
             raise DirectoryMutationError("DIRECTORY_NOT_EMPTY: directory contains entries")
+    if attribute_sha256 is not None and capture_directory_attributes(fd).sha256 != attribute_sha256:
+        raise DirectoryMutationError("DIRECTORY_CHANGED: necessary directory attributes changed")
     after, named = os.fstat(fd), _stat(parent, name)
     _check_directory(after, identity, modes)
     _check_directory(named, identity, modes)
@@ -143,12 +152,12 @@ def _verify_opened(parent, name, fd, identity, modes):
     return after
 
 
-def _inspect(parent, name, identity, modes):
+def _inspect(parent, name, identity, modes, attribute_sha256=None):
     before = _stat(parent, name)
     _check_directory(before, identity, modes)
     fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent)
     try:
-        actual = _verify_opened(parent, name, fd, identity, modes)
+        actual = _verify_opened(parent, name, fd, identity, modes, attribute_sha256)
         if _version(before) != _version(actual):
             raise DirectoryMutationError("DIRECTORY_CHANGED: directory changed before inspection")
         return actual
@@ -235,6 +244,7 @@ def prepare_directory(
     mode: int,
     temp_name: str,
     on_created: Callable[[PreparedDirectory], None],
+    on_attributes=None,
 ) -> PreparedDirectory:
     """Exclusively mkdir a private 0700 temp, register its inode, then chmod/fsync.
 
@@ -252,6 +262,7 @@ def prepare_directory(
             or not _valid_mode(mode)
             or not _valid_temp(temp_name)
             or not callable(on_created)
+            or (on_attributes is not None and not callable(on_attributes))
         ):
             raise DirectoryMutationError(
                 "INVALID_PREPARE: invalid directory preparation parameters"
@@ -277,6 +288,18 @@ def prepare_directory(
                 os.fsync(fd)
                 os.fsync(parent)
                 _verify_opened(parent, temp_name, fd, prepared.directory_identity, (mode,))
+                if on_attributes is not None:
+                    attributes = capture_directory_attributes(fd)
+                    prepared = replace(prepared, attribute_sha256=attributes.sha256)
+                    on_attributes(prepared, attributes)
+                    _verify_opened(
+                        parent,
+                        temp_name,
+                        fd,
+                        prepared.directory_identity,
+                        (mode,),
+                        attributes.sha256,
+                    )
             finally:
                 os.close(fd)
         return prepared
@@ -296,18 +319,31 @@ def commit_directory(source: SourceAccess, prepared: PreparedDirectory) -> Direc
         _validate_prepared(source, prepared)
         with source.parent_fd(prepared.path, directory=True) as (parent, target):
             _check_parent(parent, prepared)
-            _inspect(parent, prepared.temp_name, prepared.directory_identity, (prepared.mode,))
+            _inspect(
+                parent,
+                prepared.temp_name,
+                prepared.directory_identity,
+                (prepared.mode,),
+                prepared.attribute_sha256,
+            )
             if _stat(parent, target) is not None:
                 raise DirectoryMutationError("DESTINATION_EXISTS: directory target is occupied")
             _move(parent, prepared.temp_name, target, prepared.directory_identity, changed)
             os.fsync(parent)
-            _inspect(parent, target, prepared.directory_identity, (prepared.mode,))
+            _inspect(
+                parent,
+                target,
+                prepared.directory_identity,
+                (prepared.mode,),
+                prepared.attribute_sha256,
+            )
             receipt = DirectoryReceipt(
                 prepared.path,
                 prepared.parent_identity,
                 prepared.directory_identity,
                 prepared.mode,
                 prepared.source_id,
+                prepared.attribute_sha256,
             )
         return receipt
     except BaseException as exc:
@@ -316,8 +352,8 @@ def commit_directory(source: SourceAccess, prepared: PreparedDirectory) -> Direc
         )
 
 
-def _remove_empty_temp(parent, name, identity, modes, state):
-    actual = _inspect(parent, name, identity, modes)
+def _remove_empty_temp(parent, name, identity, modes, state, attribute_sha256=None):
+    actual = _inspect(parent, name, identity, modes, attribute_sha256)
     latest = _stat(parent, name)
     _check_directory(latest, identity, modes)
     if _version(latest) != _version(actual):
@@ -357,6 +393,7 @@ def discard_directory_temp(source: SourceAccess, prepared: PreparedDirectory) ->
                     prepared.directory_identity,
                     (prepared.mode, 0o700),
                     changed,
+                    prepared.attribute_sha256,
                 )
     except BaseException as exc:
         _raise_failure(
@@ -371,6 +408,7 @@ def remove_created_directory(
     expected_mode: int,
     temp_name: str,
     on_moved: Callable[[PreparedDirectory], None],
+    expected_attribute_sha256=None,
 ) -> None:
     """Isolate a caller-journaled created directory, record its move, then rmdir.
 
@@ -395,7 +433,7 @@ def remove_created_directory(
                 "INVALID_REMOVE: invalid registered directory removal parameters"
             )
         with source.parent_fd(path, directory=True) as (parent, target):
-            _inspect(parent, target, expected_identity, (expected_mode,))
+            _inspect(parent, target, expected_identity, (expected_mode,), expected_attribute_sha256)
             if _stat(parent, temp_name) is not None:
                 raise DirectoryMutationError(
                     "DESTINATION_EXISTS: isolation temporary name is occupied"
@@ -407,6 +445,7 @@ def remove_created_directory(
                 expected_identity,
                 expected_mode,
                 source.source_id,
+                expected_attribute_sha256,
             )
             _move(parent, target, temp_name, expected_identity, changed)
             try:
@@ -421,7 +460,12 @@ def remove_created_directory(
             with source.parent_fd(path, directory=True) as (current_parent, _):
                 _check_parent(current_parent, prepared)
                 _remove_empty_temp(
-                    current_parent, temp_name, expected_identity, (expected_mode,), changed
+                    current_parent,
+                    temp_name,
+                    expected_identity,
+                    (expected_mode,),
+                    changed,
+                    expected_attribute_sha256,
                 )
         return None
     except BaseException as exc:
