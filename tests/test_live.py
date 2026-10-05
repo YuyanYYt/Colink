@@ -44,8 +44,7 @@ def test_project_context_and_history_never_silently_fall_back(backend):
     for selector in ["previous", "snap_" + "0" * 32, "live_unknown"]:
         with pytest.raises(SourceError):
             backend.resolve_snapshot("a", selector)
-    with pytest.raises(SourceError, match="LIVE_HISTORY_UNAVAILABLE"):
-        backend.get_recent_diff("a", handle)
+    assert backend.get_recent_diff("a", handle)["reason"] == "NO_TASK_BASELINE"
     with pytest.raises(SourceError, match="PROJECT_NOT_AUTHORIZED"):
         backend.resolve_snapshot("unknown")
 

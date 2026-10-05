@@ -83,10 +83,12 @@ class WriteCoordinator:
         from code_context.write_diff import TaskDiff
         from code_context.write_operations import WriteOperations
         from code_context.write_recovery import WriteRecovery
+        from code_context.write_rollback import WriteRollback
 
         self.operations = WriteOperations(self)
         self.diff = TaskDiff(self)
         self.recovery = WriteRecovery(self)
+        self.rollback = WriteRollback(self)
 
     def _pending(self):
         return bool(
@@ -165,7 +167,7 @@ class WriteCoordinator:
             active = next((row for row in tasks if row["state"] not in TERMINAL), None)
             return {
                 "write_enabled": bool(self.grants) and not self.stop_requested.is_set(),
-                "write_available": False,  # No file operation or MCP surface yet.
+                "write_available": True,  # Core ready; permission is independent and default-off.
                 "write_projects": sorted(self.grants),
                 "active_task": active,
                 "recent_task": next((row for row in tasks if row["state"] in TERMINAL), None),
@@ -475,6 +477,9 @@ class WriteCoordinator:
 
     def finish_write_task(self, project_id, task_id, request_id):
         return self.operations.finish_write_task(project_id, task_id, request_id)
+
+    def rollback_write_task(self, project_id, task_id, request_id):
+        return self.rollback.rollback(project_id, task_id, request_id)
 
     def recover(self, project_id):
         """Authenticated local control only. Never expose this method as an MCP tool."""

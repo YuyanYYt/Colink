@@ -75,7 +75,8 @@ class TaskDiff:
         self.c = coordinator
         self.store = coordinator.store
 
-    def _parameters(self, path, baseline, detail, offset, limit, max_chars):
+    @staticmethod
+    def _parameters(path, baseline, detail, offset, limit, max_chars):
         if path is not None:
             try:
                 if not isinstance(path, str):
@@ -138,10 +139,9 @@ class TaskDiff:
                     "truncated": False,
                 }
             if task["state"] == "rolled_back":
-                raise WriteError(
-                    "WRITE_DIFF_RESTORED_STATE_NOT_READY: "
-                    "restored-member validation is not attached"
-                )
+                with source.lock:
+                    self.c.rollback.verify_restored(source, task)
+                    return self._result(project, task, [], [], detail, offset, False)
             with source.lock:
                 rows = verify_task_files(self.c, task, source)
                 descriptions = [
@@ -195,6 +195,7 @@ class TaskDiff:
             "project_id": project,
             "source_mode": "live",
             "task_id": task["task_id"],
+            "task_state": task["state"],
             "baseline": "task_origin",
             "detail": detail,
             "changes_available": True,
@@ -214,7 +215,8 @@ class TaskDiff:
             "truncated": truncated,
         }
 
-    def _empty(self, project, source, path, detail, offset, limit, max_chars):
+    @staticmethod
+    def _empty(project, source, path, detail, offset, limit, max_chars):
         metadata = source.manifest()
         candidates = [item for item in metadata["files"] if path is None or item["path"] == path]
         changes, consumed, remaining, truncated, inspected = [], 0, max_chars, False, 0

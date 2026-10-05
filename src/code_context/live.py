@@ -286,11 +286,45 @@ class LiveQueries:
         }
 
     def get_recent_diff(self, project_id, snapshot=None, path=None, **parameters):
-        self.resolve_snapshot(project_id, snapshot)
-        raise SourceError(
-            "LIVE_HISTORY_UNAVAILABLE: direct mode does not retain external-edit "
-            "history; task recovery comparisons are separate"
-        )
+        handle, _ = self.resolve_snapshot(project_id, snapshot)
+        if self.write_coordinator is not None:
+            result = self.write_coordinator.get_diff(project_id, path=path, **parameters)
+        else:
+            from code_context.write_diff import TaskDiff
+
+            options = {
+                "baseline": "previous",
+                "detail": "summary",
+                "offset": 0,
+                "limit": 50,
+                "max_chars": 20_000,
+                **parameters,
+            }
+            TaskDiff._parameters(path, **options)
+            if options["baseline"] == "empty":
+                result = TaskDiff._empty(
+                    project_id,
+                    self.source(project_id),
+                    path,
+                    options["detail"],
+                    options["offset"],
+                    options["limit"],
+                    options["max_chars"],
+                )
+            else:
+                result = {
+                    "project_id": project_id,
+                    "source_mode": "live",
+                    "changes_available": False,
+                    "baseline": None,
+                    "reason": "NO_TASK_BASELINE",
+                    "changes": [],
+                    "has_more": False,
+                    "next_offset": None,
+                    "truncated": False,
+                }
+        self.resolve_snapshot(project_id, handle)
+        return {**result, "snapshot": handle}
 
     def code_query(self, project_id, snapshot, operation, **parameters):
         handle, _ = self.resolve_snapshot(project_id, snapshot)

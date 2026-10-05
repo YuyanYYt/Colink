@@ -428,10 +428,16 @@ class WriteRecovery:
                 raise WriteError(
                     "WRITE_RECOVERY_SCOPE: reauthorize the original source, not its replacement"
                 )
+            rollback = self.store.query(
+                "SELECT * FROM operations WHERE task_id=? AND state='rollback_prepared'",
+                (task["task_id"],),
+            )
+            if rollback:
+                if len(rollback) != 1:
+                    raise WriteError("WRITE_RECOVERY_METADATA: ambiguous rollback intent")
+                return self.c.rollback.resume(source, task, rollback[0])
             if task["state"] == "rolling_back":
-                raise WriteError(
-                    "WRITE_ROLLBACK_RECOVERY_NOT_READY: whole-task recovery is not attached"
-                )
+                raise WriteError("WRITE_RECOVERY_METADATA: missing protected rollback intent")
             self.c.inflight_project = project
             try:
                 outcomes = []
