@@ -385,6 +385,9 @@ class WriteCoordinator:
     def create_file(self, project_id, task_id, request_id, path, content):
         return self.operations.create_file(project_id, task_id, request_id, path, content)
 
+    def create_directory(self, project_id, task_id, request_id, path):
+        return self.operations.create_directory(project_id, task_id, request_id, path)
+
     def finish_write_task(self, project_id, task_id, request_id):
         return self.operations.finish_write_task(project_id, task_id, request_id)
 

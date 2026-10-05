@@ -12,6 +12,7 @@ import re
 import uuid
 from dataclasses import asdict
 
+from code_context.directory_mutation import commit_directory, prepare_directory
 from code_context.file_mutation import commit_file, discard_prepared, prepare_file
 from code_context.policy import MAX_FILE_BYTES, content_problem, validate_path
 from code_context.recovery_store import encode_metadata
@@ -382,3 +383,88 @@ class WriteOperations:
                 ):
                     self.c._retire(old)
                 return result
+
+    def create_directory(self, project, task_id, request_id, path):
+        validate_request(request_id)
+        self._path(path)
+        digest = request_digest({"kind": "create_directory", "project": project, "path": path})
+        with self.c.lock:
+            source, task, replay = self._start(project, task_id, request_id, digest)
+            if replay is not None:
+                return replay
+            with source.lock, source.parent_fd(path, directory=True) as (parent, name):
+                if source.scanner._stat(parent, name, path) is not None:
+                    raise WriteError("WRITE_TARGET_EXISTS: new directory must not adopt any object")
+                self.c.check_first_touch(project, task_id, path, None)
+                self.store.reserve(source_temp_bytes=4096, metadata_bytes=64 * 1024)
+                metadata = {
+                    "kind": "create_directory",
+                    "path": path,
+                    "phase": "preparing",
+                    "temp_name": ".colink-write-" + uuid.uuid4().hex + ".tmp",
+                    "mode": 0o755,
+                }
+                self._record(task_id, request_id, digest, metadata)
+                self.c.inflight_project = project
+                try:
+
+                    def created(prepared):
+                        metadata["prepared"] = asdict(prepared)
+                        self._metadata(task_id, request_id, metadata)
+
+                    prepared = prepare_directory(
+                        source, path, 0o755, metadata["temp_name"], created
+                    )
+                    self.c._authorized(project, _allow_pending=True)
+                    metadata["phase"] = "installing"
+                    self._metadata(task_id, request_id, metadata, state="committing")
+                    receipt = commit_directory(source, prepared)
+                    metadata["phase"] = "done"
+                    metadata["installed"] = asdict(receipt)
+                    result = {
+                        "project_id": project,
+                        "task_id": task_id,
+                        "path": path,
+                        "state": "created",
+                        "kind": "directory",
+                        "source_mode": "live",
+                        "ownership_recorded": True,
+                    }
+                    with self.store.transaction() as db:
+                        db.execute(
+                            "INSERT INTO files VALUES(?,?,?,NULL,NULL,NULL,NULL,?)",
+                            (
+                                task_id,
+                                path,
+                                "directory",
+                                encode_metadata(
+                                    {
+                                        "identity": receipt.directory_identity,
+                                        "mode": receipt.mode,
+                                        "parent_identity": receipt.parent_identity,
+                                    }
+                                ),
+                            ),
+                        )
+                        db.execute(
+                            "UPDATE operations SET state='done',metadata=?,result=? "
+                            "WHERE task_id=? AND request_id=?",
+                            (
+                                encode_metadata(metadata),
+                                encode_metadata(result),
+                                task_id,
+                                request_id,
+                            ),
+                        )
+                    try:
+                        self.c.on_change(project)
+                    except Exception:
+                        pass
+                    return result
+                except BaseException:
+                    self._protect(task_id)
+                    raise WriteError(
+                        "WRITE_RECOVERY_REQUIRED: preserve directory materials and recover locally"
+                    ) from None
+                finally:
+                    self.c.inflight_project = None
