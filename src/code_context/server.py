@@ -32,6 +32,7 @@ from code_context.policy import (
     MAX_REQUEST_BYTES,
     MAX_TOTAL_BYTES,
 )
+from code_context.query_backend import MirrorQueryBackend, QueryBackend
 from code_context.storage import MirrorError, MirrorStore, RevisionConflict
 
 READ_TOOL_NAMES = CODE_TOOL_NAMES | {
@@ -57,12 +58,14 @@ class CodeMCPServer(MCPServer):
 
 
 def build_mcp(
-    store: MirrorStore,
+    store: QueryBackend | MirrorStore,
     project_scope: str | None = None,
     before_read: Callable[[], None] | None = None,
     project_names: dict[str, str] | None = None,
     status_provider: Callable[[], dict] | None = None,
 ) -> MCPServer:
+    if isinstance(store, MirrorStore):
+        store = MirrorQueryBackend(store)
     if project_scope is not None:
         validate_project(project_scope)
 
