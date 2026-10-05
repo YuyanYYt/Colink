@@ -218,6 +218,18 @@ class SourceAccess:
             frozenset(self.scanner._excluded),
         )
 
+    def _fingerprint_metadata(self):
+        # Use virtual root_fd for current registered authorization and exclusions.
+        # Close its entire root stack before returning this metadata-only snapshot.
+        with self.root_fd() as root:
+            self._ignore(root)
+            return (
+                self._fingerprint_scope(),
+                _version(os.fstat(root)),
+                tuple(_version(os.lstat(p)) for p in reversed(self.scanner.root.parents)),
+                self._ignore_cache[0],
+            )
+
     @contextmanager
     def fingerprint_batch(self):
         """Validate cached hashes with batch-scoped, nofollow parent FD reuse.
@@ -226,16 +238,32 @@ class SourceAccess:
         Independent nesting pools share a 64-parent / 128-retained-FD ceiling,
         including pinned root ancestors; reserve another root stack for the final
         authorization check. No pool/descriptor survives this context manager.
+        Deep absolute roots instead use the original per-path checks, with no
+        retained FD pool. Their transient single-path FDs are not pool-budgeted.
         """
         with self.lock:
             batches = getattr(self._fingerprint_batches, "stack", [])
             self._fingerprint_batches.stack = batches
+            if getattr(self._fingerprint_batches, "unpooled", False):
+                raise SourceError("SOURCE_CHANGED: nested validation FD budget exceeded")
             root_fds = len(self.scanner.root.parts)
             available = (
                 MAX_BATCH_PARENT_FDS - sum(b.root_fds + b.fds for b in batches) - 2 * root_fds
             )
             if available < 0:
-                raise SourceError("SOURCE_CHANGED: nested validation FD budget exceeded")
+                if batches:
+                    raise SourceError("SOURCE_CHANGED: nested validation FD budget exceeded")
+                metadata = self._fingerprint_metadata()
+                self._fingerprint_batches.unpooled = True
+                self.metrics["fingerprint_batches"] += 1
+                self.metrics["fingerprint_batch_fallbacks"] += 1
+                try:
+                    yield self  # No active batch: fingerprints use safe parent_fd.
+                    if metadata != self._fingerprint_metadata():
+                        raise SourceError("SOURCE_CHANGED: validation batch scope changed")
+                finally:
+                    self._fingerprint_batches.unpooled = False
+                return
             with self.root_fd() as root:
                 spec = self._ignore(root)
                 scope, version = self._fingerprint_scope(), _version(os.fstat(root))

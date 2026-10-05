@@ -412,3 +412,140 @@ def test_parent_lru_eviction_validates_link_before_discarding_it(tmp_path):
             (tmp_path / "p0").mkdir()
             source.fingerprint(paths[-1])  # Eviction cannot hide the changed old link.
     assert source._fingerprint_batches.stack == []
+
+
+@pytest.fixture
+def deep_root(tmp_path):
+    root = tmp_path.joinpath(*(["d"] * 70))
+    root.mkdir(parents=True)
+    assert len(root.parts) * 2 > 128
+    return root
+
+
+def test_deep_absolute_root_batch_keeps_direct_and_live_reads_compatible(deep_root, monkeypatch):
+    from code_context.live import LiveQueries
+
+    source, hashes = warm_source(deep_root, ["pkg/a.py"])
+    assert source.read("pkg/a.py").content == "value = 1\n"
+    tracked = track_directory_fds(monkeypatch)
+    with source.fingerprint_batch() as batch:
+        assert batch is source
+        assert not tracked["live"] and source._fingerprint_batches.stack == []
+        assert source.fingerprint("pkg/a.py") == hashes["pkg/a.py"]
+        assert source.read("pkg/a.py").content == "value = 1\n"
+        assert not tracked["live"]
+    assert not tracked["live"]
+    assert source.metrics["fingerprint_batch_parent_opens"] == 0
+    assert source.metrics["fingerprint_batch_peak_retained_fds"] == 0
+
+    backend = LiveQueries({"deep": source})
+    try:
+        handle, _ = backend.resolve_snapshot("deep")
+        assert backend.read_file("deep", "pkg/a.py", handle)["content"] == "value = 1\n"
+        assert backend.resolve_snapshot("deep", handle)[0] == handle
+        (deep_root / "pkg/a.py").write_text("value = 2\n")
+        with pytest.raises(SourceError, match="LIVE_CONTEXT_INVALID"):
+            backend.resolve_snapshot("deep", handle)
+    finally:
+        backend.close()
+    assert not tracked["live"]
+
+
+@pytest.mark.parametrize(
+    "change", ["root", "symlink", "ancestor_restore", "gitignore", "codecontextignore", "scope"]
+)
+def test_deep_absolute_root_fallback_rejects_metadata_changes(deep_root, monkeypatch, change):
+    (deep_root / ".gitignore").write_text("other.py\n")
+    (deep_root / ".codecontextignore").write_text("other.py\n")
+    source, hashes = warm_source(deep_root, ["pkg/a.py"])
+    tracked = track_directory_fds(monkeypatch)
+    with pytest.raises(SourceError) as error:
+        with source.fingerprint_batch():
+            assert source.fingerprint("pkg/a.py") == hashes["pkg/a.py"]
+            if change in ("root", "symlink"):
+                saved = deep_root.with_name("saved")
+                deep_root.rename(saved)
+                if change == "root":
+                    deep_root.mkdir()
+                else:
+                    deep_root.symlink_to(saved, target_is_directory=True)
+            elif change == "ancestor_restore":
+                ancestor = deep_root.parent
+                saved = ancestor.with_name("saved")
+                ancestor.rename(saved)
+                saved.rename(ancestor)
+            elif change == "scope":
+                source.scanner._excluded.add("pkg")
+            else:
+                (deep_root / f".{change}").write_text("pkg/\n")
+    assert str(deep_root) not in str(error.value)
+    assert not tracked["live"] and source._fingerprint_batches.stack == []
+    assert not source._fingerprint_batches.unpooled
+    assert source.metrics["body_reads"] == 1
+
+
+@pytest.mark.parametrize("change", ["disabled_before", "disabled_after", "child_boundary"])
+def test_deep_absolute_root_rechecks_registered_authority_and_boundaries(
+    tmp_path, deep_root, change
+):
+    from code_context.project_registry import ProjectRegistry, RegistryError
+
+    (deep_root / "pkg").mkdir()
+    (deep_root / "pkg/a.py").write_text("value = 1\n")
+    registry = ProjectRegistry(tmp_path)
+    relative = deep_root.relative_to(tmp_path).as_posix()
+    project = registry.register(relative, enabled=True)
+    source = registry.source(project)
+    expected = source.fingerprint("pkg/a.py")
+    if change == "disabled_before":
+        registry.set_enabled(project, False)
+    with pytest.raises(RegistryError if change.startswith("disabled") else SourceError):
+        with source.fingerprint_batch():
+            assert source.fingerprint("pkg/a.py") == expected
+            if change == "child_boundary":
+                registry.register(f"{relative}/pkg")
+            else:
+                registry.set_enabled(project, False)
+    assert source._fingerprint_batches.stack == []
+    assert not getattr(source._fingerprint_batches, "unpooled", False)
+
+
+def test_deep_absolute_root_fallback_keeps_second_leaf_stat(deep_root, monkeypatch):
+    source, hashes = warm_source(deep_root, ["pkg/a.py"])
+    original = type(source._fingerprints).get
+
+    def changed(view, path):
+        cached = original(view, path)
+        (deep_root / path).write_text("value = 2\n")
+        return cached
+
+    monkeypatch.setattr(type(source._fingerprints), "get", changed)
+    with source.fingerprint_batch():
+        assert source.fingerprint("pkg/a.py") != hashes["pkg/a.py"]
+    assert source.metrics["body_reads"] == 2
+
+
+def test_deep_absolute_root_nested_rejection_and_caller_failure_leave_no_state(
+    deep_root, monkeypatch
+):
+    source, hashes = warm_source(deep_root, ["pkg/a.py"])
+    tracked = track_directory_fds(monkeypatch)
+    with pytest.raises(RuntimeError, match="caller aborted"):
+        with source.fingerprint_batch():
+            with pytest.raises(SourceError, match="nested validation FD budget exceeded"):
+                with source.fingerprint_batch():
+                    pytest.fail("nested fallback must not open another root stack")
+            assert not tracked["live"]
+            assert source.fingerprint("pkg/a.py") == hashes["pkg/a.py"]
+            raise RuntimeError("caller aborted")
+    assert not tracked["live"] and not source._fingerprint_batches.unpooled
+
+    def validate(_):
+        with source.fingerprint_batch():
+            assert source.fingerprint("pkg/a.py") == hashes["pkg/a.py"]
+        assert source._fingerprint_batches.stack == []
+        assert not source._fingerprint_batches.unpooled
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(validate, range(4)))
+    assert not tracked["live"] and source.metrics["body_reads"] == 1
