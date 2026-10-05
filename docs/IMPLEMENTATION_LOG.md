@@ -69,6 +69,10 @@
 - 用户追加最终 gate：十五个旧工具都须可用，尤其实际网页小范围写入后原 get_diff
   须准确输出任务改动并与直读一致；恢复材料不能随修改轮次无上限增长。此 gate
   不允许由当前 LIVE_HISTORY_UNAVAILABLE 占位错误替代最终完成证明。
+- R4 独立按需索引：单生产线程、项目任务合并、Python/Java 当前结构事实、内容哈希
+  复用、源码根重绑定、真实符号源码分页与来源/上下文校验。新数据库没有 blobs 或
+  正文列，仅保存当前事实，四项目 LRU；物理页与临时 journal 有明确额度。组件
+  35 项测试经主线复跑通过（1.08 秒），Ruff 通过；运行整合与阶段验收仍待完成。
 
 关联：[读取重构计划](LIVE_WORKSPACE_REFACTOR.md)、[写入契约](WRITE_CONTRACT.md)、
 [维护路线](ROADMAP.md)、[验证记录](VALIDATION.md)。
