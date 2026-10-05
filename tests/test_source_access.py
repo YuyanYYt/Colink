@@ -87,3 +87,15 @@ def test_read_detects_changes_during_safe_read(tmp_path, monkeypatch):
     monkeypatch.setattr(access.scanner, "_read_text", changing)
     with pytest.raises(SourceError, match="SOURCE_CHANGED"):
         access.read("a.py")
+
+
+def test_fingerprint_validation_reuses_only_unchanged_metadata(tmp_path):
+    file = tmp_path / "a.py"
+    file.write_text("before\n")
+    access = SourceAccess(tmp_path)
+    document = access.read("a.py")
+    assert access.fingerprint("a.py") == document.sha256
+    assert access.metrics["body_reads"] == 1
+    file.write_text("after\n")
+    assert access.fingerprint("a.py") != document.sha256
+    assert access.metrics["body_reads"] == 2

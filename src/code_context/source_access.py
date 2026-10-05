@@ -10,6 +10,7 @@ import os
 import stat
 import threading
 import time
+from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,6 +51,7 @@ class SourceAccess:
         self.source_id = hashlib.sha256(raw).hexdigest()
         self.lock = threading.RLock()
         self.metrics = {"body_reads": 0, "metadata_walks": 0}
+        self._fingerprints = OrderedDict()
 
     def _ancestors(self):
         root = self.scanner.root
@@ -104,6 +106,10 @@ class SourceAccess:
             if after is None or _version(before) != _version(after):
                 raise SourceError("SOURCE_CHANGED: file changed while reading; retry")
             self.metrics["body_reads"] += 1
+            self._fingerprints[path] = (_version(after), content_hash(content))
+            self._fingerprints.move_to_end(path)
+            while len(self._fingerprints) > 4096:
+                self._fingerprints.popitem(last=False)
             return SourceDocument(
                 path,
                 content,
@@ -115,6 +121,21 @@ class SourceAccess:
 
     def fingerprint(self, path: str) -> str | None:
         try:
+            # Stable dev/inode/size/mtime/ctime let repeated context validation
+            # avoid re-reading unchanged bodies. Actual source reads and every
+            # write precondition still use the real complete content.
+            with self.parent_fd(path) as (parent, name):
+                before = self.scanner._stat(parent, name, path)
+                cached = self._fingerprints.get(path)
+                after = self.scanner._stat(parent, name, path)
+                if (
+                    cached
+                    and before is not None
+                    and after is not None
+                    and stat.S_ISREG(after.st_mode)
+                    and cached[0] == _version(before) == _version(after)
+                ):
+                    return cached[1]
             return self.read(path).sha256
         except SourceError as exc:
             if str(exc).startswith(
@@ -127,7 +148,7 @@ class SourceAccess:
         """Return bounded metadata, never full text or an immutable historical snapshot."""
         if not 1 <= max_files <= MAX_FILES or max_directories < 1 or max_seconds <= 0:
             raise SourceError("INVALID_BUDGET: invalid discovery limits")
-        result, skipped = [], {}
+        result, skipped, watch_directories = [], {}, [""]
         started = time.monotonic()
         directories = 0
         partial = False
@@ -164,6 +185,8 @@ class SourceAccess:
                     if self.scanner._path_problem(path, spec, directory):
                         continue
                     if directory:
+                        if len(watch_directories) < max_directories:
+                            watch_directories.append(path)
                         with self.scanner._directory(fd, name, path, info) as child:
                             walk(child, path)
                         if partial:
@@ -187,4 +210,5 @@ class SourceAccess:
             "partial": partial,
             "skipped": skipped,
             "directories": min(directories, max_directories),
+            "watch_directories": watch_directories,
         }
