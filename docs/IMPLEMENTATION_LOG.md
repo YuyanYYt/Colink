@@ -205,5 +205,15 @@
   **114 passed（0.34 秒，Euler）**，主线相关合并 **180 passed（5.89 秒）**，
   Ruff 通过。整体回退协调、属性增强及真实网页仍待，不宣称已有通用删除工具。
 
+- W 写前统一空间准入：普通新增基线/编辑/文件/目录都保留 256 KiB 收尾余量、
+  每目标 16 KiB 回退日志与实际属性记录预算，所有已改文件 latest 正文按 allocated
+  大小预留；源码文件系统的临时空间单独核对。协调器串行使普通后续增长不能花掉
+  此逻辑预留，post-intent bookkeeping/local recovery 可用剩余硬额度，不等同于
+  文件系统强制预分配。1 MiB metadata+SQL padding+emoji 反例改为写前明确拒绝。
+  既有目录基线元信息防止外部删除后被认作本任务新建；完成七天期限在任何重放前
+  验证。目录起点初验 **73 passed（4.81 秒）**，空间/相关最终
+  **91 passed（6.13 秒）**、Ruff 通过；保留审计负面，不声称默认真实工作区已经
+  遭遇 SQLITE_FULL/真实 ENOSPC/断电，整体回退层仍待对接。
+
 关联：[读取重构计划](LIVE_WORKSPACE_REFACTOR.md)、[写入契约](WRITE_CONTRACT.md)、
 [维护路线](ROADMAP.md)、[验证记录](VALIDATION.md)。

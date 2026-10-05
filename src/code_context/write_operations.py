@@ -105,7 +105,7 @@ class WriteOperations:
             raise WriteError("WRITE_FILE_CONFLICT: file differs from the task's last saved state")
         return previous
 
-    def _reserve(self, task_id, path, before, raw, previous):
+    def _reserve(self, task_id, path, before, raw, previous, *, source):
         bodies = {hashlib.sha256(raw).hexdigest(): raw}
         if before is not None:
             bodies[before.sha256] = before.content.encode("utf-8")
@@ -123,10 +123,14 @@ class WriteOperations:
             if row["path"] != path and row["kind"] in {"modified", "created"}
         )
         metadata = 64 * 1024 + (len(touched) + (previous is None)) * 1024
-        self.store.reserve(
-            object_bytes=missing + rollback_bytes,
-            source_temp_bytes=max(len(raw), before.size if before else 0),
+        self.c.reserve_growth(
+            task_id,
+            object_bytes=missing,
+            future_body_bytes=rollback_bytes,
+            additional_files=int(previous is None),
+            source_temp_bytes=allocated(max(len(raw), before.size if before else 0)),
             metadata_bytes=metadata,
+            source=source,
         )
 
     def _record(self, task_id, request_id, digest, metadata):
@@ -179,7 +183,7 @@ class WriteOperations:
 
     def _install(self, project, task_id, request_id, path, digest, before, previous, raw, preview):
         c, source = self.c, self.c._authorized(project)
-        self._reserve(task_id, path, before, raw, previous)
+        self._reserve(task_id, path, before, raw, previous, source=source)
         mode = before.mode if before is not None else 0o644
         prefix = f"{task_id}:op:{request_id}:"
         metadata = {
@@ -418,7 +422,13 @@ class WriteOperations:
                         "WRITE_FILE_CONFLICT: a previously touched directory disappeared"
                     )
                 self.c.check_first_touch(project, task_id, path, None)
-                self.store.reserve(source_temp_bytes=4096, metadata_bytes=64 * 1024)
+                self.c.reserve_growth(
+                    task_id,
+                    source_temp_bytes=4096,
+                    metadata_bytes=64 * 1024,
+                    additional_files=1,
+                    source=source,
+                )
                 metadata = {
                     "kind": "create_directory",
                     "path": path,

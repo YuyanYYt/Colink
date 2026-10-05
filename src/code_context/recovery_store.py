@@ -38,10 +38,20 @@ CREATE TABLE IF NOT EXISTS manifest (
     path TEXT NOT NULL, sha256 TEXT NOT NULL, version TEXT NOT NULL,
     PRIMARY KEY (task_id, path)
 );
+CREATE TABLE IF NOT EXISTS baseline_directories (
+    task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+    path TEXT NOT NULL, version TEXT NOT NULL,
+    PRIMARY KEY (task_id, path)
+);
 CREATE TABLE IF NOT EXISTS files (
     task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
     path TEXT NOT NULL, kind TEXT NOT NULL, origin_hash TEXT, origin_mode INTEGER,
     last_hash TEXT, last_version TEXT, directory_identity TEXT,
+    PRIMARY KEY (task_id, path)
+);
+CREATE TABLE IF NOT EXISTS file_attributes (
+    task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+    path TEXT NOT NULL, origin_record TEXT, last_record TEXT NOT NULL,
     PRIMARY KEY (task_id, path)
 );
 CREATE TABLE IF NOT EXISTS operations (

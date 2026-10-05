@@ -273,3 +273,77 @@ def test_quota_rejection_leaves_source_and_pending_state_unchanged(parts, monkey
     assert source.read("a.py") == original
     assert store.query("SELECT * FROM operations") == []
     assert not c.status()["recovery_required"]
+
+
+def test_unicode_result_near_metadata_cap_is_rejected_before_source_edit(tmp_path):
+    root = tmp_path / "source"
+    root.mkdir()
+    original = "😀" * 4000
+    (root / "a.py").write_text(original)
+    source = SourceAccess(root)
+    with RecoveryStore(
+        tmp_path / "recovery",
+        max_bytes=8 * 1024 * 1024,
+        max_peak_bytes=16 * 1024 * 1024,
+        max_metadata_bytes=1024 * 1024,
+        min_free_bytes=0,
+    ) as store:
+        c = WriteCoordinator(store, lambda _: source, control_alive=lambda: True)
+        try:
+            task = begin(c, paths=["a.py"])
+            # Synthetic SQL pressure reproduces admission with ~68 KiB left.
+            target = store.max_metadata_bytes - 17 * 4096
+            length = target - store.usage()["database_page_bytes"] - 4096
+            for _ in range(8):
+                with store.transaction() as db:
+                    db.execute(
+                        "INSERT OR REPLACE INTO settings VALUES('test_padding',?)", ("q" * length,)
+                    )
+                actual = store.usage()["database_page_bytes"]
+                if actual == target:
+                    break
+                length += target - actual
+            assert actual == target
+            before = source.read("a.py")
+            with pytest.raises(RecoveryError, match="RECOVERY_METADATA_CAPACITY"):
+                c.apply_edit(
+                    "a",
+                    task,
+                    "edit_0001",
+                    "a.py",
+                    before.sha256,
+                    {"kind": "replace_fragment", "old_text": original, "new_text": "😃" * 4000},
+                )
+            assert source.read("a.py") == before
+            assert store.query("SELECT * FROM operations") == []
+            assert store.query("SELECT * FROM objects") == []
+            assert not c.status()["recovery_required"]
+        finally:
+            c.close()
+
+
+def test_growth_admission_protects_latest_bodies_for_mkdir_and_source_disk(parts, monkeypatch):
+    source, store, c = parts
+    task = begin(c)
+    c.create_file("a", task, "create_001", "new.py", "latest\n")
+    actual = store.reserve
+    calls = []
+
+    def reserve(**kwargs):
+        calls.append(kwargs)
+        return actual(**kwargs)
+
+    monkeypatch.setattr(store, "reserve", reserve)
+    c.create_directory("a", task, "mkdir_0001", "directory")
+    assert any(
+        call.get("object_bytes", 0) >= 4096 and call.get("metadata_bytes", 0) >= 256 * 1024
+        for call in calls
+    )
+    monkeypatch.setattr(
+        "code_context.write_coordinator.shutil.disk_usage",
+        lambda _: type("Space", (), {"free": store.min_free_bytes})(),
+    )
+    with pytest.raises(WriteError, match="WRITE_DISK_SPACE"):
+        c.create_directory("a", task, "mkdir_0002", "other")
+    assert not (source.root / "other").exists()
+    assert not c.status()["recovery_required"]

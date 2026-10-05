@@ -9,6 +9,7 @@ The candidate is not yet attached to Runtime/MCP or the installed application.
 import hashlib
 import json
 import re
+import shutil
 import stat
 import threading
 import time
@@ -184,6 +185,12 @@ class WriteCoordinator:
         task = rows[0]
         if task["project_id"] != project_id or task["source_id"] != source.source_id:
             raise WriteError("WRITE_TASK_SCOPE: task belongs to another project/source")
+        if (
+            task["state"] in TERMINAL
+            and task["completed"] is not None
+            and self.clock() - task["completed"] > RETENTION_SECONDS
+        ):
+            raise WriteError("WRITE_TASK_EXPIRED: retained request cannot execute again")
         return task
 
     def _scope(self, paths):
@@ -228,11 +235,19 @@ class WriteCoordinator:
 
     def _baseline(self, source, scope):
         started = time.monotonic()
+        directories = {}
         if scope is None:
             metadata = source.manifest()
             if metadata["partial"]:
                 raise WriteError("WRITE_BASELINE_PARTIAL: use a narrower declared task scope")
             paths = [item["path"] for item in metadata["files"]]
+            for path in metadata["watch_directories"]:
+                if path:
+                    with source.parent_fd(path, directory=True) as (parent, name):
+                        info = source.scanner._stat(parent, name, path)
+                        if info is None or not stat.S_ISDIR(info.st_mode):
+                            raise WriteError("WRITE_BASELINE_CHANGED: origin directory changed")
+                        directories[path] = encode_metadata(_version(info))
         else:
             paths = scope
         rows, consumed = [], 0
@@ -247,7 +262,8 @@ class WriteCoordinator:
                 if before is None:
                     continue  # Explicit future file; creation will require absence.
                 if stat.S_ISDIR(before.st_mode) and scope is not None:
-                    continue  # Explicit new-directory name cannot adopt this existing one.
+                    directories[path] = encode_metadata(_version(before))
+                    continue  # Existing directories remain origins, not task-created objects.
                 if not stat.S_ISREG(before.st_mode):
                     raise WriteError("WRITE_BASELINE_UNSAFE: allowed real text files required")
                 consumed += before.st_size
@@ -266,6 +282,8 @@ class WriteCoordinator:
         # No whole-repository atomic snapshot is claimed. All late joins must
         # still match these captured values at first actual modification.
         for path, sha, version in rows:
+            if time.monotonic() - started > self.baseline_seconds:
+                raise WriteError("WRITE_BASELINE_TIME_LIMIT: use a narrower declared task scope")
             with source.parent_fd(path) as (parent, name):
                 info = source.scanner._stat(parent, name, path)
                 if (
@@ -274,8 +292,61 @@ class WriteCoordinator:
                     or source.fingerprint(path) != sha
                 ):
                     raise WriteError("WRITE_BASELINE_CHANGED: source changed while preparing task")
+        for path, version in directories.items():
+            if time.monotonic() - started > self.baseline_seconds:
+                raise WriteError("WRITE_BASELINE_TIME_LIMIT: use a narrower declared task scope")
+            with source.parent_fd(path, directory=True) as (parent, name):
+                info = source.scanner._stat(parent, name, path)
+                if info is None or encode_metadata(_version(info)) != version:
+                    raise WriteError("WRITE_BASELINE_CHANGED: origin directory changed")
         source.ensure_available()
-        return rows
+        return rows, list(directories.items())
+
+    def reserve_growth(
+        self,
+        task_id=None,
+        *,
+        object_bytes=0,
+        source_temp_bytes=0,
+        metadata_bytes=0,
+        future_body_bytes=None,
+        additional_files=0,
+        source=None,
+    ):
+        """Ordinary admission preserves room for completion/recovery/whole undo.
+
+        Coordinator serialization makes this a logical reservation: no other
+        growing write may spend it. Post-intent durable bookkeeping and local
+        recovery can use the reserved space up to the hard store cap. Unknown
+        out-of-band modifications of recovery SQL are not authorized consumers.
+        """
+        files = self.store.query("SELECT * FROM files WHERE task_id=?", (task_id,))
+        attributes = self.store.query(
+            "SELECT last_record FROM file_attributes WHERE task_id=?", (task_id,)
+        )
+        if future_body_bytes is None:
+            future_body_bytes = sum(
+                ((json.loads(row["last_version"])[3] + 4095) // 4096) * 4096
+                for row in files
+                if row["kind"] in {"modified", "created"}
+            )
+        # Covers UTF-8 previews/results, multiple SQLite UPDATE page versions,
+        # object receipts, and one bounded per-file rollback record. Attribute
+        # records have a separate measured addition; they are never guessed free.
+        headroom = (
+            256 * 1024
+            + (len(files) + additional_files) * 16 * 1024
+            + sum(2 * len(row["last_record"].encode()) for row in attributes)
+        )
+        if source is not None and shutil.disk_usage(source.root).free < (
+            self.store.min_free_bytes + source_temp_bytes
+        ):
+            raise WriteError("WRITE_DISK_SPACE: source filesystem needs staging headroom")
+        return self.store.reserve(
+            object_bytes=object_bytes + future_body_bytes,
+            source_temp_bytes=source_temp_bytes,
+            metadata_bytes=metadata_bytes + headroom,
+        )
 
     def begin_write_task(self, project_id, request_id, *, title="", paths=None):
         validate_request(request_id)
@@ -306,12 +377,13 @@ class WriteCoordinator:
                 "SELECT task_id FROM tasks WHERE state NOT IN ('completed','rolled_back') LIMIT 1"
             ):
                 raise WriteError("WRITE_TASK_ACTIVE: continue or finish the existing task")
-            rows = self._baseline(source, scope)
+            rows, directories = self._baseline(source, scope)
             self._authorized(project_id)
-            self.store.reserve(
+            self.reserve_growth(
                 metadata_bytes=sum(
                     len(path.encode()) + len(version) + 256 for path, _sha, version in rows
                 )
+                + sum(len(path.encode()) + len(version) + 256 for path, version in directories)
                 + 16384
             )
             task_id = "wt_" + uuid.uuid4().hex
@@ -336,6 +408,10 @@ class WriteCoordinator:
                 db.execute("INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?)", tuple(task.values()))
                 db.executemany(
                     "INSERT INTO manifest VALUES(?,?,?,?)", ((task_id, *row) for row in rows)
+                )
+                db.executemany(
+                    "INSERT INTO baseline_directories VALUES(?,?,?)",
+                    ((task_id, *row) for row in directories),
                 )
                 db.execute(
                     "UPDATE settings SET value=? WHERE key='next_task_request'",
@@ -370,6 +446,11 @@ class WriteCoordinator:
         baseline = self.store.query(
             "SELECT * FROM manifest WHERE task_id=? AND path=?", (task_id, path)
         )
+        origin_directory = self.store.query(
+            "SELECT path FROM baseline_directories WHERE task_id=? AND path=?", (task_id, path)
+        )
+        if origin_directory:
+            raise WriteError("WRITE_ORIGIN_CONFLICT: an origin directory cannot be adopted")
         if document is None:
             if baseline:
                 raise WriteError("WRITE_ORIGIN_CONFLICT: an origin file disappeared")

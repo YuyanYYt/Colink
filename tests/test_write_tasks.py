@@ -95,6 +95,53 @@ def test_future_nested_paths_require_explicit_new_parent_names(parts):
     assert not (roots["a"].root / "new").exists()
 
 
+@pytest.mark.parametrize("scope", [None, ["original"]])
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_removed_origin_directory_cannot_be_claimed_as_task_created(parts, scope, kind):
+    roots, store, c = parts
+    origin = roots["a"].root / "original"
+    origin.mkdir()
+    task = begin(c, paths=scope)["task_id"]
+    assert store.query("SELECT path FROM baseline_directories WHERE task_id=?", (task,)) == [
+        {"path": "original"}
+    ]
+    origin.rmdir()  # Simulated external removal after task start.
+    with pytest.raises(WriteError, match="WRITE_ORIGIN_CONFLICT"):
+        if kind == "file":
+            c.create_file("a", task, "create_0001", "original", "not the origin\n")
+        else:
+            c.create_directory("a", task, "create_0001", "original")
+    assert not origin.exists()
+    assert store.query("SELECT * FROM operations") == []
+
+
+def test_directory_kind_changed_to_file_is_not_a_new_origin(parts):
+    roots, store, c = parts
+    path = roots["a"].root / "original"
+    path.mkdir()
+    task = begin(c)["task_id"]
+    path.rmdir()
+    path.write_text("external replacement\n")
+    with pytest.raises(WriteError, match="WRITE_ORIGIN_CONFLICT"):
+        c.check_first_touch("a", task, "original", roots["a"].read("original"))
+
+
+def test_completed_request_replay_expires_in_same_enable_session(parts):
+    roots, store, c = parts
+    task = begin(c)["task_id"]
+    c.create_file("a", task, "create_0001", "new.py", "created\n")
+    c.finish_write_task("a", task, "finish_0001")
+    completed = store.query("SELECT completed FROM tasks WHERE task_id=?", (task,))[0]["completed"]
+    c.clock = lambda: completed + 7 * 24 * 3600 + 1
+    for request in (
+        lambda: c.create_file("a", task, "create_0001", "new.py", "created\n"),
+        lambda: c.finish_write_task("a", task, "finish_0001"),
+    ):
+        with pytest.raises(WriteError, match="WRITE_TASK_EXPIRED"):
+            request()
+    assert (roots["a"].root / "new.py").read_text() == "created\n"
+
+
 def test_declared_future_parent_cannot_be_symlink(parts):
     roots, store, c = parts
     (roots["a"].root / "linked").symlink_to(roots["b"].root, target_is_directory=True)
