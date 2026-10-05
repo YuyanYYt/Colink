@@ -27,7 +27,7 @@ def test_stdio_subprocess_reads_snapshot(tmp_path, capsys):
                 initialized = await session.initialize()
                 assert initialized.server_info.name == "Colink"
                 tools = await session.list_tools()
-                assert len(tools.tools) == 5
+                assert len(tools.tools) == 6
                 result = await session.call_tool(
                     "read_file",
                     {

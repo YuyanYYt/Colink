@@ -86,6 +86,7 @@ class LocalMirror:
         self.stop_event = threading.Event()
         self.worker: threading.Thread | None = None
         self._runtime: dict = {}
+        self._syncing = False
         self._closed = False
 
     def __enter__(self):
@@ -118,6 +119,13 @@ class LocalMirror:
         return result
 
     def sync_once(self, scanned: ScanResult | None = None) -> dict:
+        self._syncing = True
+        try:
+            return self._sync_once(scanned)
+        finally:
+            self._syncing = False
+
+    def _sync_once(self, scanned: ScanResult | None = None) -> dict:
         # Recover a committed-but-not-acknowledged batch before considering new edits.
         self.flush()
         scanned = self.scanner.scan() if scanned is None else scanned
@@ -190,8 +198,26 @@ class LocalMirror:
             or self._runtime.get("status") != "ready"
         ):
             raise MirrorError(
-                "local source is not ready; inspect local-status and restart if needed"
+                "SOURCE_NOT_READY: local source is not ready; "
+                "inspect connection_status or local-status and restart if needed"
             )
+
+    def mcp_status(self) -> dict:
+        """Read watcher state without scanning source, exposing paths, or updating metadata."""
+        state = self._runtime.get("status", "starting")
+        if self._closed or self.stop_event.is_set():
+            state = "stopped"
+        elif self.worker is not None and not self.worker.is_alive():
+            state = "failed"
+        elif self._syncing:
+            state = "syncing"
+        elif self.worker is None:
+            state = "starting"
+        return {
+            "state": state,
+            "last_sync_at": self._runtime.get("last_success_at"),
+            "last_seen": _now(),
+        }
 
     def close(self):
         if self._closed:

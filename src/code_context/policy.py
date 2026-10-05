@@ -39,6 +39,11 @@ EXCLUDED_NAMES = (
     "id_ed25519*",
     "credentials*",
     "secrets*",
+    "service-account*.json",
+    "service_account*.json",
+    "client_secret*.json",
+    "*.p12",
+    "*.pfx",
     "*.db",
     "*.sqlite*",
     "*.pyc",
@@ -72,7 +77,7 @@ def validate_path(path: str) -> str:
 
 def excluded_path(path: str) -> bool:
     parts = PurePosixPath(path).parts
-    return any(part in EXCLUDED_DIRS for part in parts) or any(
+    return any(part.lower() in EXCLUDED_DIRS for part in parts) or any(
         fnmatch.fnmatch(part.lower(), pattern.lower())
         for part in parts
         for pattern in EXCLUDED_NAMES

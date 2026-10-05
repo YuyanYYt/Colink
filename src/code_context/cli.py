@@ -153,7 +153,13 @@ def main(argv: list[str] | None = None) -> int:
                 args.root, args.project, args.data_dir, args.reconcile_seconds
             ) as source:
                 source.start()
-                build_mcp(source.store, args.project, source.ensure_ready).run(transport="stdio")
+                build_mcp(
+                    source.store,
+                    args.project,
+                    source.ensure_ready,
+                    project_names={args.project: source.root.name},
+                    status_provider=source.mcp_status,
+                ).run(transport="stdio")
             return 0
         if args.command in {"demo", "demo-local"}:
             from code_context.demo import run_demo, run_local_demo

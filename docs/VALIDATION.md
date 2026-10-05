@@ -3,6 +3,50 @@
 公开副本已经去除私人会话链接、个人插件/Tunnel 标识和个人路径。原始验收记录
 只保留在维护者本机未提交的归档中；下述历史结果不是每个新账户的可用性保证。
 
+## 0.4.1 · 本地修复与大改前锚点
+
+日期：2026-10-05（Asia/Shanghai）。本轮先完成本地部分，不扩大用户目录、不改
+现有连接/凭据、不覆盖正在运行的 0.4.0，不把入口可见当作网页自动匹配验收。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| 全量回归 | 最后一轮 300 passed，18.72 秒；前一轮 299 passed，18.78 秒；各 1 条原有 Starlette/AnyIO 弃用提示 |
+| 定向回归 | 第一批相关 177 项通过；新增完整工作流回归纳入最终全量 |
+| Ruff | `check .` 与 `format --check .` 通过；再按 src/tests/scripts/macos 范围复核，32 个源码/测试文件通过 |
+| 锁文件 | `uv lock --offline` / `uv sync --locked`；仅 Colink 0.4.0 → 0.4.1，无第三方升级 |
+| Skill 文件 | 官方 skill-creator `quick_validate.py` 通过；其 PyYAML 在独立 uv 环境，不加入项目锁文件 |
+| HTTP demo | passed，6 个只读工具、完整/增量、固定重试、崩溃恢复、快照隔离及敏感文件排除 |
+| 持续 stdio demo | passed，6 个只读工具、实时更新、停机编辑重启恢复、两份保留、过期拒绝，无数字 MCP 版本参数/结果 |
+| 网页界面 | 原生 Chrome 观察到 Plus 账号的「插件 → 技能 → 添加技能 → 使用编辑器创建」和三个输入区；未创建 Skill |
+| 网页激活/更新 | 未验证；用户保持锁屏，网页安装/启用/自然问题自动匹配与更新后的源码读取不宣称完成 |
+| 当前安装版 | 元数据仍为 0.4.0，已有监督进程/私有隧道运行；本轮不停止或覆盖 |
+| 新安装包 | 自包含 0.4.1 DMG/ZIP 生成；原生 arm64、最低声明 macOS 14、`LSUIElement=true`、搬移运行验证与 ad-hoc 签名通过 |
+| 新包检查 | 包内后端逐文件与当前源代码一致；deep/strict 签名、DMG 镜像校验和 Publication guard 1804 files / 0 findings |
+| 新包演示 | 包内 Python 用 -I/-B 运行 HTTP 与持续 stdio 两套 demo 均 passed，之后签名仍通过；不加载个人连接、不访问 OpenAI API |
+| Skill ZIP | 成员仅 SKILL.md、agents/、agents/openai.yaml；核心指令与源码一致，不含私有元数据；网页上传格式/导入未实测 |
+
+保留目录：
+
+- 最终全量：`.artifacts/test-runs/anchor-041-final.coKrVv/`；前一轮 `.artifacts/test-runs/anchor-041.VkbY4b/`。
+- HTTP：`.artifacts/demo/20261005T081913Z-1d336713/`。
+- 持续 stdio：`.artifacts/demo-local/20261005T081913Z-c1d0edbd/`。
+- 锚点新包：`.artifacts/releases/colink-0.4.1-anchor/`，含报告和 SHA256SUMS。
+- 包内 HTTP：`.artifacts/anchor-041-bundled-validation/http/20261005T082437Z-814a4646/`。
+- 包内 stdio：`.artifacts/anchor-041-bundled-validation/stdio/20261005T082438Z-47b3ab9c/`。
+- Skill 备用包：`.artifacts/skills/colink-code-context-0.4.1.zip`。
+
+新包体积为普通文件原始字节合计：应用 133880196 bytes（约 127.7 MiB），ZIP
+54250854 bytes（约 51.7 MiB），DMG 68042238 bytes（约 64.9 MiB）。不是运行数据库
+体积，也不是 APFS 分配块。未新做原生 UI/安装覆盖验收；签名不是 Developer ID 公证。
+
+早期新增断言 8 个预期失败，表示缺陷复现和缺失功能断言；修复后通过。第一次全量
+临时目录放在 `/private/tmp`，应用禁止 `/private` 来源，文件夹相关用例因此拒绝；
+改用新的项目内临时目录，不放宽安全规则，失败目录保留。
+
+完整核验分类见 [AUDIT_0.4.1.md](AUDIT_0.4.1.md)，锚点与后续边界见
+[REFACTOR_ANCHOR.md](REFACTOR_ANCHOR.md)。本机测试不代表所有潜在 Bug 已排除、
+完整安全/性能认证或每个 ChatGPT 账号都有相同入口。
+
 ## 0.4.0 · 开源、自包含安装与菜单栏启动
 
 日期：2026-10-05（Asia/Shanghai）。发布目标为 YuyanYYt/Colink、公开、MIT，

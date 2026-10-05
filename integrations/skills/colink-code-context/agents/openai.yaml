@@ -1,0 +1,5 @@
+interface:
+  display_name: "Colink 代码上下文"
+  short_description: "按需读取自己的本机项目，解释代码、定位问题和审查改动；已有充分代码上下文时直接分析。"
+policy:
+  allow_implicit_invocation: true

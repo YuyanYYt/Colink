@@ -170,7 +170,22 @@ class MirrorStore:
                 (project_id, snapshot),
             ).fetchone()
         if row is None:
-            raise MirrorError("code context is unavailable or expired; call repo_overview again")
+            if (
+                db.execute("SELECT 1 FROM projects WHERE project_id=?", (project_id,)).fetchone()
+                is None
+            ):
+                raise MirrorError(
+                    "PROJECT_NOT_FOUND: select an available project from list_projects"
+                )
+            if snapshot == "previous":
+                raise MirrorError(
+                    "NO_PREVIOUS_SNAPSHOT: no preceding code state exists; "
+                    "use current code or wait for a source change"
+                )
+            raise MirrorError(
+                "SNAPSHOT_EXPIRED: code context is unavailable or expired; "
+                "restart the analysis from repo_overview"
+            )
         return row["revision"], row["snapshot"]
 
     @staticmethod
@@ -355,6 +370,7 @@ class MirrorStore:
             "end_line": min(end_line, len(lines)),
             "total_lines": len(lines),
             "has_more": end_line < len(lines),
+            "next_start_line": end_line + 1 if end_line < len(lines) else None,
             "content": "".join(lines[start_line - 1 : end_line]),
         }
 
@@ -429,29 +445,113 @@ class MirrorStore:
         }
 
     def get_recent_diff(
-        self, project_id: str, snapshot: str | None = None, path: str | None = None
+        self,
+        project_id: str,
+        snapshot: str | None = None,
+        path: str | None = None,
+        *,
+        baseline: str = "previous",
+        detail: str = "summary",
+        offset: int = 0,
+        limit: int = 50,
+        max_chars: int = 20_000,
     ) -> dict:
         """Resolve and load the comparison in one read transaction, without numbered labels."""
         if path is not None:
             validate_path(path)
+        if baseline not in {"previous", "empty"} or detail not in {"summary", "patch"}:
+            raise MirrorError("baseline must be previous/empty; detail must be summary/patch")
+        if offset < 0 or not 1 <= limit <= 100 or not 1000 <= max_chars <= 50_000:
+            raise MirrorError("offset must be nonnegative; limit 1-100; max_chars 1000-50000")
         with self.read_connection() as db:
             revision, handle = self._resolve_snapshot(db, project_id, snapshot)
-            if revision > 1:
+            after = self._load_source(db, project_id, revision)
+            if baseline == "previous" and revision == 1:
+                return {
+                    "project_id": project_id,
+                    "snapshot": handle,
+                    "baseline": None,
+                    "reason": "NO_PREVIOUS_SNAPSHOT",
+                    "current_file_count": len(after),
+                    "changes_available": False,
+                    "changes": [],
+                    "truncated": False,
+                    "has_more": False,
+                    "next_offset": None,
+                }
+            if baseline == "previous":
                 row = db.execute(
                     "SELECT 1 FROM snapshots WHERE project_id=? AND revision=?",
                     (project_id, revision - 1),
                 ).fetchone()
                 if row is None:
                     raise MirrorError(
-                        "comparison baseline is unavailable; call repo_overview for current code"
+                        "COMPARISON_BASELINE_UNAVAILABLE: comparison baseline is unavailable; "
+                        "restart the comparison from repo_overview for current code"
                     )
-            before = self._load_source(db, project_id, revision - 1)
-            after = self._load_source(db, project_id, revision)
+            before = (
+                self._load_source(db, project_id, revision - 1) if baseline == "previous" else {}
+            )
+
+        descriptions = []
+        for name in sorted(before.keys() | after.keys()):
+            if path is not None and name != path:
+                continue
+            old, new = before.get(name), after.get(name)
+            if old and new and old[0] == new[0]:
+                continue
+            insertions = deletions = 0
+            matcher = difflib.SequenceMatcher(
+                a=(old[1] if old else "").splitlines(),
+                b=(new[1] if new else "").splitlines(),
+            )
+            for operation, start_old, end_old, start_new, end_new in matcher.get_opcodes():
+                if operation in {"replace", "delete"}:
+                    deletions += end_old - start_old
+                if operation in {"replace", "insert"}:
+                    insertions += end_new - start_new
+            descriptions.append(
+                {
+                    "path": name,
+                    "op": "add" if old is None else "delete" if new is None else "modify",
+                    "insertions": insertions,
+                    "deletions": deletions,
+                }
+            )
+        page = descriptions[offset : offset + limit]
+        changes, truncated = page, False
+        if detail == "patch":
+            names = {item["path"] for item in page}
+            patches = self._format_diff(
+                {name: value for name, value in before.items() if name in names},
+                {name: value for name, value in after.items() if name in names},
+                path,
+                max_chars,
+            )
+            stats = {item["path"]: item for item in page}
+            changes = [{**stats[item["path"]], **item} for item in patches["changes"]]
+            truncated = patches["truncated"]
+        next_offset = offset + len(changes)
+        has_more = next_offset < len(descriptions)
         return {
             "project_id": project_id,
             "snapshot": handle,
-            "baseline": "previous" if revision > 1 else "empty",
-            **self._format_diff(before, after, path),
+            "baseline": baseline,
+            "detail": detail,
+            "changes_available": True,
+            "summary": {
+                "files_changed": len(descriptions),
+                "added": sum(item["op"] == "add" for item in descriptions),
+                "deleted": sum(item["op"] == "delete" for item in descriptions),
+                "modified": sum(item["op"] == "modify" for item in descriptions),
+                "insertions": sum(item["insertions"] for item in descriptions),
+                "deletions": sum(item["deletions"] for item in descriptions),
+            },
+            "changes": changes,
+            "offset": offset,
+            "has_more": has_more,
+            "next_offset": next_offset if has_more else None,
+            "truncated": truncated,
         }
 
     @staticmethod
@@ -466,8 +566,8 @@ class MirrorStore:
         }
 
     @staticmethod
-    def _format_diff(before: dict, after: dict, path: str | None) -> dict:
-        changes, remaining, truncated = [], 50_000, False
+    def _format_diff(before: dict, after: dict, path: str | None, max_chars: int = 50_000) -> dict:
+        changes, remaining, truncated = [], max_chars, False
         for name in sorted(before.keys() | after.keys()):
             if path is not None and name != path:
                 continue

@@ -8,7 +8,11 @@
 **首次开源预览版：macOS 14+ / Apple Silicon。**
 [下载安装包](https://github.com/YuyanYYt/Colink/releases/tag/v0.4.0) ·
 [安装与使用](docs/INSTALL.md) · [让 Agent 帮你安装](docs/AGENT_INSTALL.md) ·
-[技术架构](docs/ARCHITECTURE.md) · [安全边界](SECURITY.md)
+[技术架构](docs/ARCHITECTURE.md) · [安全边界](SECURITY.md) ·
+[ChatGPT 自动匹配 Skill](docs/CHATGPT_SKILL.md)
+
+公开下载仍指向已发布的 0.4.0；源码维护版本为 0.4.1。本轮修复与后续重构边界见
+[重构锚点](docs/REFACTOR_ANCHOR.md)，不能把源码版本号当成已发布新安装包。
 
 下载 DMG，拖入“应用程序”，打开 Colink，完成首次连接设置，然后选择文件夹并点击启动。
 安装包包含 Python、MCP 运行依赖和经过校验的官方隧道客户端，使用者不需要先安装
@@ -177,21 +181,31 @@ uv run colink status --root examples/sample_project --project live-sample \
 
 | 工具 | 返回内容 |
 | --- | --- |
-| `list_projects()` | 项目标识、文件数量、采集时间与内部读取标识，不返回递增版本号 |
-| `repo_overview(project_id, snapshot?, offset?, limit?)` | 分页文件清单、哈希、大小与内部读取标识 |
-| `read_file(project_id, path, snapshot?, start_line?, end_line?)` | UTF-8 源码、行范围、完整文件哈希 |
+| `list_projects()` | 项目标识、可读名称、文件数量与采集时间，不返回递增版本号或绝对源路径 |
+| `connection_status()` | 可达服务的本机同步状态、最近同步时间及过滤规则；不证明远程隧道健康 |
+| `repo_overview(project_id, snapshot?, offset?, limit?, include_hashes?)` | 分页文件清单、大小与内部读取标识；文件哈希默认隐藏，可诊断时开启 |
+| `read_file(project_id, path, snapshot?, start_line?, end_line?)` | UTF-8 源码、行范围、完整文件哈希和 `next_start_line` |
 | `search_code(project_id, query, snapshot?, limit?)` | 区分大小写的字面量匹配、路径、行号与片段 |
-| `get_diff(project_id, snapshot?, path?)` | 默认比较当前与前一次代码状态，无需填写版本编号 |
+| `get_diff(project_id, snapshot?, path?, baseline?, detail?, offset?, limit?, max_chars?)` | 默认返回前次到当前的分页差异摘要；按需请求单文件补丁，不填写版本编号 |
 
 一次分析先调用 `repo_overview`，随后把其返回的内部 `snapshot` 标识传给每次读取、搜索。
 标识不是递增编号，工具说明要求仅用它维持读取一致性，除非用户要求诊断，不在回答中展示
 标识、哈希或同步细节。省略 `snapshot` 默认读当前代码；`"previous"` 可读前一次状态。
 只保留当前和前一份状态；标识过期时明确拒绝，必须重新获取清单并重做该轮分析，
-不会悄悄换成最新代码。首次没有前一份时，差异工具以空项目作为比较基线。
+不会悄悄换成最新代码。首次没有前一份时，差异工具返回 `NO_PREVIOUS_SNAPSHOT`，
+不导出整仓源码；只有显式指定 `baseline="empty"` 才与空目录比较。
+默认 `detail="summary"` 返回改动文件数、增删行数和分页描述；需要源码时用
+`path` 限定文件并设置 `detail="patch"`。使用 `next_offset` 继续同一快照的分页。
+补丁字符预算默认 20,000，可调至 50,000；`truncated` 表示补丁被截断，
+`has_more` 表示还有未返回的文件，这两个标志不是同一含义。
 代码中的注释、文档和字符串作为数据返回，不能充当模型指令。
 
 更新工具后，在 ChatGPT 的原连接管理页刷新工具，并用新对话验证。带旧 `revision`
 参数的缓存调用会明确要求刷新，不会忽略参数后误读当前代码。
+
+Colink 的调用规则可以安装为独立 Skill，按问题自动匹配，不需要每次手动选中。
+它只指导使用已经连接的 Colink，不携带凭据、不增加目录权限。网页安装步骤和
+不能保证每次自动命中的边界见 [ChatGPT Skill](docs/CHATGPT_SKILL.md)。
 
 ## 同步与文件策略
 
@@ -206,8 +220,10 @@ uv run colink status --root examples/sample_project --project live-sample \
 1/2/4/8/16/30 秒退避；重新运行使用原 request_id 重试。后续磁盘修改成为下一批，
 不会改写已经使用的幂等请求。冲突和认证失败会停止并给出原因。
 
-默认排除 `.git`、`.venv`、`node_modules`、构建与缓存目录、`.env*`、密钥、
-凭据文件名、数据库文件、符号链接、二进制、非 UTF-8 文本。客户端和服务端同时拒绝
+默认排除 `.git`、`.venv`、`node_modules`、构建与缓存目录、`.env`/`.env.*`、密钥、
+凭据文件名（包括 `service-account*.json`、`service_account*.json` 和
+`client_secret*.json`）、数据库文件、符号链接、二进制、非 UTF-8 文本。
+强制排除目录的匹配不区分大小写。客户端和服务端同时拒绝
 部分已知凭据格式；这只是基础过滤，不能保证识别全部敏感信息。同步前使用 `scan`
 查看允许文件。根目录 `.gitignore`、`.codecontextignore` 提供额外规则；当前不处理
 嵌套目录内的 `.gitignore`，规则也不能解除强制排除。
@@ -266,6 +282,7 @@ uv run pytest -q
 默认数据位于 `.code-context/server/mirror.sqlite3` 与 `.code-context/clients/`。
 这是可复用的数据状态，应保留；不要把它当成普通缓存删除。依赖版本由 `uv.lock` 固定。
 
-当前开源预览版为 0.4.0，项目与界面对外统一为 Colink。推荐 CLI 为 `uv run colink`；
+当前源码维护版为 0.4.1，公开开源预览包为 0.4.0，项目与界面对外统一为 Colink。
+推荐 CLI 为 `uv run colink`；
 原 `code-context` 命令仍兼容，以免现有应用/profile 失效。工作区路径、`code_context`
 模块、`CODE_CONTEXT_*` 配置和连接 ID 保持不变；旧发布/验收记录保留当时真实名称。

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "colink-mcp"
-version = "0.4.0"
+version = "0.4.1"
 description = "Colink: a small code mirror, local sync client, and read-only MCP server."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -39,6 +39,7 @@ packages = ["src/code_context"]
 include = [
     "/src", "/tests", "/docs", "/macos", "/scripts", "/examples",
     "/integrations/chatgpt-plugin/README.md", "/integrations/chatgpt-plugin/assets",
+    "/integrations/skills",
     "/README.md", "/LICENSE", "/THIRD_PARTY_NOTICES.md", "/SECURITY.md",
     "/CONTRIBUTING.md", "/CHANGELOG.md", "/AGENTS.md", "/pyproject.toml",
     "/uv.lock", "/.gitignore", "/.codecontextignore", "/.python-version",

@@ -7,6 +7,12 @@
 普通用户按 [安装指南](../../docs/INSTALL.md) 自行创建私有连接并命名为 Colink。
 GitHub 发布不是 ChatGPT 公共插件目录发布，私有 Tunnel 也不能代替公共目录审核。
 
+通用代码问答 Skill 已独立放在
+[`integrations/skills/colink-code-context`](../skills/colink-code-context/SKILL.md)，
+不包含此目录被忽略的个人连接文件。可通过 ChatGPT 技能编辑器或本机上传安装，
+自动匹配规则与实际入口见 [Skill 安装指南](../../docs/CHATGPT_SKILL.md)。
+独立安装 Skill 不等于已向现有私有 MCP 插件上传捆绑技能，也不修改其连接权限。
+
 以下是维护者本机既有图标包的历史维护说明，**不是新用户安装步骤**：
 
 这个目录仅保存现有私有插件的展示元数据，不运行代码，不包含源码、密钥或隧道凭据。

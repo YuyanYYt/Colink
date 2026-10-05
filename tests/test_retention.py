@@ -131,7 +131,7 @@ def test_recent_diff_resolves_and_reads_in_one_transaction(tmp_path, monkeypatch
         return result
 
     monkeypatch.setattr(store, "_resolve_snapshot", interleaved)
-    result = store.get_recent_diff("sample")
+    result = store.get_recent_diff("sample", detail="patch")
     assert result["baseline"] == "previous"
     assert "-value = 1" in result["changes"][0]["diff"]
     assert "+value = 2" in result["changes"][0]["diff"]
