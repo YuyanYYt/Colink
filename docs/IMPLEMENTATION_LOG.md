@@ -43,6 +43,11 @@
   相关 adapter/server/stdio/local 测试 31 passed（3.36 秒，1 条既有弃用警告），
   相关 Ruff 与差异检查通过。当前尚无直读/多项目/写入运行能力。
 - R2～R6/W：待完成。逐项证据和提交在阶段完成时追加，不能提前写成已验收。
+- R2 安全原文件访问组件：元信息清单不读正文，安全 nofollow/目录身份与内容稳定
+  检查复用 Scanner；直接读取保留换行/权限，不生成正文数据库。相关 SourceAccess /
+  Scanner 测试 130 passed（0.19 秒），Ruff 与差异检查通过；尚未接入运行模式。
+- 网页接入已完成一次官方资料核对，后续复用 [网页 SOP](WEB_ACCEPTANCE_SOP.md)，
+  不反复联网查询接入文档。真实网页测试仍待运行实现就绪后执行。
 
 关联：[读取重构计划](LIVE_WORKSPACE_REFACTOR.md)、[写入契约](WRITE_CONTRACT.md)、
 [维护路线](ROADMAP.md)、[验证记录](VALIDATION.md)。
