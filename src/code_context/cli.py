@@ -45,6 +45,11 @@ def parser() -> argparse.ArgumentParser:
     local_status = commands.add_parser("local-status", help="只读查看本机持续镜像的状态")
     local_status.add_argument("--data-dir", type=Path, default=Path(".code-context/local"))
 
+    live = commands.add_parser("live", help="按需直读指定项目的已保存源码，不保留正文镜像")
+    live.add_argument("--root", type=Path, required=True)
+    live.add_argument("--project", required=True)
+    live.add_argument("--data-dir", type=Path, default=Path(".code-context/live"))
+
     for name in ("desktop-status", "desktop-run"):
         command = commands.add_parser(name, help="CoLink 菜单栏应用的本机生命周期接口")
         command.add_argument("--workspace", type=Path, default=Path.cwd())
@@ -160,6 +165,26 @@ def main(argv: list[str] | None = None) -> int:
                     project_names={args.project: source.root.name},
                     status_provider=source.mcp_status,
                 ).run(transport="stdio")
+            return 0
+        if args.command == "live":
+            from code_context.live import LiveQueries
+            from code_context.source_access import SourceAccess
+
+            os.environ.pop("CONTROL_PLANE_API_KEY", None)
+            os.environ.pop("OPENAI_API_KEY", None)
+            source = SourceAccess(
+                args.root, excluded_roots=(args.data_dir.expanduser().absolute(),)
+            )
+            backend = LiveQueries({args.project: source})
+            try:
+                build_mcp(
+                    backend,
+                    args.project,
+                    project_names={args.project: source.root.name},
+                    status_provider=backend.mcp_status,
+                ).run(transport="stdio")
+            finally:
+                backend.close()
             return 0
         if args.command in {"demo", "demo-local"}:
             from code_context.demo import run_demo, run_local_demo
