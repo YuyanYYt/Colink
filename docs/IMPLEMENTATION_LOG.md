@@ -93,6 +93,15 @@
   67 项通过（15.02 秒），三种真实子进程停止路径均覆盖。前两次范围验证暴露旧
   状态读取的 SQLite 建表窗口以及一次系统停止验证失败：前者已修正为只读初始化/
   不完整状态，后者不能假报停止并保留 stop_failed。仍需阶段全量与真实应用证明。
+- R1～R4 关键源码节点：版本设为 `0.4.4a1`（计划中的 0.4.4-alpha.1），未公开
+  发行/覆盖安装。关键节点全量 **694 passed（38.49 秒）**，一条原有上游弃用警告；
+  全项目 Ruff 66 文件 check/format check 通过。资源基准、原生 UI 与网页 gate 尚待。
+  `uv sync --locked` 已通过并更新本工作区环境为 0.4.4a1；初次离线构建因
+  Hatchling 不在缓存而退出，随后按锁文件正常构建成功，未升级依赖或修改旧运行数据。
+- Skill Creator 迁移项目随附 Skill：保留隐式调用，区分 mirror/live 语义、明确项目
+  ID/歧义/失效/当前关系事实及外部历史限制。自带 Python 校验器缺 PyYAML，改用
+  系统 YAML 解析器核验 frontmatter 和 `allow_implicit_invocation=true`；未改变依赖，
+  不把静态文档校验冒充账号内 Skill 已更新或模型每次必定自动路由。
 
 关联：[读取重构计划](LIVE_WORKSPACE_REFACTOR.md)、[写入契约](WRITE_CONTRACT.md)、
 [维护路线](ROADMAP.md)、[验证记录](VALIDATION.md)。
