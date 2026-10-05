@@ -1,7 +1,9 @@
 """Query backend for saved local files, without permanent source-text snapshots."""
 
 from datetime import UTC, datetime
+from threading import RLock
 
+from code_context.fingerprint_cache import FingerprintCache
 from code_context.models import validate_project
 from code_context.policy import MAX_TOTAL_BYTES
 from code_context.read_context import ContextError, ReadContexts
@@ -19,6 +21,13 @@ class LiveQueries:
         for project_id in sources:
             validate_project(project_id)
         self.sources = dict(sources)
+        self._source_lock = RLock()
+        self._closed = False
+        self._source_ids = {project: source.source_id for project, source in sources.items()}
+        self.fingerprint_cache = FingerprintCache()
+        self.fingerprint_cache.retain_sources(self._source_ids.values())
+        for source in self.sources.values():
+            source.attach_fingerprint_cache(self.fingerprint_cache)
         self.registry = registry
         self.contexts = contexts or ReadContexts()
         self.index_service = None
@@ -30,12 +39,32 @@ class LiveQueries:
             validate_project(project_id)
         except ValueError:
             raise SourceError("INVALID_PROJECT: choose an authorized project") from None
-        if self.registry is not None:
-            return self.registry.source(project_id)
-        if project_id not in self.sources:
-            raise SourceError("PROJECT_NOT_AUTHORIZED: choose from list_projects")
-        source = self.sources[project_id]
-        source.ensure_available()
+        with self._source_lock:
+            if self._closed:
+                raise SourceError("LIVE_CLOSED: restart the live backend")
+            source = self.sources.get(project_id)
+        try:
+            if self.registry is not None:
+                source = self.registry.source(project_id)
+            elif source is None:
+                raise SourceError("PROJECT_NOT_AUTHORIZED: choose from list_projects")
+            else:
+                source.ensure_available()
+        except SourceError:
+            with self._source_lock:
+                self._source_ids.pop(project_id, None)
+                self.fingerprint_cache.retain_sources(self._source_ids.values())
+            self.contexts.invalidate_project(project_id)
+            raise
+        with self._source_lock:
+            if self._closed:
+                raise SourceError("LIVE_CLOSED: restart the live backend")
+            self.sources[project_id] = source
+            if self._source_ids.get(project_id) != source.source_id:
+                self._source_ids[project_id] = source.source_id
+                self.fingerprint_cache.retain_sources(self._source_ids.values())
+        # Attach outside backend/cache locks: a source can hold its I/O lock.
+        source.attach_fingerprint_cache(self.fingerprint_cache)
         return source
 
     def list_projects(self):
@@ -70,8 +99,16 @@ class LiveQueries:
 
     def refresh_sources(self):
         if self.registry is not None:
-            previous = set(self.sources)
-            self.sources = self.registry.authorized_sources()
+            sources = self.registry.authorized_sources()
+            with self._source_lock:
+                if self._closed:
+                    raise SourceError("LIVE_CLOSED: restart the live backend")
+                previous = set(self.sources)
+                self.sources = sources
+                self._source_ids = {p: source.source_id for p, source in sources.items()}
+                self.fingerprint_cache.retain_sources(self._source_ids.values())
+            for source in sources.values():
+                source.attach_fingerprint_cache(self.fingerprint_cache)
             self.contexts.clear()
             if self.index_service is not None:
                 for project in previous | self.sources.keys():
@@ -245,7 +282,17 @@ class LiveQueries:
             "write_enabled": False,
         }
 
-    def close(self):
+    def clear(self):
+        """Clear this backend's contexts and charged metadata, without source I/O."""
         self.contexts.clear()
+        self.fingerprint_cache.clear()
+
+    def close(self):
+        with self._source_lock:
+            self._closed = True
+            self._source_ids.clear()
+            # Revoke puts from an in-flight accessor before waiting for index work.
+            self.fingerprint_cache.retain_sources(())
+        self.clear()
         if self.index_service is not None:
             self.index_service.close()

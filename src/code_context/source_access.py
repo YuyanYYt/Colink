@@ -10,11 +10,11 @@ import os
 import stat
 import threading
 import time
-from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from code_context.fingerprint_cache import FingerprintCache, SourceFingerprints
 from code_context.models import content_hash
 from code_context.policy import MAX_FILE_BYTES, MAX_FILES, validate_path
 from code_context.scanner import ScanError, Scanner, _identity, _version
@@ -51,8 +51,20 @@ class SourceAccess:
         self.source_id = hashlib.sha256(raw).hexdigest()
         self.lock = threading.RLock()
         self.metrics = {"body_reads": 0, "metadata_walks": 0}
-        self._fingerprints = OrderedDict()
+        self._fingerprints = SourceFingerprints(FingerprintCache(max_entries=4096), self.source_id)
         self._ignore_cache = None
+
+    def attach_fingerprint_cache(self, cache: FingerprintCache):
+        """Use a backend-owned metadata budget; never transfer or retain bodies.
+
+        Only source -> cache lock ordering is used. A standalone source retains
+        its original 4096-entry default until a backend explicitly attaches it.
+        """
+        if not isinstance(cache, FingerprintCache):
+            raise ValueError("invalid fingerprint metadata cache")
+        with self.lock:
+            if self._fingerprints.cache is not cache:
+                self._fingerprints = SourceFingerprints(cache, self.source_id)
 
     def _ignore(self, root):
         names = (".gitignore", ".codecontextignore")
@@ -127,10 +139,7 @@ class SourceAccess:
                 raise SourceError("SOURCE_CHANGED: file changed while reading; retry")
             self.metrics["body_reads"] += 1
             sha256 = content_hash(content)
-            self._fingerprints[path] = (_version(after), sha256)
-            self._fingerprints.move_to_end(path)
-            while len(self._fingerprints) > 4096:
-                self._fingerprints.popitem(last=False)
+            self._fingerprints.put(path, _version(after), sha256)
             return SourceDocument(
                 path,
                 content,
@@ -162,6 +171,7 @@ class SourceAccess:
             if str(exc).startswith(
                 ("FILE_UNAVAILABLE:", "FILE_EXCLUDED:", "PATH_EXCLUDED:", "INVALID_PARENT:")
             ):
+                self._fingerprints.discard(path)
                 return None
             raise
 

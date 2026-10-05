@@ -2,6 +2,7 @@ import os
 
 import pytest
 
+from code_context.fingerprint_cache import FingerprintCache
 from code_context.source_access import SourceAccess, SourceError
 
 
@@ -123,3 +124,95 @@ def test_ignore_rules_reuse_metadata_but_changed_policy_takes_effect(tmp_path, m
     ignore.write_text("a.py\n")
     assert source.fingerprint("a.py") is None
     assert len(calls) == 2
+
+
+def test_standalone_default_is_4096_and_backend_attachment_is_metadata_only(tmp_path):
+    source = SourceAccess(tmp_path)
+    assert source._fingerprints.cache.max_entries == 4096
+    for number in range(4097):
+        source._fingerprints.put(f"file_{number}.py", (1, 2, 3, 4, 5, 6), "0" * 64)
+    assert len(source._fingerprints) == 4096
+    assert source._fingerprints.get("file_0.py") is None
+    cache = FingerprintCache()
+    source.attach_fingerprint_cache(cache)
+    assert source._fingerprints.cache is cache
+    assert source.metrics["body_reads"] == 0
+
+
+def test_shared_same_path_hashes_are_source_bound_and_changes_still_read(tmp_path):
+    cache = FingerprintCache()
+    sources = []
+    for name, body in (("a", "value = 1\n"), ("b", "value = 2\n")):
+        root = tmp_path / name
+        root.mkdir()
+        (root / "same.py").write_text(body)
+        source = SourceAccess(root)
+        source.attach_fingerprint_cache(cache)
+        sources.append(source)
+    a, b = sources
+    before = a.fingerprint("same.py")
+    assert b.fingerprint("same.py") != before
+    (a.root / "same.py").write_text("value = 3\n")
+    assert a.fingerprint("same.py") != before
+    assert a.metrics["body_reads"] == 2
+    assert b.fingerprint("same.py") and b.metrics["body_reads"] == 1
+
+
+def test_cached_fingerprint_keeps_second_stat_and_ignore_checks(tmp_path, monkeypatch):
+    file = tmp_path / "a.py"
+    file.write_text("before\n")
+    source = SourceAccess(tmp_path)
+    source.attach_fingerprint_cache(FingerprintCache())
+    old = source.fingerprint("a.py")
+    original = source._fingerprints.get
+
+    def change_between_stats(path):
+        value = original(path)
+        file.write_text("after\n")
+        return value
+
+    monkeypatch.setattr(type(source._fingerprints), "get", lambda self, p: change_between_stats(p))
+    assert source.fingerprint("a.py") != old
+    assert source.metrics["body_reads"] == 2
+    (tmp_path / ".codecontextignore").write_text("a.py\n")
+    assert source.fingerprint("a.py") is None
+    assert len(source._fingerprints) == 0
+
+
+def test_shared_cache_never_bypasses_symlink_or_root_identity(tmp_path):
+    root, other = tmp_path / "source", tmp_path / "other"
+    root.mkdir()
+    other.mkdir()
+    file = root / "a.py"
+    file.write_text("before\n")
+    (other / "a.py").write_text("outside\n")
+    source = SourceAccess(root)
+    source.attach_fingerprint_cache(FingerprintCache())
+    source.fingerprint("a.py")
+    file.unlink()
+    file.symlink_to(other / "a.py")
+    assert source.fingerprint("a.py") is None
+    assert source.metrics["body_reads"] == 1
+    root.rename(tmp_path / "saved")
+    root.mkdir()
+    with pytest.raises(SourceError, match="SOURCE_REPLACED"):
+        source.fingerprint("a.py")
+
+
+def test_source_io_can_observe_cache_stats_without_inverse_lock(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    (tmp_path / "a.py").write_text("value = 1\n")
+    source = SourceAccess(tmp_path)
+    cache = FingerprintCache()
+    source.attach_fingerprint_cache(cache)
+    original = source.scanner._read_text
+
+    def observed(parent, name, path):
+        assert not cache._lock.locked()
+        cache.stats()
+        return original(parent, name, path)
+
+    monkeypatch.setattr(source.scanner, "_read_text", observed)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        assert pool.submit(source.fingerprint, "a.py").result(timeout=2)

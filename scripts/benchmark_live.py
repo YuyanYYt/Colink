@@ -75,6 +75,7 @@ PROVENANCE_FILES = (
     "src/code_context/live_index.py",
     "src/code_context/live_watch.py",
     "src/code_context/source_access.py",
+    "src/code_context/fingerprint_cache.py",
     "src/code_context/scanner.py",
     "src/code_context/project_registry.py",
     "src/code_context/read_context.py",
@@ -582,6 +583,7 @@ def phase_worker(output, phase):
             ),
         )
         backend.index_service = service
+        report["fingerprint_cache_before"] = backend.fingerprint_cache.stats()
         report["configured_limits"] = index_status(service, ids["A"])["limits"]
         report["structure_wait_seconds"] = service.wait_seconds
         report["a_index_before_query"] = index_status(service, ids["A"])
@@ -663,6 +665,7 @@ def phase_worker(output, phase):
             report["fingerprint_cache_entries_after_repeats"] = {
                 label: len(source._fingerprints) for label, source in sources.items()
             }
+            report["fingerprint_cache_after_repeats"] = backend.fingerprint_cache.stats()
             measurements.sample("after_repeats")
 
             def page_summary(value):
@@ -759,6 +762,7 @@ def phase_worker(output, phase):
                 report["a_index_after_restart"]["stats"].get("parsed_files") == 1
             )
         measurements.sample("after_final_query")
+        report["fingerprint_cache_final_before_close"] = backend.fingerprint_cache.stats()
         report["storage_final"] = storage(service.path, ids)
         report["b_index_status"] = index_status(service, ids["B"])
         report["watch_final"] = watch_summary(watcher, probe, sources)
@@ -986,6 +990,7 @@ def main():
             "text_reads": "Scanner decoded text bytes, not physical disk I/O",
             "root_ignore": "includes policy loading and explicit index config reads",
             "source_metrics": "body_reads omits actual root-ignore policy loading",
+            "fingerprint_budget": "backend-wide entries and estimated charged metadata, not RSS",
             "process_metrics": "RSS sampled and lifetime high-water; FDs include probe pipes",
             "kernel_watch": "not instrumented; directory count is not native watch resources",
             "disk_peak": "post-operation DB/sidecar samples, not transient journal peak",

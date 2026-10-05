@@ -6,6 +6,7 @@ from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
 from code_context.live import LiveQueries
+from code_context.project_registry import ProjectRegistry
 from code_context.server import build_mcp
 from code_context.source_access import SourceAccess, SourceError
 
@@ -129,3 +130,136 @@ def test_live_stdio_reads_new_saved_content_without_source_database(tmp_path):
 
     asyncio.run(inspect())
     assert not data.exists()
+
+
+def test_backend_sources_share_one_bounded_metadata_cache(backend):
+    cache = backend.fingerprint_cache
+    a, b = backend.source("a"), backend.source("b")
+    assert a._fingerprints.cache is b._fingerprints.cache is cache
+    a.fingerprint("a.py")
+    b.fingerprint("b.py")
+    assert len(cache) == 2 and len(a._fingerprints) == len(b._fingerprints) == 1
+    assert cache.stats()["max_entries"] == 50_000
+    assert cache.stats()["max_charged_bytes"] == 32 * 1024 * 1024
+    backend.clear()
+    assert len(cache) == 0 and a.metrics["body_reads"] == b.metrics["body_reads"] == 1
+    a.fingerprint("a.py")
+    backend.close()
+    assert cache.stats()["charged_bytes"] == 0
+    assert not a._fingerprints.put("a.py", (1, 2, 3, 4, 5, 6), "0" * 64)
+    with pytest.raises(SourceError, match="LIVE_CLOSED"):
+        backend.source("a")
+
+
+def test_closing_one_backend_does_not_clear_a_different_backends_cache(tmp_path):
+    for name in ("one", "two"):
+        root = tmp_path / name
+        root.mkdir()
+        (root / "same.py").write_text(f"value = '{name}'\n")
+    one = LiveQueries({"one": SourceAccess(tmp_path / "one")})
+    two = LiveQueries({"two": SourceAccess(tmp_path / "two")})
+    one.source("one").fingerprint("same.py")
+    source = two.source("two")
+    expected = source.fingerprint("same.py")
+    one.close()
+    assert len(two.fingerprint_cache) == 1
+    assert source.fingerprint("same.py") == expected and source.metrics["body_reads"] == 1
+
+
+def test_more_than_4096_participants_validate_twice_without_repeat_body_reads(tmp_path):
+    root = tmp_path / "large"
+    root.mkdir()
+    paths = [f"file_{number:04d}.py" for number in range(4100)]
+    for path in paths:
+        (root / path).write_text("value = 0\n")
+    source = SourceAccess(root)
+    backend = LiveQueries({"large": source})
+    handle, _ = backend.resolve_snapshot("large")
+    for path in paths:
+        document = source.read(path)
+        backend.contexts.observe("large", source.source_id, handle, path, document.sha256)
+    for _ in range(2):
+        backend.resolve_snapshot("large", handle)
+    assert source.metrics["body_reads"] == 4100
+    assert len(source._fingerprints) == len(backend.fingerprint_cache) == 4100
+    assert backend.fingerprint_cache.stats()["charged_bytes"] <= 32 * 1024 * 1024
+    backend.close()
+
+
+def registered_backend(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ProjectRegistry(workspace)
+    ids = {}
+    for name in ("a", "b"):
+        root = workspace / name
+        root.mkdir()
+        (root / "same.py").write_text(f"value = '{name}'\n")
+        ids[name] = registry.register(name, enabled=True)
+    return LiveQueries(registry=registry), registry, ids
+
+
+def test_refresh_revokes_only_disabled_source_and_preserves_other_active_metadata(tmp_path):
+    backend, registry, ids = registered_backend(tmp_path)
+    a, b = backend.source(ids["a"]), backend.source(ids["b"])
+    a.fingerprint("same.py")
+    expected = b.fingerprint("same.py")
+    registry.set_enabled(ids["a"], False)
+    backend.refresh_sources()
+    assert len(a._fingerprints) == 0 and len(b._fingerprints) == 1
+    assert b.fingerprint("same.py") == expected and b.metrics["body_reads"] == 1
+    assert not a._fingerprints.put("late.py", (1, 2, 3, 4, 5, 6), "0" * 64)
+    with pytest.raises(SourceError):
+        backend.source(ids["a"])
+    assert len(b._fingerprints) == 1
+
+
+def test_dynamic_registry_sources_lazily_attach_same_cache_without_resetting_b(tmp_path):
+    backend, registry, ids = registered_backend(tmp_path)
+    b = backend.source(ids["b"])
+    expected = b.fingerprint("same.py")
+    root = registry.workspace / "new"
+    root.mkdir()
+    (root / "new.py").write_text("value = 3\n")
+    new_id = registry.register("new", enabled=True)
+    new = backend.source(new_id)  # No refresh call: registry is dynamically authorized.
+    assert new._fingerprints.cache is backend.fingerprint_cache
+    assert new.fingerprint("new.py")
+    assert b.fingerprint("same.py") == expected and b.metrics["body_reads"] == 1
+    registry.set_enabled(new_id, False)
+    with pytest.raises(SourceError):
+        backend.source(new_id)
+    assert len(new._fingerprints) == 0 and len(b._fingerprints) == 1
+
+
+def test_replaced_source_binding_discards_only_old_namespace(backend):
+    a, b = backend.source("a"), backend.source("b")
+    a.fingerprint("a.py")
+    expected_b = b.fingerprint("b.py")
+    a.root.rename(a.root.with_name("saved_a"))
+    a.root.mkdir()
+    (a.root / "a.py").write_text("replacement\n")
+    backend.sources["a"] = SourceAccess(a.root)
+    replacement = backend.source("a")
+    assert replacement.source_id != a.source_id
+    assert len(a._fingerprints) == 0
+    assert b.fingerprint("b.py") == expected_b and b.metrics["body_reads"] == 1
+    assert replacement.fingerprint("a.py")
+    assert replacement._fingerprints.cache is b._fingerprints.cache
+
+
+def test_64_sources_share_one_global_budget_not_64_independent_50000_caches(tmp_path):
+    sources = {}
+    for number in range(64):
+        root = tmp_path / f"p{number}"
+        root.mkdir()
+        (root / "a.py").write_text(f"value = {number}\n")
+        sources[f"p{number}"] = SourceAccess(root)
+    backend = LiveQueries(sources)
+    for source in sources.values():
+        assert source._fingerprints.cache is backend.fingerprint_cache
+        source.fingerprint("a.py")
+    assert len(backend.fingerprint_cache) == 64
+    assert backend.fingerprint_cache.stats()["active_sources"] == 64
+    assert backend.fingerprint_cache.stats()["charged_bytes"] <= 32 * 1024 * 1024
+    backend.close()

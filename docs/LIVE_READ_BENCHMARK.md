@@ -1,7 +1,8 @@
 # Synthetic live-read / lazy-index resource baseline
 
-2026-10-06：100 定义文件基准与 5000 定义文件探针各一份独立 fixture、各运行一次。
-原 100 文件结果保留且未重跑。两者都不是实际企业项目，
+2026-10-06：100 定义文件基准与 5000 定义文件探针各一份独立 fixture、各运行一次；
+共享 fingerprint LRU 修复后，仅再执行一次相同 5000 文件分布的新 fixture。
+原两份结果保留且未重跑。所有测量都不是实际企业项目，
 不表示 R6、desktop、隧道、网页、模型或整体重构已验收。
 
 ## 重现与输出保护
@@ -152,3 +153,103 @@ UV_NO_CACHE=1 PYTHONDONTWRITEBYTECODE=1 TMPDIR="$(pwd)/$live_benchmark_uv_tmp" \
 ```
 
 没有执行网页、desktop 或隧道验收，也没有修改主线组件、LOG、CHANGELOG、提交或清理。
+
+## Backend 共用 fingerprint LRU：一次修复后测量
+
+本轮仅修改 `source_access.py` / `live.py`，新增纯元信息 `fingerprint_cache.py` 与相关测试；
+脚本只增加该模块源码哈希与全局缓存统计，不改变 fixture、请求流程、索引或监听预算。
+旧 5000 文件探针的 performance.json / summary.md 前后 SHA-256 相同，原约 8.2 秒
+warm 负面证据仍在上一节，原 100 文件基准也没有重跑。
+
+- [修复后性能 JSON](../.artifacts/live-benchmark.T69y6r/performance.json)
+- [修复后短报告](../.artifacts/live-benchmark.T69y6r/summary.md)
+- [cold 明细](../.artifacts/live-benchmark.T69y6r/phase-cold.json)
+- [新进程重启明细](../.artifacts/live-benchmark.T69y6r/phase-restart.json)
+- [相同规模新 fixture](../.artifacts/live-benchmark.T69y6r/fixture.json)
+
+执行一次 `--definitions-a 5000 --definitions-per-file 1`，默认 warm 3 次。A 仍为
+5000 函数 / 5000 定义文件，另有包标记与 3 个 Java 文件；B 为 100 函数 / 100 定义文件。
+初始文件正文总计 3,773,544 字节，普通分页文件仍为 3 MiB，没有扩大数据规模。
+实际运行前后 HEAD 均为 `55fa700d709a73de2f3210ed000cfa4d386f0fea`，使用本轮未提交补丁；
+所记源码在运行期间没有变化。与旧 5000 文件运行相比，live / source_access / policy /
+benchmark 哈希变化，并新增 fingerprint_cache；LiveIndex / Scanner / Watch / registry /
+解析器与 uv.lock 的所记哈希相同。这不是固定 HEAD、清空 OS 缓存的严格受控 A/B 实验。
+
+| 操作 | 修复后 wall ms | index_not_ready / index_partial |
+| --- | ---: | --- |
+| 发现候选 | 64.075 | 不适用；发现完整 |
+| A 元信息概览 | 71.615 | 不适用；发现完整 |
+| cold A 结构请求 | 5160.269 | false / false |
+| warm A 第 1 / 2 / 3 次 | 4012.522 / 4029.440 / 4006.032 | 均 false / false |
+| 修改一个 A 文件，新上下文重建 | 4949.217 | false / false |
+| 停机编辑后的新进程请求 | 6692.311 | false / false |
+| 3 MiB 普通文件第 1 / 2 页 | 45.104 / 42.631 | 不适用 |
+
+warm 中位数 4012.522 ms，旧同分布中位数为 8207.459 ms；**约 4 秒仍不是交互性能通过**。
+每次 warm 的 Scanner code / other_text / root_ignore 读取与返回字节均为 0；原同分布每次
+warm 的 code 读取为 20,016 次。这说明本轮不再重复读取不变正文，不代表没有元信息 I/O。
+冷启动首次读 5004 个 code 文件；停机后新进程缓存为空，仍读 code 5005 次进行变化校验。
+在线与停机编辑均只重解析 1 个文件、复用 5003 个解析结果，仍重绑定 5004 个文件。
+10 秒构建 Future 等待与 120 秒子进程保护均未提高；两阶段退出码 0，无 partial / 未就绪 /
+超时，25 项脚本功能检查通过。这些检查不替代性能、网页或企业规模验收。
+
+### 缓存预算与集成 API
+
+每个 `LiveQueries` 仅拥有一个 `fingerprint_cache`，所有初始、刷新与 registry lazy 来源
+都通过 `SourceAccess.attach_fingerprint_cache(cache)` 附加它。独立 SourceAccess 默认仍是
+4096 条目。`source._fingerprints` 现在是 per-source 元信息视图，`len` 只统计本来源；
+不可再把它当作 OrderedDict 或直接赋值下标。
+
+- `FingerprintCache(max_entries=50_000, max_bytes=32*1024*1024)` 同时强制全局条目与字节额度；
+  可下调测试额度，不允许超过上述硬配置上限。键为 `(source_id, relative_path)`，值仅为
+  6 个版本整数与 SHA-256；没有正文或新 SQLite。
+- `get(source_id, path)` 返回不可变 `(version, sha256)` 或 None；`put(...)` 返回是否保留。
+  `discard(source_id, path)` / `drop_source(source_id)` 只移除指定文件 / 来源条目。
+  `retain_sources(source_ids)` 保留合法命名空间，拒绝被撤权旧访问器的晚到 put；刷新/单来源
+  失效不清掉其他 active 项目。`stats()` 返回计数副本，不返回路径或来源集合。
+- charged metadata 为每条目 512 字节容器/整数余量 + source ID / 相对路径 / hash 的 UTF-8
+  长度；每个授权来源另计 128 + 64 = 192 字节。**这是估算额度，不是实际 RSS 硬上限**。
+- 缓存自身线程安全；缓存锁内不调用 SourceAccess、文件系统或调用方回调。来源保持 root
+  身份、ignore、nofollow、两次 stat 与版本/内容 hash 校验；变化不能复用旧 hash。
+- `LiveQueries.clear()` 清本 backend 的上下文与指纹条目，保留授权集合；`close()` 先撤销
+  所有缓存 put，再清理条目并关闭原索引服务，不清其他 backend 的缓存或读取源码正文。
+
+warm 后全局为 5007 条（A 5007、B 0），charged bytes 3,293,993，含两来源绑定 384 字节，
+淘汰 0；cold 阶段结束、分页与变化检测后为 5008 条 / 3,294,642 字节。全局上限始终为
+50,000 / 33,554,432 字节，未给每个项目各自扩大到 50,000。
+
+### 存储、隔离与资源
+
+B 两阶段的源码/其他正文读取、SourceAccess body_reads、六张事实表 B 行数均为 0，
+但每阶段仍读两个 B root-ignore 文件、34 字节，不能说 B 全部文件零读取。
+DB 配置仍为 64 MiB，managed_peak_config 128 MiB，有效页上限 44,736,512 字节。
+在线编辑后 DB 文件 26,812,416 字节 / 分配 27,275,264；重启后均为 26,738,688 字节。
+操作后 journal/WAL/SHM 为 0；不代表实测瞬时磁盘峰值。
+
+cold 空闲 RSS 53,952,512 字节，生命周期 RSS 高水位 124,928,000 字节（约 119.14 MiB）；
+重启进程高水位 109,953,024 字节。空闲 FD 7，非递归 watch 目录 6，依赖/构建/缓存/
+.artifacts/.code-context/ignore 子树均剪枝。5000 文件仍集中在 pkg，不代表 5000 个目录；
+未直接计量内核 watch 资源。RSS 是整个进程采样与高水位，32 MiB charged metadata 与
+128 MiB managed DB peak 都不能作为进程内存上限。
+
+### 相关验证记录
+
+仅运行 fingerprint cache / SourceAccess / LiveQueries / ReadContext / LiveIndex 的相关测试，
+151 passed in 3.47s。覆盖跨来源键隔离、LRU/bytes 淘汰、变化 hash、nofollow/ignore、
+来源撤权和替换不影响 B、64 来源共享同一预算、4100 文件两次上下文校验不再读正文，
+以及缓存锁不执行 I/O/迭代回调。未跑全量或修改其他主线组件来凑绿。
+
+实际 pytest 记录（已用的 basetemp 保留，不能复用此命令重建它）：
+
+```sh
+UV_NO_CACHE=1 PYTHONDONTWRITEBYTECODE=1 \
+TMPDIR=.artifacts/fingerprint-cache-validation.ddrtRL \
+uv run --no-sync --frozen pytest -q -p no:cacheprovider \
+  --basetemp .artifacts/fingerprint-cache-validation.ddrtRL/pytest.OPfjxo \
+  tests/test_fingerprint_cache.py tests/test_source_access.py tests/test_live.py \
+  tests/test_read_context.py tests/test_live_index.py
+```
+
+相关 7 个 Python 文件的 Ruff check / format --check 通过。
+基准输出、UV 临时目录与独立 pytest 目录均保留，未提交、未清理；仅提供本机 synthetic
+组件与资源证据，尚未完成整体重构、受控写入、desktop、隧道或网页验收。
