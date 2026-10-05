@@ -94,10 +94,39 @@ struct ConnectPanel: View {
                 .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
                 .disabled(!controller.canChooseFolder)
                 .help("更换文件夹前，请先关闭连接")
+                if controller.configuration.isLive {
+                    Button { controller.showingProjects = true } label: {
+                        Label("项目管理", systemImage: "square.stack.3d.up")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .buttonStyle(.plain).foregroundStyle(accent)
+                    .disabled(controller.projectBusy)
+                }
             }
             .padding(15)
             .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 15))
             .overlay(RoundedRectangle(cornerRadius: 15).strokeBorder(.primary.opacity(0.07), lineWidth: 0.5))
+
+            if controller.configuration.isLive {
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle("允许修改已启用项目", isOn: Binding(
+                        get: { controller.writeEnabled },
+                        set: { controller.setWriteEnabled($0) }
+                    ))
+                    .toggleStyle(.switch).font(.system(size: 12, weight: .medium))
+                    .disabled(!controller.canChangeWrite)
+                    Text(controller.projectBusy ? "正在更新本机状态…"
+                         : controller.recoveryRequired ? "需要先完成任务恢复。"
+                         : !controller.writeAvailable ? "写入功能尚未开放。"
+                         : controller.hasActiveTask ? "已有任务进行中，关闭连接会关闭写入。"
+                         : "每次启动默认关闭，授权仅限本机已启用的项目。")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let error = controller.projectError {
+                        Text(error).font(.system(size: 10)).foregroundStyle(.orange)
+                    }
+                }
+            }
 
             HStack(spacing: 10) {
                 Button { controller.start() } label: {
@@ -134,8 +163,95 @@ struct ConnectPanel: View {
         .sheet(isPresented: $controller.showingSetup) {
             ConnectionSetupView(controller: controller, input: controller.setupInput)
         }
+        .sheet(isPresented: $controller.showingProjects) {
+            ProjectManagementView(controller: controller, input: controller.registrationInput)
+        }
     }
 
+}
+
+private struct ProjectManagementView: View {
+    @ObservedObject var controller: ConnectionController
+    @ObservedObject var input: ProjectRegistrationInput
+
+    private var canRegister: Bool {
+        let path = input.relativeRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = input.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return controller.canManageProjects && !path.isEmpty && !name.isEmpty
+            && !NSString(string: path).isAbsolutePath
+            && !path.split(separator: "/").contains("..")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("项目管理").font(.system(size: 21, weight: .semibold, design: .rounded))
+                Spacer()
+                Button(controller.projectBusy ? "处理中…" : "发现候选") {
+                    controller.discoverProjects()
+                }
+                .disabled(!controller.canManageProjects)
+            }
+            Text(controller.ownsConnection
+                 ? "只有本机确认允许的项目可供网页读取，新发现的项目需要单独启用。"
+                 : "启动连接后可发现和管理项目；选择文件夹不会自动共享代码。")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    if controller.projects.isEmpty {
+                        Text("尚无项目，可发现候选或登记相对目录。")
+                            .font(.system(size: 12)).foregroundStyle(.secondary)
+                    }
+                    ForEach(controller.projects) { project in
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(project.displayName).font(.system(size: 13, weight: .medium))
+                                    .lineLimit(1)
+                                Text(project.relativeRoot.isEmpty ? "." : project.relativeRoot)
+                                    .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                                if project.status == "unavailable" {
+                                    Text("暂不可用").font(.system(size: 10)).foregroundStyle(.orange)
+                                }
+                            }
+                            Spacer(minLength: 8)
+                            Text(project.enabled ? "允许" : "待确认")
+                                .font(.system(size: 11))
+                                .foregroundStyle(project.enabled ? accent : .secondary)
+                            Toggle("允许网页读取 \(project.displayName)", isOn: Binding(
+                                get: { project.enabled },
+                                set: { controller.setProjectEnabled(project, enabled: $0) }
+                            ))
+                            .labelsHidden().toggleStyle(.switch)
+                            .disabled(!controller.canManageProjects)
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+            .frame(minHeight: 80, maxHeight: 240)
+            Divider()
+            TextField("项目相对目录，如 services/api", text: $input.relativeRoot)
+                .textFieldStyle(.roundedBorder)
+            TextField("可读名称", text: $input.displayName).textFieldStyle(.roundedBorder)
+            if let error = controller.projectError {
+                Text(error).font(.system(size: 11)).foregroundStyle(.orange)
+            }
+            HStack {
+                Button("登记项目") {
+                    controller.registerProject(
+                        relativeRoot: input.relativeRoot.trimmingCharacters(in: .whitespacesAndNewlines),
+                        displayName: input.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    )
+                }
+                .disabled(!canRegister)
+                Spacer()
+                Button("完成") { controller.showingProjects = false }
+            }
+        }
+        .padding(24).frame(width: 440).tint(accent)
+        .onAppear { controller.refresh() }
+    }
 }
 
 private struct ConnectionSetupView: View {

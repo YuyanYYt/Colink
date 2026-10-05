@@ -66,7 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         ])
         popover = NSPopover()
         popover.contentViewController = container
-        popover.contentSize = NSSize(width: 360, height: 428)
+        popover.contentSize = NSSize(width: 360, height: controller.configuration.isLive ? 540 : 428)
         popover.behavior = .transient
         popover.delegate = self
         controller.showPanel = { [weak self] in self?.showPanel() }
@@ -118,10 +118,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard controller?.ownsConnection == true else { return .terminateNow }
-        quitting = true
-        controller.stop()
-        return .terminateLater
+        let owned = controller?.ownsConnection == true
+        quitting = owned
+        controller?.stop()
+        return owned ? .terminateLater : .terminateNow
     }
 }
 

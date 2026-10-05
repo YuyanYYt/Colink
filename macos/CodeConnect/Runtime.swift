@@ -9,8 +9,10 @@ struct RuntimeConfiguration {
     let sampleRoot: String
     let chatURL: String
     let python: String?
+    let sourceMode: String
 
     var isBundled: Bool { python != nil }
+    var isLive: Bool { sourceMode == "live" }
 
     private struct Manifest: Decodable {
         let mode: String?
@@ -21,6 +23,8 @@ struct RuntimeConfiguration {
         let sampleRoot: String
         let chatURL: String
         let dataName: String?
+        let sourceMode: String?
+        let runtimeWorkspace: String?
     }
 
     static func load() throws -> RuntimeConfiguration {
@@ -28,10 +32,25 @@ struct RuntimeConfiguration {
             throw NSError(domain: "Colink", code: 1)
         }
         let values = try JSONDecoder().decode(Manifest.self, from: Data(contentsOf: file))
+        let sourceMode = values.sourceMode ?? "mirror"
+        guard ["mirror", "live"].contains(sourceMode) else {
+            throw NSError(domain: "Colink", code: 7)
+        }
         if values.mode == "bundled" {
             let manager = FileManager.default
             guard let resources = Bundle.main.resourceURL, let python = values.python else {
                 throw NSError(domain: "Colink", code: 2)
+            }
+            if let workspace = values.runtimeWorkspace {
+                guard NSString(string: workspace).isAbsolutePath,
+                      NSString(string: values.sampleRoot).isAbsolutePath else {
+                    throw NSError(domain: "Colink", code: 8)
+                }
+                return Self(workspace: workspace, uv: "",
+                            client: resources.appendingPathComponent(values.client).path,
+                            sampleRoot: values.sampleRoot, chatURL: values.chatURL,
+                            python: resources.appendingPathComponent(python).path,
+                            sourceMode: sourceMode)
             }
             let support = try manager.url(for: .applicationSupportDirectory, in: .userDomainMask,
                                           appropriateFor: nil, create: true)
@@ -61,13 +80,35 @@ struct RuntimeConfiguration {
             }
             return Self(workspace: workspace.path, uv: "", client: resources.appendingPathComponent(values.client).path,
                         sampleRoot: sample.path, chatURL: values.chatURL,
-                        python: resources.appendingPathComponent(python).path)
+                        python: resources.appendingPathComponent(python).path,
+                        sourceMode: sourceMode)
         }
         guard let workspace = values.workspace, let uv = values.uv else {
             throw NSError(domain: "Colink", code: 5)
         }
         return Self(workspace: workspace, uv: uv, client: values.client,
-                    sampleRoot: values.sampleRoot, chatURL: values.chatURL, python: nil)
+                    sampleRoot: values.sampleRoot, chatURL: values.chatURL, python: nil,
+                    sourceMode: sourceMode)
+    }
+}
+
+struct WorkspaceProject: Identifiable {
+    let id: String
+    let displayName: String
+    let relativeRoot: String
+    let enabled: Bool
+    let status: String
+
+    init?(_ value: [String: Any]) {
+        guard let id = value["project_id"] as? String,
+              let name = value["display_name"] as? String,
+              let root = value["relative_root"] as? String,
+              let enabled = value["enabled"] as? Bool else { return nil }
+        self.id = id
+        self.displayName = name
+        self.relativeRoot = root
+        self.enabled = enabled
+        self.status = value["status"] as? String ?? "unknown"
     }
 }
 
@@ -92,6 +133,35 @@ final class ConnectionSetupInput: ObservableObject {
     @Published var apiKey = ""
 }
 
+final class ProjectRegistrationInput: ObservableObject {
+    @Published var relativeRoot = ""
+    @Published var displayName = ""
+}
+
+// Cancellation state and process launch are protected by the same lock.
+private final class LocalControlOperation: @unchecked Sendable {
+    let process: Process
+    private let lock = NSLock()
+    private var cancelled = false
+
+    init(_ process: Process) { self.process = process }
+
+    func run() throws -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !cancelled else { return false }
+        try process.run()
+        return true
+    }
+
+    func cancel() {
+        lock.lock()
+        defer { lock.unlock() }
+        cancelled = true
+        if process.isRunning { process.terminate() }
+    }
+}
+
 @MainActor
 final class ConnectionController: ObservableObject {
     @Published var root: String
@@ -104,7 +174,16 @@ final class ConnectionController: ObservableObject {
     @Published var configuring = false
     @Published var setupError: String?
     @Published var showingSetup = false
+    @Published var showingProjects = false
+    @Published var projects: [WorkspaceProject] = []
+    @Published var writeEnabled = false
+    @Published var writeAvailable = false
+    @Published var recoveryRequired = false
+    @Published var hasActiveTask = false
+    @Published var projectBusy = false
+    @Published var projectError: String?
     let setupInput = ConnectionSetupInput()
+    let registrationInput = ProjectRegistrationInput()
     let configuration: RuntimeConfiguration
     var showPanel: (() -> Void)?
     var hidePanel: (() -> Void)?
@@ -112,6 +191,8 @@ final class ConnectionController: ObservableObject {
     private var connection: Process?
     private var controlPipe: Pipe?
     private var requestedStop = false
+    private var stateEpoch = 0
+    private var localOperation: LocalControlOperation?
     private var timer: Timer?
     private let queue = DispatchQueue(label: "Colink.status", qos: .utility)
 
@@ -121,11 +202,21 @@ final class ConnectionController: ObservableObject {
         && FileManager.default.fileExists(atPath: configuration.workspace + "/.env.local")
     }
     var canStart: Bool {
-        isConfigured && !ownsConnection && [.stopped, .failed].contains(phase)
+        isConfigured && !ownsConnection && !projectBusy && [.stopped, .failed].contains(phase)
     }
     var canChooseFolder: Bool {
-        !ownsConnection && ![.preparing, .stopping, .external].contains(phase)
+        !ownsConnection && !projectBusy && ![.preparing, .stopping, .external].contains(phase)
     }
+    var canManageProjects: Bool {
+        configuration.isLive && ownsConnection && isReady && phase == .running
+        && !projectBusy && !configuring
+    }
+    var canChangeWrite: Bool {
+        configuration.isLive && ownsConnection && isReady && phase == .running
+        && writeAvailable && !recoveryRequired && !projectBusy
+        && projects.contains(where: { $0.enabled })
+    }
+    private var modeArguments: [String] { configuration.isLive ? ["--mode", "live"] : [] }
     var detail: String {
         if let errorText { return errorText }
         switch phase {
@@ -137,7 +228,21 @@ final class ConnectionController: ObservableObject {
 
     init(configuration: RuntimeConfiguration) {
         self.configuration = configuration
-        root = UserDefaults.standard.string(forKey: "SelectedFolder") ?? configuration.sampleRoot
+        if configuration.isLive {
+            root = configuration.sampleRoot
+            let selection = URL(fileURLWithPath: configuration.workspace)
+                .appendingPathComponent(".code-context/desktop/selection-live.json")
+            if let metadata = try? selection.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey]),
+               metadata.isSymbolicLink != true, let size = metadata.fileSize, size <= 65536,
+               let data = try? Data(contentsOf: selection), data.count <= 65536,
+               let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let selected = value["selected_root"] as? String,
+               selected.count <= 4096, NSString(string: selected).isAbsolutePath {
+                root = selected
+            }
+        } else {
+            root = UserDefaults.standard.string(forKey: "SelectedFolder") ?? configuration.sampleRoot
+        }
         // Do not restore a running intent: every application launch is idle.
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
@@ -165,11 +270,13 @@ final class ConnectionController: ObservableObject {
     }
 
     func refresh() {
-        guard !checking else { return }
-        guard isConfigured else { phase = .unconfigured; return }
+        guard !checking, !projectBusy else { return }
+        guard isConfigured || configuration.isLive else { phase = .unconfigured; return }
         checking = true
         let selected = root
-        let process = command(["desktop-status", "--workspace", configuration.workspace, "--root", selected])
+        let epoch = stateEpoch
+        let process = command(["desktop-status", "--workspace", configuration.workspace, "--root", selected]
+                              + modeArguments)
         let output = Pipe()
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
@@ -190,9 +297,11 @@ final class ConnectionController: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.checking = false
-                guard self.root == selected else { self.refresh(); return }
+                guard self.root == selected, self.stateEpoch == epoch else { self.refresh(); return }
                 guard let result else {
                     self.isReady = false
+                    self.writeEnabled = false
+                    self.writeAvailable = false
                     if self.ownsConnection && self.phase != .stopping {
                         self.phase = .failed
                         self.errorText = "文件夹暂时不可用。请关闭后重新选择。"
@@ -206,15 +315,98 @@ final class ConnectionController: ObservableObject {
                 self.revision = result["revision"] as? Int ?? 0
                 self.fileCount = result["tracked_files"] as? Int ?? 0
                 self.isReady = result["ready"] as? Bool ?? false
+                self.applyWorkspaceStatus(result)
                 if self.ownsConnection {
                     if self.phase != .stopping { self.phase = self.isReady ? .running : .starting }
                 } else if result["external_active"] as? Bool == true || result["supervised"] as? Bool == true {
                     self.phase = .external
                 } else if self.phase == .external {
                     self.phase = .stopped
+                } else if !self.isConfigured {
+                    self.phase = .unconfigured
                 }
             }
         }
+    }
+
+    private func applyWorkspaceStatus(_ result: [String: Any]) {
+        guard configuration.isLive else { return }
+        let workspace = result["workspace_status"] as? [String: Any] ?? [:]
+        projects = (workspace["projects"] as? [[String: Any]] ?? []).compactMap(WorkspaceProject.init)
+        writeAvailable = workspace["write_available"] as? Bool ?? false
+        recoveryRequired = workspace["recovery_required"] as? Bool ?? false
+        hasActiveTask = workspace["active_task"] != nil && !(workspace["active_task"] is NSNull)
+        writeEnabled = workspace["write_enabled"] as? Bool == true
+            && !requestedStop && phase != .stopping
+    }
+
+    private func runLocal(_ arguments: [String], payload: Data? = nil,
+                          completion: @escaping () -> Void = {}) {
+        guard configuration.isLive, !projectBusy else { return }
+        projectBusy = true
+        projectError = nil
+        stateEpoch += 1
+        let epoch = stateEpoch
+        let process = command(arguments + modeArguments)
+        let input = payload == nil ? nil : Pipe()
+        if let input { process.standardInput = input }
+        else { process.standardInput = FileHandle.nullDevice }
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        let operation = LocalControlOperation(process)
+        localOperation = operation
+        queue.async { [weak self] in
+            var success = false
+            do {
+                guard try operation.run() else { return }
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 15) {
+                    if process.isRunning { process.terminate() }
+                }
+                if let input, let payload {
+                    try input.fileHandleForWriting.write(contentsOf: payload)
+                    try input.fileHandleForWriting.close()
+                }
+                process.waitUntilExit()
+                success = process.terminationStatus == 0
+            } catch { try? input?.fileHandleForWriting.close() }
+            DispatchQueue.main.async {
+                guard let self, self.localOperation === operation else { return }
+                self.localOperation = nil
+                self.projectBusy = false
+                guard self.stateEpoch == epoch else { self.refresh(); return }
+                if success { completion() }
+                else { self.projectError = "操作未完成，请刷新状态后重试。" }
+                self.refresh()
+            }
+        }
+    }
+
+    private func control(_ action: String, parameters: [String: Any] = [:]) {
+        guard let payload = try? JSONSerialization.data(withJSONObject: parameters) else { return }
+        runLocal(["desktop-control", "--workspace", configuration.workspace, "--root", root,
+                  "--action", action], payload: payload)
+    }
+
+    func discoverProjects() {
+        guard canManageProjects else { return }
+        control("discover")
+    }
+
+    func setProjectEnabled(_ project: WorkspaceProject, enabled: Bool) {
+        guard canManageProjects else { return }
+        control("set_enabled", parameters: ["project_id": project.id, "enabled": enabled])
+    }
+
+    func registerProject(relativeRoot: String, displayName: String) {
+        guard canManageProjects else { return }
+        control("register", parameters: ["relative_root": relativeRoot, "display_name": displayName])
+    }
+
+    func setWriteEnabled(_ enabled: Bool) {
+        guard canChangeWrite, enabled != writeEnabled else { return }
+        control(enabled ? "enable_write" : "disable_write", parameters: enabled
+            ? ["project_ids": projects.filter(\.enabled).map(\.id)] : [:])
+        // Enabling is visible only after a fresh desktop-status reports success.
     }
 
     func configure(tunnelID: String, apiKey: String, completion: @escaping () -> Void) {
@@ -270,23 +462,40 @@ final class ConnectionController: ObservableObject {
         chooser.resolvesAliases = false
         chooser.directoryURL = URL(fileURLWithPath: root)
         if chooser.runModal() == .OK, let selected = chooser.url {
-            root = selected.standardizedFileURL.path
-            UserDefaults.standard.set(root, forKey: "SelectedFolder")
-            revision = 0
-            fileCount = 0
-            errorText = nil
-            phase = .stopped
-            refresh()
+            let selectedRoot = selected.standardizedFileURL.path
+            if configuration.isLive {
+                runLocal(["desktop-select", "--workspace", configuration.workspace,
+                          "--root", selectedRoot]) { [weak self] in
+                    self?.applySelection(selectedRoot)
+                }
+            } else {
+                UserDefaults.standard.set(selectedRoot, forKey: "SelectedFolder")
+                applySelection(selectedRoot)
+                refresh()
+            }
         }
         showPanel?()
+    }
+
+    private func applySelection(_ selectedRoot: String) {
+        root = selectedRoot
+        revision = 0
+        fileCount = 0
+        writeEnabled = false
+        writeAvailable = false
+        projects = []
+        errorText = nil
+        phase = isConfigured ? .stopped : .unconfigured
     }
 
     func start() {
         guard canStart else { return }
         if URL(fileURLWithPath: root).standardizedFileURL.path != configuration.sampleRoot {
             let alert = NSAlert()
-            alert.messageText = "启动这个文件夹的只读连接？"
-            alert.informativeText = "\(root)\n\n该目录中通过过滤的源码会在网页查询时传给 OpenAI。只允许读取，不允许执行命令或修改文件。过滤不是完整的敏感信息检测；只保留当前和前一次代码状态。\n\n仅选择文件夹不会共享代码。"
+            alert.messageText = configuration.isLive ? "启动这个工作区的连接？" : "启动这个文件夹的只读连接？"
+            alert.informativeText = configuration.isLive
+                ? "\(root)\n\n只有本机启用的项目可供网页按需读取。写入默认关闭；项目授权请在本机项目管理中设置。\n\n仅选择文件夹不会启动连接。"
+                : "\(root)\n\n该目录中通过过滤的源码会在网页查询时传给 OpenAI。只允许读取，不允许执行命令或修改文件。过滤不是完整的敏感信息检测；只保留当前和前一次代码状态。\n\n仅选择文件夹不会共享代码。"
             alert.alertStyle = .warning
             alert.addButton(withTitle: "确认并启动")
             alert.addButton(withTitle: "取消")
@@ -294,12 +503,14 @@ final class ConnectionController: ObservableObject {
             guard alert.runModal() == .alertFirstButtonReturn else { return }
         }
         requestedStop = false
+        stateEpoch += 1
+        writeEnabled = false
         errorText = nil
         phase = .preparing
         let process = command([
             "desktop-run", "--workspace", configuration.workspace, "--root", root,
             "--client", configuration.client, "--app-pid", String(ProcessInfo.processInfo.processIdentifier)
-        ])
+        ] + modeArguments)
         let pipe = Pipe()
         process.standardInput = pipe
         process.standardOutput = FileHandle.nullDevice
@@ -312,6 +523,8 @@ final class ConnectionController: ObservableObject {
                 self.controlPipe = nil
                 self.connection = nil
                 self.isReady = false
+                self.writeEnabled = false
+                self.writeAvailable = false
                 self.phase = finished.terminationStatus == 0 ? .stopped : .failed
                 if self.phase == .failed {
                     self.errorText = stoppedIntentionally
@@ -338,6 +551,12 @@ final class ConnectionController: ObservableObject {
 
     func stop() {
         requestedStop = true
+        stateEpoch += 1
+        writeEnabled = false
+        writeAvailable = false
+        localOperation?.cancel()
+        localOperation = nil
+        projectBusy = false
         // No persistent run flag, auto-start registration, or restart timer exists.
         guard ownsConnection else { return }
         phase = .stopping
