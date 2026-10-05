@@ -19,6 +19,7 @@ from code_context.file_mutation import commit_file, discard_prepared, prepare_fi
 from code_context.policy import MAX_FILE_BYTES, content_problem, validate_path
 from code_context.recovery_store import encode_metadata
 from code_context.scanner import _version
+from code_context.source_page import physical_lines
 from code_context.text_edits import apply_text_edit
 from code_context.write_coordinator import (
     MAX_OPERATIONS,
@@ -349,7 +350,7 @@ class WriteOperations:
                     raw,
                     {
                         "start_line": 1,
-                        "end_line": max(1, len(content.splitlines())),
+                        "end_line": max(1, len(physical_lines(content))),
                         "before": "",
                         "after": content[:4000],
                     },

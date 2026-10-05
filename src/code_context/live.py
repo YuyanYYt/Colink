@@ -9,7 +9,7 @@ from code_context.models import validate_project
 from code_context.policy import MAX_TOTAL_BYTES
 from code_context.read_context import ContextError, ReadContexts
 from code_context.source_access import SourceAccess, SourceError
-from code_context.source_page import source_page
+from code_context.source_page import physical_lines, source_page
 
 
 class LiveQueries:
@@ -207,7 +207,9 @@ class LiveQueries:
         document = self.source(project_id).read(path)
         self._observe(project_id, handle, document)
         try:
-            page = source_page(document.content, start_line, end_line, max_chars, char_offset)
+            page = source_page(
+                document.content, start_line, end_line, max_chars, char_offset, physical=True
+            )
         except ValueError as exc:
             raise SourceError(str(exc)) from None
         self.resolve_snapshot(project_id, handle)
@@ -242,7 +244,7 @@ class LiveQueries:
                 raise
             scanned_bytes += document.size
             self._observe(project_id, handle, document)
-            for number, line in enumerate(document.content.splitlines(), 1):
+            for number, line in enumerate(physical_lines(document.content), 1):
                 if query in line:
                     if len(matches) >= limit:
                         self.resolve_snapshot(project_id, handle)

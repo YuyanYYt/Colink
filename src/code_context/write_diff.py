@@ -13,6 +13,7 @@ import stat
 from code_context.policy import MAX_TOTAL_BYTES, validate_path
 from code_context.scanner import _version
 from code_context.source_access import SourceError
+from code_context.source_page import physical_lines
 from code_context.write_coordinator import RETENTION_SECONDS, TERMINAL, WriteError
 
 MAX_DIFF_LINES = 10_000
@@ -48,7 +49,7 @@ def verify_task_files(c, task, source):
 
 
 def bounded_patch(path, before, after, max_chars):
-    old, new = before.splitlines(keepends=True), after.splitlines(keepends=True)
+    old, new = physical_lines(before, keepends=True), physical_lines(after, keepends=True)
     if (
         len(old) > MAX_DIFF_LINES
         or len(new) > MAX_DIFF_LINES

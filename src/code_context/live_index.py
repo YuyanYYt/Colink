@@ -654,7 +654,7 @@ class LiveIndexService:
             raise ValueError("line_offset outside symbol")
 
         def page(budget):
-            result = source_page(document.content, first, end, budget, char_offset)
+            result = source_page(document.content, first, end, budget, char_offset, physical=True)
             more = result["content_truncated"] or result["end_line"] < symbol["end_line"]
             following = result["next_start_line"] if more else None
             return {

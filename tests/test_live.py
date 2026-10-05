@@ -69,6 +69,28 @@ def test_search_and_pagination_are_source_bounded(backend):
     assert backend.sources["b"].metrics["body_reads"] == 0
 
 
+def test_live_read_search_lines_match_precise_edit_lines(backend):
+    from code_context.text_edits import apply_text_edit
+
+    original = 'value = "first\u2028second"\nTARGET = 1\n'
+    (backend.sources["a"].root / "a.py").write_text(original)
+    result = backend.search_code("a", "TARGET")
+    assert result["matches"][0]["line"] == 2
+    page = backend.read_file("a", "a.py", start_line=2, end_line=2)
+    assert page["content"] == "TARGET = 1\n" and page["total_lines"] == 2
+    edited = apply_text_edit(
+        original,
+        {
+            "kind": "replace_lines",
+            "start_line": 2,
+            "end_line": 2,
+            "old_text": page["content"],
+            "new_text": "TARGET = 2\n",
+        },
+    )
+    assert edited.content == original.replace("TARGET = 1", "TARGET = 2")
+
+
 def test_live_mcp_keeps_read_annotations_and_explains_contexts(backend):
     async def inspect():
         mcp = build_mcp(

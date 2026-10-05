@@ -215,5 +215,10 @@
   **91 passed（6.13 秒）**、Ruff 通过；保留审计负面，不声称默认真实工作区已经
   遭遇 SQLITE_FULL/真实 ENOSPC/断电，整体回退层仍待对接。
 
+- W/R2 行定位一致：复现 U+2028 等源码字符串被 splitlines 当作新行，导致 live
+  read/search 行号与精准编辑不一致。live 分页/符号源码/文字搜索/任务 patch 改用
+  LF/CRLF 物理行；原始字符保留，旧 mirror 默认分行不变。专项及相关
+  **278 passed（4.07 秒）**、Ruff 通过；不将此源码测试当网页行定位已验证。
+
 关联：[读取重构计划](LIVE_WORKSPACE_REFACTOR.md)、[写入契约](WRITE_CONTRACT.md)、
 [维护路线](ROADMAP.md)、[验证记录](VALIDATION.md)。
