@@ -24,21 +24,6 @@ def read_local_mirror_status(data_dir: Path) -> dict:
     data = data_dir.expanduser().resolve()
     database = data / "local.sqlite3"
     result = {"initialized": database.exists(), "running": False, "data_dir": str(data)}
-    if not database.exists():
-        return result
-    db = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=15)
-    try:
-        db.execute("BEGIN")
-        meta = dict(db.execute("SELECT key, value FROM meta"))
-        result.update(json.loads(meta["identity"]))
-        result.update(json.loads(meta.get("runtime", "{}")))
-        result.update(
-            revision=int(meta["revision"]),
-            tracked_files=db.execute("SELECT COUNT(*) FROM files").fetchone()[0],
-            pending=db.execute("SELECT 1 FROM outbox WHERE id=1").fetchone() is not None,
-        )
-    finally:
-        db.close()
     lock_path = data / "local.lock"
     try:
         with lock_path.open("rb") as lock:
@@ -48,6 +33,33 @@ def read_local_mirror_status(data_dir: Path) -> dict:
                 result["running"] = True
     except FileNotFoundError:
         pass
+    if not database.exists():
+        result.update(
+            initialized=False, status="initializing" if result["running"] else "not_running"
+        )
+        return result
+    db = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=15)
+    try:
+        db.execute("BEGIN")
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        meta = dict(db.execute("SELECT key, value FROM meta")) if "meta" in tables else {}
+        if not {"meta", "files", "outbox"} <= tables or not {"identity", "revision"} <= meta.keys():
+            # Startup creates the SQLite file before committing its schema/identity.
+            # Do not create/repair it from a status query or hide an offline partial DB.
+            result.update(
+                initialized=False,
+                status="initializing" if result["running"] else "incomplete_state",
+            )
+            return result
+        result.update(json.loads(meta["identity"]))
+        result.update(json.loads(meta.get("runtime", "{}")))
+        result.update(
+            revision=int(meta["revision"]),
+            tracked_files=db.execute("SELECT COUNT(*) FROM files").fetchone()[0],
+            pending=db.execute("SELECT 1 FROM outbox WHERE id=1").fetchone() is not None,
+        )
+    finally:
+        db.close()
     if not result["running"]:
         result["status"] = "not_running"
     return result

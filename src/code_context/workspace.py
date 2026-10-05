@@ -56,7 +56,7 @@ class WorkspaceRuntime:
             self.lock_fd = fd
         try:
             self.registry = ProjectRegistry(root, data_dir=self.data_dir / "registry")
-            if not self.registry.list_projects()["projects"]:
+            if not self.registry.list_projects(enabled_only=False)["projects"]:
                 raise SourceError(
                     "WORKSPACE_NOT_CONFIGURED: select and enable a project locally first"
                 )

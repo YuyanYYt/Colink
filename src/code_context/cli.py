@@ -62,10 +62,13 @@ def parser() -> argparse.ArgumentParser:
     control.add_argument("--data-dir", type=Path, required=True)
     control.add_argument("--action", required=True)
 
-    for name in ("desktop-status", "desktop-run"):
+    for name in ("desktop-status", "desktop-run", "desktop-control", "desktop-select"):
         command = commands.add_parser(name, help="CoLink 菜单栏应用的本机生命周期接口")
         command.add_argument("--workspace", type=Path, default=Path.cwd())
         command.add_argument("--root", type=Path, required=True)
+        command.add_argument("--mode", choices=("mirror", "live"), default="mirror")
+        if name == "desktop-control":
+            command.add_argument("--action", required=True)
         if name == "desktop-run":
             command.add_argument("--client", required=True)
             command.add_argument("--app-pid", type=int, default=0)
@@ -160,12 +163,33 @@ def main(argv: list[str] | None = None) -> int:
             emit(configure_desktop(args.workspace, payload))
             return 0
         if args.command.startswith("desktop-"):
-            from code_context.desktop import desktop_status, run_desktop
+            from code_context.desktop import (
+                desktop_control,
+                desktop_select,
+                desktop_status,
+                run_desktop,
+            )
 
             if args.command == "desktop-status":
-                emit(desktop_status(args.workspace, args.root))
+                emit(desktop_status(args.workspace, args.root, args.mode))
                 return 0
-            return run_desktop(args.workspace, args.root, args.client, args.app_pid)
+            if args.command == "desktop-select":
+                if args.mode != "live":
+                    raise ValueError("workspace selection requires live mode")
+                emit(desktop_select(args.workspace, args.root))
+                return 0
+            if args.command == "desktop-control":
+                if args.mode != "live":
+                    raise ValueError("workspace control requires live mode")
+                payload = sys.stdin.read(65537)
+                if len(payload) > 65536:
+                    raise ValueError("local control input exceeds its size limit")
+                values = json.loads(payload) if payload.strip() else {}
+                if not isinstance(values, dict):
+                    raise ValueError("local control requires an object")
+                emit(desktop_control(args.workspace, args.root, args.action, values))
+                return 0
+            return run_desktop(args.workspace, args.root, args.client, args.app_pid, args.mode)
         if args.command.startswith("tunnel-"):
             from code_context.tunnel import launch_tunnel, prepare_profile, tunnel_status
 

@@ -126,6 +126,23 @@ def test_duplicate_runtime_rejected_and_restart_closed(workspace):
     replacement.close()
 
 
+def test_all_projects_disabled_can_restart_without_regranting(workspace):
+    from code_context.project_registry import ProjectRegistry
+
+    root, state = workspace
+    initial = initialize_workspace(root, state)
+    registry = ProjectRegistry(root, data_dir=state / "registry")
+    registry.set_enabled(initial["project_id"], False)
+    with WorkspaceRuntime(root, state, socket_directory()) as runtime:
+        assert runtime.backend.list_projects()["projects"] == []
+        assert not control_request(state, "status")["write_enabled"]
+        # Local controls remain available, but restart does not re-enable source.
+        control_request(
+            state, "set_enabled", {"project_id": initial["project_id"], "enabled": True}
+        )
+        assert len(runtime.backend.list_projects()["projects"]) == 1
+
+
 def test_workspace_stdio_routes_saved_sources_and_reports_no_whole_project_limit():
     # A short independent root also keeps native AF_UNIX paths within macOS's
     # byte ceiling. This fixture lives under the authorized workspace only.

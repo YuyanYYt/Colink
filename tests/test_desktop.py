@@ -48,6 +48,24 @@ def test_desktop_inspection_is_local_read_only(desktop_workspace, monkeypatch):
     assert not (workspace / ".code-context/local-sample").exists()
 
 
+def test_live_selection_is_separate_and_inspection_does_not_initialize(desktop_workspace):
+    from code_context.desktop import desktop_select
+
+    workspace, root = desktop_workspace
+    original = desktop_binding(workspace, root)
+    live = desktop_binding(workspace, root, "live")
+    assert live.data != original.data and live.profile != original.profile
+    assert live.mode == "live"
+    status = desktop_status(workspace, root, "live")
+    assert not status["running"] and not live.data.exists()
+    result = desktop_select(workspace, root)
+    assert not result["connection_started"]
+    selection = workspace / ".code-context/desktop/selection-live.json"
+    assert selection.stat().st_mode & 0o077 == 0
+    assert not live.data.exists()
+    assert json.loads(selection.read_text())["selected_root"] == str(root)
+
+
 def test_folder_selection_uses_separate_identity_without_scanning(desktop_workspace, monkeypatch):
     workspace, root = desktop_workspace
     selected = workspace / "another project 中文"
@@ -128,6 +146,18 @@ def test_stop_reaps_owned_leader_when_group_exits_between_probe_and_signal(monke
     child.wait.assert_called_once_with(timeout=2)
 
 
+def test_stop_permission_failure_is_not_reported_as_closed(monkeypatch):
+    child = SimpleNamespace(pid=999999, wait=Mock(return_value=0))
+
+    def denied(_):
+        raise PermissionError("unverified group")
+
+    monkeypatch.setattr("code_context.desktop._group_alive", denied)
+    with pytest.raises(SyncError, match="could not be verified"):
+        _stop_owned_group(child)
+    child.wait.assert_not_called()
+
+
 @pytest.fixture
 def fake_official_client(desktop_workspace):
     workspace, _ = desktop_workspace
@@ -158,7 +188,7 @@ def fake_official_client(desktop_workspace):
     return script
 
 
-def launch(workspace, root, client):
+def launch(workspace, root, client, mode=None):
     return subprocess.Popen(
         [
             sys.executable,
@@ -173,12 +203,68 @@ def launch(workspace, root, client):
             str(client),
             "--app-pid",
             str(os.getpid()),
-        ],
+        ]
+        + (["--mode", mode] if mode is not None else []),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
+
+
+@pytest.mark.parametrize("stop_mode", ["request", "pipe_eof", "signal"])
+def test_live_supervisor_uses_original_tunnel_and_closes_all_owned_children(
+    fake_official_client, stop_mode
+):
+    import tempfile
+
+    # The long regular pytest path would exceed macOS's AF_UNIX byte ceiling.
+    workspace = Path(tempfile.mkdtemp(prefix="live-desk-", dir=Path.cwd() / ".artifacts"))
+    root = workspace / "r"
+    root.mkdir()
+    (root / "models.py").write_text("class Model: pass\n")
+    prepare_profile(
+        root,
+        "sample",
+        workspace / ".code-context/local",
+        "tunnel_" + "0" * 32,
+        workspace / ".code-context/tunnel/profile.yaml",
+    )
+    key = workspace / ".env.local"
+    key.write_text("OPENAI_API_KEY=sk-" + "k" * 32 + "\n")
+    key.chmod(0o600)
+    supervisor = launch(workspace, root, fake_official_client, mode="live")
+    try:
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            assert supervisor.poll() is None, (
+                supervisor.stderr.read() if supervisor.poll() is not None else ""
+            )
+            status = desktop_status(workspace, root, "live")
+            if status["running"] and status["workspace_status"].get("projects"):
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("live backend did not start")
+        assert not status["workspace_status"]["write_enabled"]
+        assert status["source_mode"] == "live"
+        server_pid = int((workspace / "fake-mcp.pid").read_text())
+        if stop_mode == "request":
+            supervisor.stdin.write("stop\n")
+            supervisor.stdin.flush()
+        elif stop_mode == "pipe_eof":
+            supervisor.stdin.close()
+        else:
+            supervisor.send_signal(signal.SIGTERM)
+        assert supervisor.wait(timeout=12) == 0, supervisor.stderr.read()
+        with pytest.raises(ProcessLookupError):
+            os.kill(server_pid, 0)
+        assert not desktop_status(workspace, root, "live")["running"]
+        assert not (Path(status["data_dir"]) / "server" / "mirror.sqlite3").exists()
+    finally:
+        if supervisor.poll() is None:
+            supervisor.send_signal(signal.SIGTERM)
+            supervisor.wait(timeout=12)
 
 
 def await_running(workspace, root, supervisor):
