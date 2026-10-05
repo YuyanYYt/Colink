@@ -262,6 +262,10 @@ class RecoveryStore:
         if any(type(v) is not int or v < 0 for v in values):
             raise RecoveryError("INVALID_RECOVERY_RESERVATION: nonnegative byte counts required")
         usage = self.usage()
+        if usage["database_page_bytes"] + metadata_bytes > self.max_metadata_bytes:
+            raise RecoveryError(
+                "RECOVERY_METADATA_CAPACITY: preserve headroom for completion and rollback"
+            )
         # Reserve a full before-image plus SQLite's journal-growth headroom.
         resident = usage["resident_bytes"] + object_bytes + metadata_bytes
         peak = max(

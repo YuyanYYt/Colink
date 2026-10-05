@@ -85,6 +85,21 @@ def test_low_disk_rejects_before_object_changes(tmp_path, monkeypatch):
         assert list((store.root / "objects").iterdir()) == []
 
 
+def test_metadata_reservation_keeps_completion_headroom_before_any_write(tmp_path):
+    with RecoveryStore(
+        tmp_path / "metadata-headroom",
+        max_bytes=512 * 1024,
+        max_peak_bytes=1024 * 1024,
+        max_metadata_bytes=128 * 1024,
+        min_free_bytes=0,
+    ) as store:
+        before = store.usage()
+        with pytest.raises(RecoveryError, match="RECOVERY_METADATA_CAPACITY"):
+            store.reserve(metadata_bytes=128 * 1024)
+        assert store.usage() == before
+        assert store.query("SELECT * FROM objects") == []
+
+
 def test_metadata_transaction_rollback_and_reopen_persistence(tmp_path):
     root = tmp_path / "state"
     with RecoveryStore(root) as store:

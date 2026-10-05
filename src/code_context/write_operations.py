@@ -57,7 +57,7 @@ class WriteOperations:
             raise WriteError("WRITE_OPERATION_ABORTED: this request cannot execute again")
         raise WriteError("WRITE_RECOVERY_REQUIRED: recover the recorded operation locally")
 
-    def _start(self, project, task_id, request_id, digest):
+    def _start(self, project, task_id, request_id, digest, *, administrative=False):
         source = self.c._authorized(project)
         task = self.c._task(project, task_id, source)
         replay = self._replay(task_id, request_id, digest)
@@ -68,7 +68,7 @@ class WriteOperations:
         count = self.store.query(
             "SELECT count(*) AS n FROM operations WHERE task_id=?", (task_id,)
         )[0]["n"]
-        if count >= MAX_OPERATIONS:
+        if not administrative and count >= MAX_OPERATIONS:
             raise WriteError("WRITE_OPERATION_LIMIT: finish or roll back this task")
         return source, task, None
 
@@ -331,3 +331,54 @@ class WriteOperations:
                         "after": content[:4000],
                     },
                 )
+
+    def finish_write_task(self, project, task_id, request_id):
+        validate_request(request_id)
+        digest = request_digest({"kind": "finish_write_task", "project": project})
+        with self.c.lock:
+            source, task, replay = self._start(
+                project, task_id, request_id, digest, administrative=True
+            )
+            if replay is not None:
+                return replay
+            from code_context.write_diff import verify_task_files
+
+            with source.lock:
+                verify_task_files(self.c, task, source)
+                self.c._authorized(project)
+                self.store.reserve(metadata_bytes=16 * 1024)
+                result = {
+                    "project_id": project,
+                    "task_id": task_id,
+                    "state": "completed",
+                    "source_mode": "live",
+                    "recovery_point_retained": True,
+                    "rollback_available": False,  # Whole-task recovery layer is not attached yet.
+                }
+                with self.store.transaction() as db:
+                    sequence = db.execute(
+                        "SELECT coalesce(max(sequence),0)+1 FROM operations WHERE task_id=?",
+                        (task_id,),
+                    ).fetchone()[0]
+                    db.execute(
+                        "INSERT INTO operations VALUES(?,?,?,?,?,?,?)",
+                        (
+                            task_id,
+                            request_id,
+                            digest,
+                            "done",
+                            encode_metadata({"kind": "finish_write_task"}),
+                            encode_metadata(result),
+                            sequence,
+                        ),
+                    )
+                    db.execute(
+                        "UPDATE tasks SET state='completed',completed=? WHERE task_id=?",
+                        (self.c.clock(), task_id),
+                    )
+                for old in self.store.query(
+                    "SELECT * FROM tasks WHERE state IN ('completed','rolled_back') AND task_id!=?",
+                    (task_id,),
+                ):
+                    self.c._retire(old)
+                return result

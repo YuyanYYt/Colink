@@ -79,9 +79,11 @@ class WriteCoordinator:
                 "INSERT OR IGNORE INTO settings VALUES('next_task_request',?)",
                 ("req_" + uuid.uuid4().hex,),
             )
+        from code_context.write_diff import TaskDiff
         from code_context.write_operations import WriteOperations
 
         self.operations = WriteOperations(self)
+        self.diff = TaskDiff(self)
 
     def _pending(self):
         return bool(
@@ -383,24 +385,33 @@ class WriteCoordinator:
     def create_file(self, project_id, task_id, request_id, path, content):
         return self.operations.create_file(project_id, task_id, request_id, path, content)
 
+    def finish_write_task(self, project_id, task_id, request_id):
+        return self.operations.finish_write_task(project_id, task_id, request_id)
+
+    def get_diff(self, project_id, **parameters):
+        return self.diff.get_diff(project_id, **parameters)
+
     def guard_read(self, project_id):
         """Do not publish intermediate or pending source states as normal results."""
-        with self.lock:
-            if (
-                self.inflight_project == project_id
-                or self.store.query(
-                    "SELECT task_id FROM tasks WHERE project_id=? "
-                    "AND state IN ('recovery_required','rolling_back') LIMIT 1",
-                    (project_id,),
-                )
-                or self.store.query(
-                    "SELECT operations.task_id FROM operations JOIN tasks USING(task_id) "
-                    "WHERE tasks.project_id=? AND operations.state "
-                    "IN ('prepared','committing','rollback_prepared') LIMIT 1",
-                    (project_id,),
-                )
-            ):
-                raise WriteError("WRITE_RECOVERY_REQUIRED: project publication is suspended")
+        # Query guards can run while a producer holds SourceAccess.lock. Never
+        # acquire the coordinator lock here (writers take coordinator -> source).
+        # The durable prepared intent precedes every source mutation; repeat this
+        # guard before publishing. Unrelated projects are not suspended.
+        if (
+            self.inflight_project == project_id
+            or self.store.query(
+                "SELECT task_id FROM tasks WHERE project_id=? "
+                "AND state IN ('recovery_required','rolling_back') LIMIT 1",
+                (project_id,),
+            )
+            or self.store.query(
+                "SELECT operations.task_id FROM operations JOIN tasks USING(task_id) "
+                "WHERE tasks.project_id=? AND operations.state "
+                "IN ('prepared','committing','rollback_prepared') LIMIT 1",
+                (project_id,),
+            )
+        ):
+            raise WriteError("WRITE_RECOVERY_REQUIRED: project publication is suspended")
 
     def _retire(self, task):
         if task["state"] not in TERMINAL:
@@ -416,6 +427,12 @@ class WriteCoordinator:
             "SELECT * FROM tasks WHERE state IN ('completed','rolled_back') AND completed<?",
             (self.clock() - RETENTION_SECONDS,),
         ):
+            self._retire(task)
+        retained = self.store.query(
+            "SELECT * FROM tasks WHERE state IN ('completed','rolled_back') "
+            "ORDER BY completed DESC,created DESC"
+        )
+        for task in retained[1:]:
             self._retire(task)
 
     def close(self):
