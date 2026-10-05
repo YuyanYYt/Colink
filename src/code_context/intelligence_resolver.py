@@ -1,7 +1,6 @@
 """Conservative static binding: visible definitions/imports, never name guessing."""
 
 from collections import defaultdict
-from pathlib import PurePosixPath
 
 from code_context.intelligence_models import (
     CALLABLE_KINDS,
@@ -12,21 +11,14 @@ from code_context.intelligence_models import (
     Symbol,
     module_id,
 )
-
-
-def python_modules(path: str) -> list[str]:
-    parts = list(PurePosixPath(path).with_suffix("").parts)
-    if parts[-1] == "__init__":
-        parts.pop()
-    names = [".".join(parts)]
-    if parts and parts[0] == "src":
-        names.append(".".join(parts[1:]))
-    return [name for name in names if name]
+from code_context.intelligence_roots import PythonSourceRoots, python_modules, select_source_roots
 
 
 class Resolver:
-    def __init__(self, files: dict[str, ParsedFile]):
+    def __init__(self, files: dict[str, ParsedFile], roots: PythonSourceRoots | None = None):
         self.files = files
+        self.python_roots = select_source_roots(files, roots or PythonSourceRoots())
+        self.python_source_roots = self.python_roots.roots or ()
         self.modules: dict[tuple[str, str], list[str]] = defaultdict(list)
         self.symbols: dict[tuple[str, str], list[Symbol]] = defaultdict(list)
         self.named: dict[tuple[str, str, str], list[Symbol]] = defaultdict(list)
@@ -41,7 +33,11 @@ class Resolver:
                 self.bindings[path, binding.scope, binding.name].append(binding)
             for binding in parsed.imports:
                 self.imports[path, binding.scope, binding.local_name].append(binding)
-            names = python_modules(path) if parsed.language == "python" else [parsed.module]
+            names = (
+                python_modules(path, self.python_source_roots)
+                if parsed.language == "python"
+                else [parsed.module]
+            )
             for name in names:
                 if name:
                     self.modules[parsed.language, name].append(path)
@@ -57,7 +53,7 @@ class Resolver:
 
     def topology(self) -> tuple:
         """An export/import change invalidates bindings, not unchanged parse trees."""
-        return tuple(
+        return self.python_source_roots, tuple(
             (
                 path,
                 parsed.module,
@@ -137,7 +133,7 @@ class Resolver:
     def _import_module(self, parsed: ParsedFile, imp) -> str:
         if parsed.language != "python" or not imp.level:
             return imp.module
-        names = python_modules(parsed.path)
+        names = python_modules(parsed.path, self.python_source_roots)
         name = names[-1] if names else ""
         package = name.split(".")
         if not parsed.path.endswith("/__init__.py") and parsed.path != "__init__.py":

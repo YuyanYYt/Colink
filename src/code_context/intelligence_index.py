@@ -11,6 +11,11 @@ from pathlib import PurePosixPath
 
 from code_context.intelligence_models import PARSER_VERSION, ParsedFile
 from code_context.intelligence_resolver import Resolver
+from code_context.intelligence_roots import MAX_SOURCE_ROOTS, read_root_configuration
+
+# Source-root binding changed, but extracted facts did not. Rebuild derived
+# relations on startup while retaining the existing content-addressed parse cache.
+INDEX_VERSION = f"{PARSER_VERSION}-roots-v1"
 
 MAX_SNAPSHOT_PARSE_BYTES = 32 * 1024 * 1024
 MAX_SNAPSHOT_INDEX_BYTES = 32 * 1024 * 1024
@@ -85,6 +90,15 @@ def parse_file(path: str, content: str) -> ParsedFile:
     return ParsedFile(path=path, language="unsupported", status="unsupported")
 
 
+def _root_configuration(db: sqlite3.Connection, project_id: str, revision: int):
+    row = db.execute(
+        "SELECT b.content FROM files f JOIN blobs b USING(sha256) "
+        "WHERE f.project_id=? AND f.revision=? AND f.path='pyproject.toml'",
+        (project_id, revision),
+    ).fetchone()
+    return read_root_configuration(row["content"] if row is not None else None)
+
+
 def build_index(db: sqlite3.Connection, project_id: str, revision: int) -> None:
     """Extract changed hashes only; copy stable bindings, rebuild when topology changes.
 
@@ -134,7 +148,7 @@ def build_index(db: sqlite3.Connection, project_id: str, revision: int) -> None:
                     (project_id, path, sha, PARSER_VERSION, data),
                 )
         parsed_files[path] = parsed
-    resolver = Resolver(parsed_files)
+    resolver = Resolver(parsed_files, _root_configuration(db, project_id, revision))
     prior_files = {}
     for row in db.execute(
         "SELECT c.path, c.data FROM files f JOIN ci_parse_cache c "
@@ -149,10 +163,11 @@ def build_index(db: sqlite3.Connection, project_id: str, revision: int) -> None:
     ).fetchone()
     stable = (
         bool(prior)
-        and prior["parser_version"] == PARSER_VERSION
+        and prior["parser_version"] == INDEX_VERSION
         and not json.loads(prior["stats"]).get("partial")
         and not limited_paths
-        and resolver.topology() == Resolver(prior_files).topology()
+        and resolver.topology()
+        == Resolver(prior_files, _root_configuration(db, project_id, revision - 1)).topology()
     )
     previous_hashes = dict(
         db.execute(
@@ -255,7 +270,24 @@ def build_index(db: sqlite3.Connection, project_id: str, revision: int) -> None:
         "supported_languages": ["python", "java"],
         "files_by_language": languages,
         "files_by_status": statuses,
-        "partial": any(s not in {"ready", "unsupported"} for s in statuses),
+        "partial": bool(resolver.python_roots.diagnostic)
+        or any(s not in {"ready", "unsupported"} for s in statuses),
+        "python_source_roots": list(resolver.python_source_roots),
+        "python_source_roots_mode": resolver.python_roots.mode,
+        "python_source_roots_diagnostics": (
+            [
+                {
+                    "code": resolver.python_roots.diagnostic,
+                    **(
+                        {"path": "pyproject.toml"}
+                        if resolver.python_roots.mode == "invalid"
+                        else {}
+                    ),
+                }
+            ]
+            if resolver.python_roots.diagnostic
+            else []
+        ),
         "parsed_files": parsed_count,
         "reused_parse_files": reused_count,
         "resolved_files": resolved_count,
@@ -269,12 +301,13 @@ def build_index(db: sqlite3.Connection, project_id: str, revision: int) -> None:
             "index_payload_bytes_per_state": MAX_SNAPSHOT_INDEX_BYTES,
             "facts_per_state": MAX_SNAPSHOT_FACTS,
             "retained_states": 2,
+            "python_source_roots": MAX_SOURCE_ROOTS,
         },
         "analysis": "static; unresolved targets are not runtime facts",
     }
     db.execute(
         "INSERT INTO ci_snapshots VALUES(?, ?, ?, ?)",
-        (project_id, revision, PARSER_VERSION, encode(stats)),
+        (project_id, revision, INDEX_VERSION, encode(stats)),
     )
 
 
@@ -286,7 +319,7 @@ def backfill_indexes(db: sqlite3.Connection) -> None:
             "SELECT parser_version FROM ci_snapshots WHERE project_id=? AND revision=?",
             (row["project_id"], row["revision"]),
         ).fetchone()
-        if indexed and indexed["parser_version"] == PARSER_VERSION:
+        if indexed and indexed["parser_version"] == INDEX_VERSION:
             continue
         for table in ("ci_relations", "ci_symbols", "ci_files", "ci_snapshots"):
             db.execute(

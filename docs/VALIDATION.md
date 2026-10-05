@@ -3,6 +3,87 @@
 公开副本已经去除私人会话链接、个人插件/Tunnel 标识和个人路径。原始验收记录
 只保留在维护者本机未提交的归档中；下述历史结果不是每个新账户的可用性保证。
 
+## 0.4.3 · 重构前恢复基线固定
+
+日期：2026-10-06（Asia/Shanghai）。用户要求保存当前版本，作为后续重大重构问题的
+恢复目标。当前修复源码、测试、依赖锁、重构方案与恢复说明一起保存；不开始重构。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| 源码与应用版本 | pyproject / Python 包为 0.4.3；安装版 plist 为 0.4.3 / build 7，LSUIElement=true |
+| 源码对应 | diff -qr 比较工作树 src/code_context 与应用 backend/src/code_context，逐文件一致，不包含字节码缓存 |
+| 全量回归 | 466 passed，33.67 秒；1 条原有上游 DeprecationWarning；新的独立项目测试目录，不复用旧 basetemp |
+| 静态检查 | Ruff check / format check 通过，覆盖 src/tests/scripts/macos 的 47 个 Python 文件；不生成 Ruff/Python 缓存 |
+| HTTP 演示 | passed；十五个只读工具、full/delta、幂等、崩溃恢复、状态隔离、搜索/差异与敏感文件排除 |
+| 持续 stdio 演示 | passed；十五工具、热更新、停机编辑恢复、两份状态保留、过期上下文拒绝；不声称本轮网页验收 |
+| 当前应用签名/扫描 | codesign deep/strict 通过；Publication guard 1838 files / 0 findings |
+| 应用恢复 ZIP | 当前已安装自包含应用的压缩副本，55322192 bytes（约 52.8 MiB）；unzip -tq 通过 |
+| 本机固定标识 | anchor/colink-0.4.3-before-live-workspace-refactor；不移动旧 anchor/colink-0.4.1-before-refactor 和发行标签 |
+
+应用恢复 ZIP、源码 bundle、SHA256SUMS 和最终提交信息只保存到本机
+`.artifacts/anchors/colink-0.4.3-before-live-workspace-refactor/`；未上传 GitHub。
+bundle 的离线还原及校验结果记录在该目录的 RECOVERY.md。恢复包不是用户数据备份，
+不包含个人配置、密钥或镜像数据库；当前安装版、连接、所选目录与持久化数据不修改。
+
+本轮只重新验证既有本地只读基线，没有重新安装应用、浏览器刷新或新的网页测试；
+0.4.3 的原缺陷定向网页结果继续以以下历史记录为准。固定版本不是零缺陷保证。
+源码/应用回退与未来用户代码修改的任务回退不同；数据库格式迁移前须另设可恢复
+路径，不能盲目降级读取新数据库。详见 [恢复流程](ROLLBACK_0.4.3.md)。
+
+## 0.4.3 · Python 源码根修复、本机更新与定向网页验收
+
+日期：2026-10-06（Asia/Shanghai）。先逐项核实用户提供的 Python 模块路径诊断，
+再按授权修复源码及测试；用户随后授权本机安装、刷新原网页工具和删除生成缓存。
+当轮分支为 `codex/colink-code-intelligence`，公开下载仍为 0.4.1，修复当轮未提交或
+发布 GitHub；随后按用户要求本地提交并固定恢复锚点，见上一节，仍未公开发布。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| 缺陷复现 | 网页可定位 MetadataClaim 定义，但 document_models.py 的 import 被误标为 external_or_unavailable；缺失本地依赖边 |
+| 修复前回归 | 项目根、src 布局通过；Code、backend、python、嵌套 services/foo/src 四种布局失败，合计 2 passed / 4 failed |
+| 修复策略 | 包边界＋已观察绝对导入识别源码根；镜像内 pyproject.toml 可显式配置；同名多根保留 ambiguous，不按任意路径后缀猜测 |
+| 全量回归 | 最终 0.4.3：466 passed，35.97 秒；初次修复后 466 passed，31.35 秒；1 条原有上游弃用警告 |
+| 验证环境纠正 | 首次在 /tmp 跑全量有九项桌面失败，因实际 /private/tmp 路径命中系统目录保护；改用独立项目临时目录通过，没有放宽保护 |
+| 静态检查与依赖 | Ruff check / format check 覆盖 src/tests/scripts/macos 47 个 Python 文件；uv sync --locked；uv.lock 只更新自身版本，不升级依赖 |
+| 关系与隔离 | 类、调用、引用、文件依赖、架构层级、影响、namespace 显式根、多根歧义、配置变化、旧索引回填与当前＋前一份状态通过 |
+| MCP 工具面 | 自定义 Code 根经 MCP SDK 实际调用九个结构工具；源码 HTTP / 持续 stdio 演示通过，十五个工具只读 |
+| 自包含包 | 原生编译、签名、搬移、ZIP/DMG 校验及包内 HTTP/持续 stdio 通过；Publication guard 1838 files / 0 findings |
+| 本机安装 | /Applications/Colink.app 后端及 plist 为 0.4.3，LSUIElement=true；安装的根映射/索引/绑定器文件哈希与工作区一致 |
+| 原连接恢复 | 同一已选来源和私有隧道，原密钥/profile 字节及 600 权限保留；running=true、ready=true、supervised=true、auto_start=false |
+| 网页工具刷新 | 用户原生 Chrome 的原连接管理页执行刷新，未新建连接、修改权限或导入新的 Skill |
+| 定向网页结果 | document_models.py → metadata_models.py 为 IMPORT / TYPE_REFERENCE 且 resolved；ParsedDocument.claims → MetadataClaim 为 resolved |
+| 本地调用网页结果 | normalize_admitted_document 的 normalize_line_endings、normalize_unicode_nfc、get_claim_value_kind、normalize_date_claim、normalize_claim_candidate_value、normalize_language_claim 目标 resolved |
+
+网页结果是刷新后的新对话实际可见输出，且显示了插件活动。仅证明上述原缺陷与
+读取范围已修复，不是十五工具全部在线验证、动态调用全覆盖、运行业务通过、自动
+Skill 每轮加载或新账号可用的证据。Pydantic 第三方定义/继承方法、动态接收器和内建
+函数仍可能保持 external_or_unavailable / unresolved，不伪造静态目标。
+
+应用普通文件正文合计 134862528 bytes（约 128.6 MiB），不包括用户镜像、配置，
+也不等于内存或 APFS 分配块。更新未启用写入，不增加目录、权限或开机自启。
+旧版关闭时界面曾提示未完全关闭，实际监督状态与进程列表确认已停止后才退出替换；
+本任务没有足够日志归因，也没有顺带修改关闭逻辑。
+
+### 用户授权的生成物清理
+
+本轮测试、演示、打包与换版暂存目录，以及核实为测试输出的历史目录按用户要求删除。
+保留本节验收摘要和可重跑的测试源码；以下历史章节中的临时测试/演示路径是当时的
+留存记录，不再承诺当前目录仍存在。
+
+已删除 55 个已核实的生成目录（清理前 du -sk 合计 1613088 KiB）以及开发依赖与
+旧冒烟环境中的 181 个纯 Python 字节码缓存目录（19148 KiB），合计约 1.56 GiB。
+这是目标目录清理前的分配量合计，不承诺 APFS 的可用空间立即增加相同数值。
+
+- 本轮四个临时源码根测试目录、source-roots-verification 和 source-roots-install
+  全部移除；新包、换版暂存的旧应用和包内演示副本不留本地。
+- 移除共享 swift-module-cache、pytest/Ruff/Python 缓存；下次编译或运行会按需重建。
+- 移除核实为 pytest、合成基准、样例协议演示和开发构建的旧输出，保留本页结果摘要。
+- 源码、回归测试代码、uv.lock、可复用依赖本体、旧发行包、私人原始资料/备份，
+  项目 .code-context 与应用的 Application Support 持久化数据不在清理范围。
+
+非强制删除后逐一确认目标不存在，清理后原连接仍 running / ready / supervised。
+不自动删除用途不明目录；本次删除不能从废纸篓恢复，但这些生成缓存可以重新构建。
+
 ## 0.4.2 · 自包含打包与维护者本机安装
 
 日期：2026-10-05（Asia/Shanghai）。用户要求安装到本机，并明确选择安装后保持

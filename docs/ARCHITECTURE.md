@@ -1,5 +1,10 @@
 # CoLink · 架构与协议 v1
 
+本文描述当前已实现的镜像架构。2026-10-06 记录的下一次重构为“先解耦，再原文件
+按需直读、多项目工作区与按需索引”，详见
+[LIVE_WORKSPACE_REFACTOR.md](LIVE_WORKSPACE_REFACTOR.md)；尚未实施，不能把目标图或
+新读取语义当作现有运行能力。既有镜像、历史状态和来源限制在迁移确认前继续有效。
+
 ```text
 指定项目目录
     │ 只读取允许的 UTF-8 文本
@@ -33,7 +38,7 @@ MirrorStore（SQLite 原子提交 / 不可变快照 / 内容去重 / Python-Java
 | `macos/CodeConnect/` | 原生 SwiftUI/AppKit 菜单栏、系统文件夹选择和透明材质 |
 | `storage.py` | 快照事务、幂等、revision 冲突、读取与搜索 |
 | `intelligence_models.py` / `intelligence_python.py` / `intelligence_java.py` | 有界语法事实与两种语言解析，不执行项目代码 |
-| `intelligence_resolver.py` / `intelligence_index.py` | 保守静态绑定、哈希复用、生产端原子索引与两份状态清理 |
+| `intelligence_roots.py` / `intelligence_resolver.py` / `intelligence_index.py` | 镜像内源码根配置/发现、保守静态绑定、哈希复用、生产端原子索引与两份状态清理 |
 | `intelligence_queries.py` / `intelligence_tools.py` | 只读符号、引用、关系、层级、循环和影响查询 |
 | `server.py` | MCP 工具注册、生命周期、HTTP 认证和独立同步接口 |
 | `demo.py` | 保留数据的端到端演示 |
