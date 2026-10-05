@@ -336,13 +336,18 @@ class LiveQueries:
 
     def mcp_status(self):
         return {
+            **(self.write_coordinator.status() if self.write_coordinator is not None else {}),
             "state": "live_read",
             "source_mode": "live",
             "history_available": False,
             "last_seen": datetime.now(UTC).isoformat(),
             "last_sync_at": None,
             "watcher": self.watcher.status() if self.watcher is not None else None,
-            "write_enabled": False,
+            "write_enabled": (
+                self.write_coordinator.status()["write_enabled"]
+                if self.write_coordinator is not None
+                else False
+            ),
         }
 
     def clear(self):
