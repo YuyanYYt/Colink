@@ -85,7 +85,7 @@ def test_snapshot_size_limit_rolls_back(tmp_path, monkeypatch):
 
     monkeypatch.setattr(module, "MAX_TOTAL_BYTES", 4)
     store = MirrorStore(tmp_path / "mirror.db")
-    with pytest.raises(MirrorError, match="8 MiB"):
+    with pytest.raises(MirrorError, match="4 bytes"):
         store.apply("sample", batch("big", 0, [upsert("a.py", "12345")], "full"))
     assert store.list_projects()["projects"] == []
     with store.connection() as db:

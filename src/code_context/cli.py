@@ -24,7 +24,7 @@ def emit(value):
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         prog="colink",
-        description="Colink · 连接你的代码（本地同步与只读 MCP）",
+        description="CoLink · 连接你的代码（本地同步与只读 MCP）",
     )
     result.add_argument("--version", action="version", version=__version__)
     commands = result.add_subparsers(dest="command", required=True)
@@ -46,7 +46,7 @@ def parser() -> argparse.ArgumentParser:
     local_status.add_argument("--data-dir", type=Path, default=Path(".code-context/local"))
 
     for name in ("desktop-status", "desktop-run"):
-        command = commands.add_parser(name, help="Colink 菜单栏应用的本机生命周期接口")
+        command = commands.add_parser(name, help="CoLink 菜单栏应用的本机生命周期接口")
         command.add_argument("--workspace", type=Path, default=Path.cwd())
         command.add_argument("--root", type=Path, required=True)
         if name == "desktop-run":

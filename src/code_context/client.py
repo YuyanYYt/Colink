@@ -152,7 +152,7 @@ class LocalState:
     def enqueue(self, batch: SyncBatch) -> None:
         payload = batch.model_dump_json()
         if len(payload.encode()) > MAX_REQUEST_BYTES:
-            raise SyncError("synchronization batch exceeds 20 MiB")
+            raise SyncError(f"synchronization batch exceeds {MAX_REQUEST_BYTES} bytes")
         with self.connection() as db:
             db.execute("INSERT INTO outbox VALUES(1, ?)", (payload,))
 

@@ -102,7 +102,7 @@ def test_build_reuses_one_workspace_cache_across_output_directories(tmp_path, mo
         assert not (output.parent / "swift-module-cache").exists()
         with (output / "Contents/Info.plist").open("rb") as stream:
             metadata = plistlib.load(stream)
-        assert metadata["CFBundleName"] == metadata["CFBundleDisplayName"] == "Colink"
+        assert metadata["CFBundleName"] == metadata["CFBundleDisplayName"] == "CoLink"
         assert metadata["CFBundleIdentifier"] == "local.codeconnect.menubar"
     compilations = [args for args in commands if args[:2] == ["xcrun", "swiftc"]]
     assert len(compilations) == 2
@@ -114,9 +114,9 @@ def test_colink_branding_preserves_the_connection_and_preferences_identity():
     panel = (WORKSPACE / "macos/CodeConnect/Panel.swift").read_text()
     entry = (WORKSPACE / "macos/CodeConnect/main.swift").read_text()
     runtime = (WORKSPACE / "macos/CodeConnect/Runtime.swift").read_text()
-    assert 'Text("Colink")' in panel
-    assert 'accessibilityLabel("Colink SVG 标志")' in panel
-    assert '"退出 Colink"' in entry
+    assert 'Text("CoLink")' in panel
+    assert 'accessibilityLabel("CoLink SVG 标志")' in panel
+    assert '"退出 CoLink"' in entry
     assert '["run", "--locked", "--no-sync", "colink"]' in runtime
     assert 'string(forKey: "SelectedFolder")' in runtime
 

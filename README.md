@@ -1,8 +1,8 @@
-# Colink · 连接你的代码
+# CoLink · 连接你的代码
 
-<img src="macos/assets/logo.svg" width="96" alt="Colink logo">
+<img src="macos/assets/logo.svg" width="96" alt="CoLink logo">
 
-让网页上的 ChatGPT 按需读取你指定的本机代码项目。Colink 在电脑上维护只读代码镜像，
+让网页上的 ChatGPT 按需读取你指定的本机代码项目。CoLink 在电脑上维护只读代码镜像，
 通过个人私有连接提供文件清单、源码、搜索与前后差异；不用为了它购买一台服务器。
 
 **开源预览版 0.4.1：macOS 14+ / Apple Silicon。**
@@ -12,17 +12,22 @@
 [技术架构](docs/ARCHITECTURE.md) · [安全边界](SECURITY.md) ·
 [ChatGPT 自动匹配 Skill](docs/CHATGPT_SKILL.md)
 
-源码与公开安装包均为 0.4.1：差异摘要优先、新增连接状态检查、改进分页和文件过滤，
-并提供通用代码上下文 Skill。样例热更新已完成实际 ChatGPT 网页验收；结果与限制见
+公开安装包仍为 0.4.1：差异摘要优先、连接状态检查、分页和文件过滤，
+并提供通用代码上下文 Skill。该版样例热更新已完成实际 ChatGPT 网页验收；结果与限制见
 [验证记录](docs/VALIDATION.md)，后续功能重构边界见 [重构锚点](docs/REFACTOR_ANCHOR.md)。
 每次发布使用独立版本标签，保留原安装包和更新说明；需要历史版本时打开“所有版本”，
 例如 [0.4.0](https://github.com/YuyanYYt/Colink/releases/tag/v0.4.0)，不使用最新源码替代旧版源码。
+
+当前独立开发分支 `codex/colink-code-intelligence` 的源码版本为 **0.4.2**，尚未发布安装包。
+新增 Python / Java 按需符号、引用、类关系、调用关系、文件/模块依赖、反向影响、
+依赖层级与循环查询；原有源码读取和只读权限不变。能力、限制与验证范围见
+[代码结构查询](docs/CODE_INTELLIGENCE.md)。不能用 0.4.1 的网页验收代替新工具的验收。
 
 后续的默认关闭写入开关、精准编辑、先备份后写入、跨轮多文件整体回退和有界恢复区，
 已记录在 [MCP 受控写入契约](docs/WRITE_CONTRACT.md)。这是待开发需求，不是 0.4.1 的
 已实现能力；先行新功能另行确定，未确认实施前继续保持只读。
 
-下载 DMG，拖入“应用程序”，打开 Colink，完成首次连接设置，然后选择文件夹并点击启动。
+下载 DMG，拖入“应用程序”，打开应用，完成首次连接设置，然后选择文件夹并点击启动。
 安装包包含 Python、MCP 运行依赖和经过校验的官方隧道客户端，使用者不需要先安装
 Python、uv、Node.js 或编辑 YAML。自己的 Tunnel ID、运行密钥和 ChatGPT 连接仍需要
 用户授权配置；不是安装即自动共享。当前安装包仅本地 ad-hoc 签名，尚未完成 Apple
@@ -40,11 +45,11 @@ API Key，也不调用模型。可选的官方 Secure MCP Tunnel 需要独立的
 已有两种入口：本地 `stdio` MCP、带 Bearer 令牌的 Streamable HTTP MCP。
 HTTP 同步接口和 MCP 查询工具分开；MCP 工具全部只读。
 
-## macOS 菜单栏应用：Colink
+## macOS 菜单栏应用：CoLink
 
 安装后应用位于 `/Applications/Colink.app`（或你自己的 `~/Applications`）。无需终端启动：
 
-1. 在 Finder 的“应用程序”中双击 `Colink`，或在 macOS 应用搜索中输入这个名字。
+1. 在 Finder 的“应用程序”中双击应用，或在 macOS 应用搜索中输入 `CoLink`（旧版显示 `Colink`）。
 2. 点击菜单栏代码连接图标；选择文件夹只改变选择，不开始采集。
 3. 点击“启动”，应用管理采集与私有隧道；更换为非样例目录时先确认共享给 OpenAI。
 4. 点击“关闭”真正停止整条连接，保持关闭直到再次手动启动。
@@ -211,8 +216,8 @@ uv run colink status --root examples/sample_project --project live-sample \
 更新工具后，在 ChatGPT 的原连接管理页刷新工具，并用新对话验证。带旧 `revision`
 参数的缓存调用会明确要求刷新，不会忽略参数后误读当前代码。
 
-Colink 的调用规则可以安装为独立 Skill，按问题自动匹配，不需要每次手动选中。
-它只指导使用已经连接的 Colink，不携带凭据、不增加目录权限。网页安装步骤和
+CoLink 的调用规则可以安装为独立 Skill，按问题自动匹配，不需要每次手动选中。
+它只指导使用已经连接的 CoLink，不携带凭据、不增加目录权限。网页安装步骤和
 不能保证每次自动命中的边界见 [ChatGPT Skill](docs/CHATGPT_SKILL.md)。
 
 ## 同步与文件策略
@@ -239,19 +244,24 @@ Colink 的调用规则可以安装为独立 Skill，按问题自动匹配，不�
 ## 当前限制与后续维护
 
 - 支持 macOS/Linux，使用 Python 3.11+；Windows 客户端暂未适配。
-- 每个镜像最多 10,000 个文本文件、8 MiB 总文本；单文件最多 1 MiB。
-- 读取默认 200 行，最多 1,000 行；搜索最多 200 条；Diff 最多 100 个文件、50,000 字符。
+- 0.4.2 开发版每个镜像最多 50,000 个文本文件、128 MiB 总文本；单文件最多 4 MiB。
+  0.4.1 安装版仍是 10,000 / 8 MiB / 1 MiB，需要升级后才生效。
+- 读取默认 200 行，最多 1,000 行；新增默认 20,000 字符、最大 50,000 字符的源码页，
+  长行沿 `next_start_line` / `next_char_offset` 续读，不截断后丢失内容。
+  搜索最多 200 条；Diff 最多 100 个文件、50,000 字符。
 - 快照表示一次采集并确认的代码状态；没有文件系统原子快照，持续编辑期间会继续同步直到收敛。
 - 每个项目仅保留当前与前一次代码快照；同内容去重，提交时原子清理更早的文件清单、
-  无引用源码和过期同步记录。两份源码文本最多合计 16 MiB，数据库元数据、空闲页及短期
+  无引用源码和过期同步记录。新配额下两份源码文本最多合计 256 MiB，数据库元数据、
+  有界结构索引、空闲页及短期
   WAL 另计。旧数据库升级时压缩，后续复用空闲页和增量回收，不按编辑次数无限保留源码。
 - HTTP 入口使用单用户 Bearer 令牌；私有隧道使用官方组织/工作区授权，尚未实现
   公网 OAuth、多用户隔离和钥匙串保存。
 - 图形界面目前仅为 macOS 菜单栏应用；CLI 仍可用于 macOS/Linux。
-- 暂未实现符号/调用关系、向量检索、Google Drive 或远程执行。
+- Python/Java 的结构关系查询在 0.4.2 开发分支中实现；其他语言尚未有结构解析。
+  暂未实现向量检索、Google Drive、代码写入或远程执行。
 
-后续建议顺序：经确认的真实项目联调 → Python 符号查询 →
-按实际规模增加索引、备份与客户端体验。
+后续建议顺序：0.4.2 安装和网页验收 → 经确认的真实项目联调 →
+按写入契约另行实施受控写入，不提前扩大权限。
 
 ## 公网部署与 ChatGPT 接入边界
 
@@ -290,7 +300,8 @@ uv run pytest -q
 默认数据位于 `.code-context/server/mirror.sqlite3` 与 `.code-context/clients/`。
 这是可复用的数据状态，应保留；不要把它当成普通缓存删除。依赖版本由 `uv.lock` 固定。
 
-当前源码与公开开源预览包均为 0.4.1，项目与界面对外统一为 Colink。
+当前开发分支源码为 0.4.2，对外显示名为 CoLink；公开安装包与本机已安装版仍为 0.4.1。
 推荐 CLI 为 `uv run colink`；
 原 `code-context` 命令仍兼容，以免现有应用/profile 失效。工作区路径、`code_context`
-模块、`CODE_CONTEXT_*` 配置和连接 ID 保持不变；旧发布/验收记录保留当时真实名称。
+模块、`CODE_CONTEXT_*` 配置、GitHub 仓库、`Colink.app` 文件路径和连接 ID 保持不变；
+新构建的界面与 bundle 显示为 CoLink。旧发布/验收记录保留当时真实名称。

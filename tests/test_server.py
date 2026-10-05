@@ -158,6 +158,15 @@ def test_real_mcp_protocol_discovery_and_call(api):
         "search_code",
         "get_diff",
         "connection_status",
+        "symbol_search",
+        "read_symbol",
+        "find_references",
+        "get_call_graph",
+        "get_class_graph",
+        "get_file_dependencies",
+        "get_project_architecture",
+        "get_external_dependencies",
+        "get_impact_analysis",
     }
     assert all(t["annotations"]["readOnlyHint"] for t in tools)
     result = client.post(

@@ -27,10 +27,10 @@ struct ConnectPanel: View {
             HStack(spacing: 12) {
                 if let image = NSImage(named: "Logo") {
                     Image(nsImage: image).resizable().frame(width: 42, height: 42)
-                        .accessibilityLabel("Colink SVG 标志")
+                        .accessibilityLabel("CoLink SVG 标志")
                 }
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Colink").font(.system(size: 20, weight: .semibold, design: .rounded))
+                    Text("CoLink").font(.system(size: 20, weight: .semibold, design: .rounded))
                     Text("连接你的代码").font(.system(size: 11)).foregroundStyle(.secondary)
                 }
                 Spacer()

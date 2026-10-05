@@ -1,10 +1,10 @@
-# Colink 的 ChatGPT 图标包
+# CoLink 的 ChatGPT 图标包
 
 开源用户不应上传或复用维护者的个人连接元数据。这个目录公开的只有品牌 SVG/PNG
 和说明；已有个人 `.app.json`、`plugin.json`、`.codex-plugin/` 被 Git 忽略，保留在本机，
 不属于可分发插件模板，也不上传到 GitHub。图标的网页显示问题未在本轮重新处理。
 
-普通用户按 [安装指南](../../docs/INSTALL.md) 自行创建私有连接并命名为 Colink。
+普通用户按 [安装指南](../../docs/INSTALL.md) 自行创建私有连接并命名为 CoLink。
 GitHub 发布不是 ChatGPT 公共插件目录发布，私有 Tunnel 也不能代替公共目录审核。
 
 通用代码问答 Skill 已独立放在

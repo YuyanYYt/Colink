@@ -1,4 +1,4 @@
-"""Local lifecycle support for Colink. No model calls or remote write tools.
+"""Local lifecycle support for CoLink. No model calls or remote write tools.
 
 The native app owns a pipe to this supervisor. A stop request, pipe EOF, signal,
 or unexpected client exit shuts down the entire owned process group. Merely
@@ -185,7 +185,7 @@ def run_desktop(workspace: Path, root: Path, client: str, app_pid: int = 0) -> i
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise SyncError("Colink already owns a connection") from exc
+            raise SyncError("CoLink already owns a connection") from exc
         if _running_profile(workspace) is not None:
             raise SyncError("an external connection is running; stop it in its owning application")
         if not binding.profile.exists():

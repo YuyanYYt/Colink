@@ -107,8 +107,8 @@ def build(
             {
                 "CFBundleExecutable": "CodeConnect",
                 "CFBundleIdentifier": bundle_id,
-                "CFBundleName": "Colink",
-                "CFBundleDisplayName": "Colink",
+                "CFBundleName": "CoLink",
+                "CFBundleDisplayName": "CoLink",
                 "CFBundlePackageType": "APPL",
                 "CFBundleShortVersionString": version,
                 "CFBundleVersion": "7",
