@@ -52,6 +52,26 @@ class SourceAccess:
         self.lock = threading.RLock()
         self.metrics = {"body_reads": 0, "metadata_walks": 0}
         self._fingerprints = OrderedDict()
+        self._ignore_cache = None
+
+    def _ignore(self, root):
+        names = (".gitignore", ".codecontextignore")
+
+        def versions():
+            return tuple(
+                _version(info) if (info := self.scanner._stat(root, name, name)) else None
+                for name in names
+            )
+
+        before = versions()
+        if self._ignore_cache is not None and before == self._ignore_cache[0]:
+            if versions() == before:
+                return self._ignore_cache[1]
+        spec = self.scanner._load_ignore(root)
+        if versions() != before:
+            raise SourceError("SOURCE_CHANGED: ignore policy changed while reading")
+        self._ignore_cache = (before, spec)
+        return spec
 
     def _ancestors(self):
         root = self.scanner.root
@@ -86,7 +106,7 @@ class SourceAccess:
         except ValueError:
             raise SourceError("INVALID_PATH: use a normalized project-relative path") from None
         with self.root_fd() as root:
-            spec = self.scanner._load_ignore(root)
+            spec = self._ignore(root)
             if self.scanner._path_problem(path, spec, directory):
                 raise SourceError("PATH_EXCLUDED: path is outside the allowed source policy")
             with self.scanner._parent_fd(root, path, set()) as (parent, problem):
@@ -106,14 +126,15 @@ class SourceAccess:
             if after is None or _version(before) != _version(after):
                 raise SourceError("SOURCE_CHANGED: file changed while reading; retry")
             self.metrics["body_reads"] += 1
-            self._fingerprints[path] = (_version(after), content_hash(content))
+            sha256 = content_hash(content)
+            self._fingerprints[path] = (_version(after), sha256)
             self._fingerprints.move_to_end(path)
             while len(self._fingerprints) > 4096:
                 self._fingerprints.popitem(last=False)
             return SourceDocument(
                 path,
                 content,
-                content_hash(content),
+                sha256,
                 len(content.encode("utf-8")),
                 stat.S_IMODE(after.st_mode),
                 _version(after),
@@ -153,7 +174,7 @@ class SourceAccess:
         directories = 0
         partial = False
         with self.root_fd() as root:
-            spec = self.scanner._load_ignore(root)
+            spec = self._ignore(root)
 
             def walk(fd, prefix):
                 nonlocal directories, partial

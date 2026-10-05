@@ -99,3 +99,27 @@ def test_fingerprint_validation_reuses_only_unchanged_metadata(tmp_path):
     file.write_text("after\n")
     assert access.fingerprint("a.py") != document.sha256
     assert access.metrics["body_reads"] == 2
+
+
+def test_ignore_rules_reuse_metadata_but_changed_policy_takes_effect(tmp_path, monkeypatch):
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "a.py").write_text("allowed = True\n")
+    ignore = root / ".codecontextignore"
+    ignore.write_text("other.py\n")
+    source = SourceAccess(root)
+    calls = []
+    original = source.scanner._load_ignore
+
+    def count(fd):
+        calls.append(1)
+        return original(fd)
+
+    monkeypatch.setattr(source.scanner, "_load_ignore", count)
+    assert source.read("a.py").content
+    assert source.fingerprint("a.py")
+    source.manifest()
+    assert len(calls) == 1
+    ignore.write_text("a.py\n")
+    assert source.fingerprint("a.py") is None
+    assert len(calls) == 2
