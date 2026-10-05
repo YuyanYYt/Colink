@@ -19,6 +19,7 @@
 例如 [0.4.0](https://github.com/YuyanYYt/Colink/releases/tag/v0.4.0)，不使用最新源码替代旧版源码。
 
 当前独立开发分支 `codex/colink-code-intelligence` 的源码版本为 **0.4.2**，尚未发布安装包。
+自包含 0.4.2 已完成维护者本机安装并保持关闭；公开下载仍是 0.4.1，新工具网页验收未完成。
 新增 Python / Java 按需符号、引用、类关系、调用关系、文件/模块依赖、反向影响、
 依赖层级与循环查询；原有源码读取和只读权限不变。能力、限制与验证范围见
 [代码结构查询](docs/CODE_INTELLIGENCE.md)。不能用 0.4.1 的网页验收代替新工具的验收。
@@ -300,7 +301,7 @@ uv run pytest -q
 默认数据位于 `.code-context/server/mirror.sqlite3` 与 `.code-context/clients/`。
 这是可复用的数据状态，应保留；不要把它当成普通缓存删除。依赖版本由 `uv.lock` 固定。
 
-当前开发分支源码为 0.4.2，对外显示名为 CoLink；公开安装包与本机已安装版仍为 0.4.1。
+当前开发分支源码与维护者本机安装版为 0.4.2，对外显示名为 CoLink；公开安装包仍为 0.4.1。
 推荐 CLI 为 `uv run colink`；
 原 `code-context` 命令仍兼容，以免现有应用/profile 失效。工作区路径、`code_context`
 模块、`CODE_CONTEXT_*` 配置、GitHub 仓库、`Colink.app` 文件路径和连接 ID 保持不变；

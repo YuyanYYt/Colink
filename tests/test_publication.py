@@ -1,8 +1,10 @@
 import hashlib
 import os
+import plistlib
 import runpy
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -32,6 +34,35 @@ def test_installer_has_explicit_apply_no_overwrite_and_no_security_bypass():
     assert "codesign --verify --deep --strict" in source
     for forbidden in ("rm -", "xattr -", "spctl --master-disable", "launchctl "):
         assert forbidden not in source
+
+
+@pytest.mark.parametrize(
+    "name,bundle_id,accepted",
+    [
+        ("CoLink", "local.codeconnect.menubar", True),
+        ("Colink", "local.codeconnect.menubar", True),
+        ("Unrelated", "local.codeconnect.menubar", False),
+        ("CoLink", "local.unrelated.application", False),
+    ],
+)
+def test_installer_brand_identity_compatibility(tmp_path, name, bundle_id, accepted):
+    if sys.platform != "darwin" or not shutil.which("plutil") or not shutil.which("bash"):
+        pytest.skip("native plist preflight tools unavailable")
+    source = (Path(__file__).parents[1] / "scripts/install-macos.sh").read_text()
+    checks = source[source.index("colink_name=$(") : source.index('mkdir -p "$colink_destination"')]
+    info = tmp_path / "Colink.app/Contents/Info.plist"
+    info.parent.mkdir(parents=True)
+    info.write_bytes(plistlib.dumps({"CFBundleName": name, "CFBundleIdentifier": bundle_id}))
+    result = subprocess.run(
+        ["bash", "-e", "-c", checks],
+        env={**os.environ, "colink_stage": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (result.returncode == 0) == accepted
+    if not accepted:
+        assert "Unexpected application identity" in result.stderr
 
 
 def run_installer_dry_run(tmp_path, members, *, checksum=None):

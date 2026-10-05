@@ -1,7 +1,9 @@
 # CoLink 0.4.2 · Python / Java 按需结构查询
 
 这是独立读取增强分支 `codex/colink-code-intelligence` 的功能说明，不是 0.4.1
-公开安装包或网页连接已升级的证明。它不会启用写入、创建源文件、执行项目代码或测试。
+公开安装包或网页连接已升级的证明。维护者已安装自包含 0.4.2 并保持关闭，
+安装结果见 [验证记录](VALIDATION.md)；公开发布与新工具网页验收仍未完成。
+它不会启用写入、创建源文件、执行项目代码或测试。
 
 ## 为什么值得做，哪些先不做
 
@@ -103,7 +105,7 @@
 新源码 MCP server 名称、原生面板、菜单和 bundle 显示名为 **CoLink**。
 `colink` / `code-context` 命令、Python 包、GitHub `YuyanYYt/Colink`、bundle ID、
 `Colink.app` 文件路径、Application Support/Colink 数据目录和现有连接身份不改。
-历史发布记录保留真实旧名，不移动 0.4.1 锚点；安装新版本和网页刷新需另做验收。
+历史发布记录保留真实旧名，不移动 0.4.1 锚点；维护者本机安装已经验证，网页刷新需另做验收。
 
 ## Skill 的作用
 

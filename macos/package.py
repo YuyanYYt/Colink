@@ -418,9 +418,12 @@ def verify_relocation(app: Path, output_dir: Path) -> None:
         probe = (
             "import pathlib,sys,ssl,sqlite3; import code_context.cli,mcp,httpx; "
             "import pydantic_core,watchfiles,cryptography.hazmat.bindings._rust; "
+            "import tree_sitter,tree_sitter_java; "
+            "tree_sitter.Parser(tree_sitter.Language(tree_sitter_java.language())); "
             "root=pathlib.Path(sys.executable).resolve().parents[2]; "
             "assert all(pathlib.Path(m.__file__).resolve().is_relative_to(root) "
-            "for m in (code_context.cli,mcp,httpx,pydantic_core,watchfiles)); "
+            "for m in (code_context.cli,mcp,httpx,pydantic_core,watchfiles,"
+            "tree_sitter,tree_sitter_java)); "
             "assert sys.dont_write_bytecode; "
         )
         run_tool(

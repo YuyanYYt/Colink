@@ -3,6 +3,46 @@
 公开副本已经去除私人会话链接、个人插件/Tunnel 标识和个人路径。原始验收记录
 只保留在维护者本机未提交的归档中；下述历史结果不是每个新账户的可用性保证。
 
+## 0.4.2 · 自包含打包与维护者本机安装
+
+日期：2026-10-05（Asia/Shanghai）。用户要求安装到本机，并明确选择安装后保持
+关闭。关闭旧应用后先完整备份用户数据、偏好与旧应用，再安装到原路径；不恢复
+连接、不更换来源、不动网页插件/Skill，不推送或发布 GitHub。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| 安装相关回归 | 最终 71 passed，3.70 秒；首轮 71 passed，3.40 秒；覆盖安装预检、身份大小写兼容、打包和原生资源 |
+| 安装脚本 | 接受 CoLink 与旧 Colink，核对 local.codeconnect.menubar；错误名称/身份拒绝，仍禁止覆盖、安全绕过和自动清理 |
+| 自包含运行环境 | Python/锁定依赖/官方 tunnel-client 齐全；搬移后显式加载 tree-sitter、Java grammar 并初始化 Parser，通过原生架构、链接、版本与签名检查 |
+| 包内 HTTP | passed，十五工具、完整/增量、幂等重试、恢复、隔离及敏感文件排除 |
+| 包内持续 stdio | passed，十五工具、热更新、停机编辑恢复、两份保留、过期拒绝，无数字 MCP 版本参数/结果 |
+| 包检查 | Publication guard 1837 files / 0 findings；ZIP、DMG 的 SHA-256 与清单一致，DMG 构建时镜像校验通过 |
+| 安装及签名 | 原路径 /Applications/Colink.app 为 0.4.2；新旧应用 deep/strict ad-hoc 签名均通过 |
+| 原生界面 | 实际打开新版，截图显示 CoLink、原 SVG 图形、原目录、“已关闭”，启动/选择可用、关闭禁用 |
+| 菜单栏模式 | LSUIElement=true，系统 lsappinfo 类型为 UIElement；Dock 自动化超时，没有额外宣称 Dock 截图验收 |
+| 数据保留 | 3 个既有镜像仍在；安装并打开后整个用户数据目录与停止后的备份逐字节一致，密钥/profile 内容和权限、目录偏好一致 |
+| 关闭状态 | running=false、ready=false、supervised=false、external_active=false、phase=stopped、auto_start=false；旧连接进程已退出，仅新版菜单栏进程运行 |
+| 网页/公开发布 | 未执行；不是十五工具已刷新到 ChatGPT 或在线关系查询通过的证据 |
+
+体积为普通文件原始字节合计：应用 134855998 bytes（约 128.6 MiB）、ZIP
+54492572 bytes（约 52.0 MiB）、DMG 69330461 bytes（约 66.1 MiB）。不等于
+APFS 分配块、用户数据或内存占用；不是此前引用项目环境的约 1.2 MiB 开发壳。
+
+本机留存：
+
+- 自包含包及报告：`.artifacts/releases/colink-0.4.2-local/`。
+- 旧应用、私有数据/偏好备份和不含明文凭据的原始安装证据：
+  `.artifacts/local-upgrades/colink-0.4.2.MNgnFp/`；该目录只保留本机，不提交。
+- 包内 HTTP：`.artifacts/validation/colink-0.4.2-bundled/http/20261005T151634Z-665bab30/`。
+- 包内 stdio：`.artifacts/validation/colink-0.4.2-bundled/stdio/20261005T151634Z-9161df16/`。
+- 首轮安装相关测试：`.artifacts/test-runs/colink-install-042.erDNYY/`；最终复核：
+  `.artifacts/test-runs/colink-install-042-final.kN2glW/`。
+- ZIP 安装的暂存副本仍保留；未自动删除任何构建、缓存、备份或数据库。
+
+关闭旧应用期间，辅助功能文本短暂显示关闭异常与旧连接状态；随后实际截图、
+监督状态和进程检查均确认停止。没有足够日志归因，未在本安装任务中更改关闭逻辑。
+本轮没有启动真实项目，因此尚未为它补建新结构索引；首次手动启动时由生产端处理。
+
 ## 0.4.2 · 独立读取增强分支的本地验证
 
 日期：2026-10-05（Asia/Shanghai）。分支 `codex/colink-code-intelligence`，版本
