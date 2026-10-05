@@ -2,8 +2,8 @@
 
 Not yet attached to Runtime or MCP. Permission, a task's declared scope, source
 identity and persistent recovery capacity are independent checks. Task origins
-contain hashes/identity only; full origin text is saved on first actual edit by
-the upcoming file-operation layer. No source is written by this initial module.
+contain hashes/identity only; full origin text is saved on first actual edit.
+The candidate is not yet attached to Runtime/MCP or the installed application.
 """
 
 import hashlib
@@ -79,6 +79,9 @@ class WriteCoordinator:
                 "INSERT OR IGNORE INTO settings VALUES('next_task_request',?)",
                 ("req_" + uuid.uuid4().hex,),
             )
+        from code_context.write_operations import WriteOperations
+
+        self.operations = WriteOperations(self)
 
     def _pending(self):
         return bool(
@@ -132,7 +135,7 @@ class WriteCoordinator:
         with self.lock:
             self.grants = {}
 
-    def _authorized(self, project_id):
+    def _authorized(self, project_id, *, _allow_pending=False):
         if self.stop_requested.is_set() or not self._alive():
             self.grants = {}
             raise WriteError("WRITE_DISABLED: enable this project locally for this connection")
@@ -140,7 +143,7 @@ class WriteCoordinator:
         source.ensure_available()
         if self.grants.get(project_id) != source.source_id:
             raise WriteError("WRITE_NOT_AUTHORIZED: this project/source is not locally writable")
-        if self._pending():
+        if not _allow_pending and self._pending():
             raise WriteError("WRITE_RECOVERY_REQUIRED: preserve materials and recover locally")
         return source
 
@@ -371,6 +374,33 @@ class WriteCoordinator:
             or tuple(json.loads(baseline[0]["version"])) != tuple(document.version)
         ):
             raise WriteError("WRITE_ORIGIN_CONFLICT: late-added file differs from the task origin")
+
+    def apply_edit(self, project_id, task_id, request_id, path, expected_sha256, edit):
+        return self.operations.apply_edit(
+            project_id, task_id, request_id, path, expected_sha256, edit
+        )
+
+    def create_file(self, project_id, task_id, request_id, path, content):
+        return self.operations.create_file(project_id, task_id, request_id, path, content)
+
+    def guard_read(self, project_id):
+        """Do not publish intermediate or pending source states as normal results."""
+        with self.lock:
+            if (
+                self.inflight_project == project_id
+                or self.store.query(
+                    "SELECT task_id FROM tasks WHERE project_id=? "
+                    "AND state IN ('recovery_required','rolling_back') LIMIT 1",
+                    (project_id,),
+                )
+                or self.store.query(
+                    "SELECT operations.task_id FROM operations JOIN tasks USING(task_id) "
+                    "WHERE tasks.project_id=? AND operations.state "
+                    "IN ('prepared','committing','rollback_prepared') LIMIT 1",
+                    (project_id,),
+                )
+            ):
+                raise WriteError("WRITE_RECOVERY_REQUIRED: project publication is suspended")
 
     def _retire(self, task):
         if task["state"] not in TERMINAL:
