@@ -50,6 +50,7 @@ EXCLUDED_NAMES = (
     "*.sqlite*",
     "*.pyc",
     ".DS_Store",
+    ".colink-write-*.tmp",
 )
 
 # Deliberately narrow: this is a useful guard, not a claim of complete secret detection.
