@@ -13,7 +13,7 @@
 ## 直接使用
 
 推荐安装到 `/Applications/Colink.app`，也可使用自己的 `~/Applications`。
-发行版不需要保留克隆目录；维护者工作区中的旧开发副本不是本次 0.4.0 安装包。
+发行版不需要保留克隆目录；维护者工作区中的旧开发副本不是独立发行安装包。
 在 Finder 的“应用程序”中双击 Colink，再点击顶部图标即可操作。
 退出或电脑重启后，不用先开终端或找到项目目录。
 
@@ -106,7 +106,7 @@ SDK 模块缓存。该目录只在开发构建时使用，已安装应用运行�
 更新仍可能在共享缓存中生成新的模块。旧目录只在确认具体清理范围后处理。
 
 应用未进行 Apple Developer ID 签名、公证或 App Store 发布。构建命令默认不安装；
-0.3.3 曾按用户要求安装到 `/Applications`，本次 0.4.0 仅提供新包，不覆盖原安装版。
+0.4.1 已在维护者本机安全更新到 `/Applications` 并保留旧应用；打包命令本身不安装。
 应用启动只注册自己的 bundle，不重建或清理其他应用的 Launch Services/Spotlight。
 不同电脑先 `npm ci --prefix macos`；默认从 PATH 查找 Node，使用 `macos/node_modules/sharp`。
 用 `--client` 指定已核验的官方客户端，可用 `--node`/`--sharp` 显式指定构建依赖。
@@ -119,7 +119,7 @@ SDK 模块缓存。该目录只在开发构建时使用，已安装应用运行�
 ```sh
 uv sync --locked
 npm ci --prefix macos
-uv run python macos/package.py --output-dir .artifacts/releases/colink-0.4.0
+uv run python macos/package.py --output-dir .artifacts/releases/colink-0.4.1-new-build
 ```
 
 打包会生成 DMG、ZIP、SHA256SUMS 和报告。校验搬移后的解释器、CLI/MCP 导入与

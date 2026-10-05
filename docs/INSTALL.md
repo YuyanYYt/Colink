@@ -2,10 +2,10 @@
 
 ## 推荐：直接安装 macOS 应用
 
-首版安装包支持 **Apple Silicon（M1/M2/M3/M4 等）和 macOS 14 以上**。
+0.4.1 安装包支持 **Apple Silicon（M1/M2/M3/M4 等）和 macOS 14 以上**。
 Intel Mac、Windows 没有对应的图形安装包。macOS/Linux 开发者仍可使用 Python CLI。
 
-1. 打开 [GitHub v0.4.0 下载页](https://github.com/YuyanYYt/Colink/releases/tag/v0.4.0)。
+1. 打开 [GitHub v0.4.1 下载页](https://github.com/YuyanYYt/Colink/releases/tag/v0.4.1)。
 2. 下载 `Colink-macos-arm64.dmg`，双击打开，将 `Colink.app` 拖到“应用程序”。
    也可下载 ZIP，解压后把应用移到 `/Applications` 或 `~/Applications`。
 3. 从 Finder 的“应用程序”打开 Colink，点击菜单栏图标。
@@ -27,8 +27,21 @@ macOS 可能提示无法验证开发者。核对项目和校验值后，是否�
 shasum -a 256 -c SHA256SUMS
 ```
 
-把需要校验的安装文件和校验清单放在同一目录。校验值验证文件完整性，不等于 Apple
-公证，也不是独立的发布者身份认证。
+此命令需要清单中列出的全部文件位于同一目录。若只下载了 DMG，可以执行
+`shasum -a 256 Colink-macos-arm64.dmg`，与清单中同名文件对应的值比较。
+校验值验证文件完整性，不等于 Apple 公证，也不是独立的发布者身份认证。
+
+### 从 0.4.0 更新
+
+先在旧应用点击“关闭”并退出，确认连接停止；将旧应用移到自己选择的备份位置，
+再安装 0.4.1 到原安装路径。不要覆盖仍在运行的应用，不删除用户数据目录。
+重新打开后仍需手动点击启动；原目录选择、私有配置和镜像应保留。
+更新后在 ChatGPT 原 Colink 连接的管理页刷新工具，再新建对话。安装脚本仍拒绝覆盖，
+不提供自动更新或静默配置迁移。
+
+历史版本的源码、安装包和更新说明保留在 [所有 Releases](https://github.com/YuyanYYt/Colink/releases)。
+若需回退，同样先关闭/退出应用并保留当前应用与数据，再安装指定版本；不能把历史包
+可下载理解为任意未来数据库迁移都兼容旧版。0.4.1 没有更改同步协议或数据库 schema。
 
 ## 只需首次完成：你自己的 ChatGPT 私有连接
 
@@ -43,7 +56,7 @@ Colink 本身不调用模型，不需要模型调用密钥。以下运行 API Ke
 4. 根据自己的账户权限，在 ChatGPT“设置 → 安全和登录”启用开发者模式。
 5. 在 ChatGPT 插件/连接管理页添加自定义 MCP，名字填写 `Colink`，连接方式选择 Tunnel，
    选择自己的 Tunnel 或填入同一个 ID。权限和工作区必须与你的 Tunnel 一致。
-6. 确认发现下面五个只读工具，再在新对话中启用 Colink。
+6. 确认发现下面六个只读工具，再在新对话中使用 Colink；可选安装自动匹配 Skill。
 
 账户/工作区是否提供开发者模式和私有隧道，以当前账户页面和管理员策略为准。
 不能在你的账户创建 Tunnel 时，本机 CLI/stdio 仍可用，但本项目不会暗中切换为公网代理。
@@ -64,12 +77,22 @@ Colink 本身不调用模型，不需要模型调用密钥。以下运行 API Ke
 
 > 使用 Colink 查看样例 main.py，解释入口函数。先获取概览，再固定同一读取标识读取。
 
-五个工具为 `list_projects`、`repo_overview`、`read_file`、`search_code`、`get_diff`。
+六个工具为 `list_projects`、`connection_status`、`repo_overview`、`read_file`、
+`search_code`、`get_diff`。`connection_status` 检查同步与过滤状态，不读取项目源码；
+完全不可达时也可能无法调用，不能把工具失败当成已确认的本机离线。
 确认网页确实读到样例后，再关闭连接，选择自己的具体项目，确认源码查询会发送给
 OpenAI，点击启动。不要直接共享 Home、系统目录、凭据或其他人的私有代码。
 
 工具始终只读，不提供执行命令或修改文件的能力。正常回答不需要展示递增版本编号；
 每个项目只保留当前和前一次代码状态，过期读取标识会明确拒绝，不会悄悄混入新代码。
+
+### 可选：按问题自动匹配 Skill
+
+按 [ChatGPT Skill 流程](CHATGPT_SKILL.md) 在自己的账号创建并安装
+`colink-code-context`，保持 Colink 连接可用。启用后可自然询问自己的项目，不必每次
+手动 `@` 选择技能；已提供充分代码或通用编程问题不应额外读取本机。
+Releases 提供独立 Skill ZIP 备用包，网页上传格式尚未实测，推荐文档中的编辑器方式。
+技能不自动配置 Tunnel、授权目录或成为强制系统提示词；账号入口与匹配由客户端决定。
 
 ## 日常操作与数据
 

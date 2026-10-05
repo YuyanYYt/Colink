@@ -5,14 +5,18 @@
 让网页上的 ChatGPT 按需读取你指定的本机代码项目。Colink 在电脑上维护只读代码镜像，
 通过个人私有连接提供文件清单、源码、搜索与前后差异；不用为了它购买一台服务器。
 
-**首次开源预览版：macOS 14+ / Apple Silicon。**
-[下载安装包](https://github.com/YuyanYYt/Colink/releases/tag/v0.4.0) ·
+**开源预览版 0.4.1：macOS 14+ / Apple Silicon。**
+[下载安装包](https://github.com/YuyanYYt/Colink/releases/tag/v0.4.1) ·
+[所有版本](https://github.com/YuyanYYt/Colink/releases) ·
 [安装与使用](docs/INSTALL.md) · [让 Agent 帮你安装](docs/AGENT_INSTALL.md) ·
 [技术架构](docs/ARCHITECTURE.md) · [安全边界](SECURITY.md) ·
 [ChatGPT 自动匹配 Skill](docs/CHATGPT_SKILL.md)
 
-公开下载仍指向已发布的 0.4.0；源码维护版本为 0.4.1。本轮修复与后续重构边界见
-[重构锚点](docs/REFACTOR_ANCHOR.md)，不能把源码版本号当成已发布新安装包。
+源码与公开安装包均为 0.4.1：差异摘要优先、新增连接状态检查、改进分页和文件过滤，
+并提供通用代码上下文 Skill。样例热更新已完成实际 ChatGPT 网页验收；结果与限制见
+[验证记录](docs/VALIDATION.md)，后续功能重构边界见 [重构锚点](docs/REFACTOR_ANCHOR.md)。
+每次发布使用独立版本标签，保留原安装包和更新说明；需要历史版本时打开“所有版本”，
+例如 [0.4.0](https://github.com/YuyanYYt/Colink/releases/tag/v0.4.0)，不使用最新源码替代旧版源码。
 
 下载 DMG，拖入“应用程序”，打开 Colink，完成首次连接设置，然后选择文件夹并点击启动。
 安装包包含 Python、MCP 运行依赖和经过校验的官方隧道客户端，使用者不需要先安装
@@ -282,7 +286,7 @@ uv run pytest -q
 默认数据位于 `.code-context/server/mirror.sqlite3` 与 `.code-context/clients/`。
 这是可复用的数据状态，应保留；不要把它当成普通缓存删除。依赖版本由 `uv.lock` 固定。
 
-当前源码维护版为 0.4.1，公开开源预览包为 0.4.0，项目与界面对外统一为 Colink。
+当前源码与公开开源预览包均为 0.4.1，项目与界面对外统一为 Colink。
 推荐 CLI 为 `uv run colink`；
 原 `code-context` 命令仍兼容，以免现有应用/profile 失效。工作区路径、`code_context`
 模块、`CODE_CONTEXT_*` 配置和连接 ID 保持不变；旧发布/验收记录保留当时真实名称。

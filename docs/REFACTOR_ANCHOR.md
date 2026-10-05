@@ -5,10 +5,10 @@
 
 ## 如何识别与使用
 
-- 本轮本地 Git 标记：`anchor/colink-0.4.1-before-refactor`。
+- 修复锚点 Git 标记：`anchor/colink-0.4.1-before-refactor`。
 - 改动前已发布基线：`v0.4.0`，提交 `564dd8c16ea89058f4ff574a2f096dded788fdd5`。
-- 0.4.0 标签和已发布包不修改。0.4.1 锚点不等于已推送 GitHub、新的公共 Release
-  或 ChatGPT 公共插件目录发布，远程分发另行执行。
+- 0.4.0 标签和已发布包不修改。修复锚点保持不动；补充脱敏网页验收与公开安装指引后，
+  另以 `v0.4.1` 标记发布提交，提供 GitHub 开源预览包。这不等于 ChatGPT 公共目录上架。
 - 确认锚点提交：`git rev-parse anchor/colink-0.4.1-before-refactor^{commit}`。
 - 后续新分支从这个锚点起，例如
   `git switch -c codex/colink-functional-refactor anchor/colink-0.4.1-before-refactor`。
@@ -39,14 +39,14 @@
 
 ## 运行与网页的实际边界
 
-当前 `/Applications/Colink.app` 仍为 **0.4.0** 且连接正在运行。用户先保持锁屏，
-这一轮不停止或覆盖该安装版；源码改动不会自动进入其自包含运行环境。
-0.4.1 新包单独输出到 `.artifacts/releases/colink-0.4.1-anchor/`，是否构建/验收通过
-以 [验证记录](VALIDATION.md) 为准。
+早期锚点阶段先只完成本地部分，不覆盖运行中的 0.4.0。随后用户解锁并授权样例测试，
+已安全更新 `/Applications/Colink.app` 到 **0.4.1**，完整保留旧应用、配置和镜像。
+新包单独保留在 `.artifacts/releases/colink-0.4.1-anchor/`，发布源代码的运行部分与它一致。
 
-网页 Skills 入口和编辑器已核实；本机 Skill 有效不代表网页已安装。锁屏结束后仍需：
-安全更新当前应用 → 刷新原 Colink 连接工具 → 创建/启用独立 Skill → 新对话验证自然
-提问自动调用与不应调用的反例 → 在授权范围内验证源码改动后的响应。
+已刷新原 Colink 连接的六个工具、通过网页编辑器创建/安装 Skill，并用不手动选择
+技能的自然问题和充分代码反例完成验证。样例单行盲测读到新值并返回正确摘要，
+测试后恢复样例与原选择；未修改真实项目源码。网页没有逐次 Skill 正文加载日志，
+不保证每轮自动触发或所有账号都有相同入口；具体边界以 [验证记录](VALIDATION.md) 为准。
 
 更新前先关闭/退出原应用并确认连接停止，把旧应用移到确定的新备份位置再安装新包；
 不要覆盖仍在运行的解释器/客户端，也不要删除 Application Support 中的配置或数据库。
