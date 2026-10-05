@@ -199,5 +199,11 @@
   比较当前来源/根与祖先/忽略规则，退出不保留 FD。Agent **46 passed（0.48 秒）**，
   主线定向 **12 passed（0.32 秒）**、Ruff 通过；未改变正常批路径或重跑基准。
 
+- W 新文件撤销原语：必须持久 intent/副本与 caller 登记 receipt，实际全文/身份/
+  权限/单链接核对后 EXCL 隔离，再严格验证才 unlink 登记 temp。目标重新出现则
+  拒绝，不删除其他目标、不猜测 missing 即成功；提交后异常保留 pending。专项
+  **114 passed（0.34 秒，Euler）**，主线相关合并 **180 passed（5.89 秒）**，
+  Ruff 通过。整体回退协调、属性增强及真实网页仍待，不宣称已有通用删除工具。
+
 关联：[读取重构计划](LIVE_WORKSPACE_REFACTOR.md)、[写入契约](WRITE_CONTRACT.md)、
 [维护路线](ROADMAP.md)、[验证记录](VALIDATION.md)。
