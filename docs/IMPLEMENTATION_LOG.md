@@ -102,6 +102,12 @@
   ID/歧义/失效/当前关系事实及外部历史限制。自带 Python 校验器缺 PyYAML，改用
   系统 YAML 解析器核验 frontmatter 和 `allow_implicit_invocation=true`；未改变依赖，
   不把静态文档校验冒充账号内 Skill 已更新或模型每次必定自动路由。
+- R6 打包入口：新增显式 live 模式及仅用于本工作区的私有验收运行目录；公共包
+  默认仍无个人绝对路径，验收包不创建用户 Application Support 状态。预发行完整
+  版本独立存入 CoLinkVersion，macOS ShortVersion 保持三段数字。相关打包测试
+  **52 passed（0.27 秒）**，Ruff 通过；尚未生成新发行包或覆盖系统安装版。
+- 2026-10-06 桌面实际检查遇到 macOS 锁屏；按用户睡眠期间要求继续本地部分，
+  不绕过锁屏、不询问、不将协议/源码测试冒充实际菜单栏或 ChatGPT 网页验收。
 
 关联：[读取重构计划](LIVE_WORKSPACE_REFACTOR.md)、[写入契约](WRITE_CONTRACT.md)、
 [维护路线](ROADMAP.md)、[验证记录](VALIDATION.md)。

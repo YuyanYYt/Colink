@@ -314,7 +314,11 @@ def bundle_resources(
     site_packages: Path,
     client: Path,
     distributions: list,
+    *,
+    source_mode: str = "mirror",
+    portable_runtime: bool = False,
 ) -> None:
+    runtime = runtime_configuration(workspace, source_mode, portable_runtime)
     copy_python(python_home, resources / "python")
     copy_vendor(distributions, site_packages, resources / "vendor")
     copy_tree(
@@ -331,7 +335,23 @@ def bundle_resources(
         if name == "THIRD_PARTY_NOTICES.md" and not source.is_file():
             source = workspace / "THIRD_PARTY_NOTICES"
         copy_file(source, resources / "licenses" / source.name, workspace)
-    (resources / "runtime.json").write_text(json.dumps(RUNTIME, indent=2) + "\n")
+    (resources / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n")
+
+
+def runtime_configuration(workspace: Path, source_mode: str, portable_runtime: bool) -> dict:
+    if source_mode not in {"mirror", "live"}:
+        raise PackageError("Source mode must be mirror or live.")
+    if portable_runtime and source_mode != "live":
+        raise PackageError("The private workspace-contained runtime requires live mode.")
+    runtime = dict(RUNTIME)
+    if source_mode == "live":
+        runtime["sourceMode"] = "live"
+    if portable_runtime:
+        # Private acceptance builds only. Normal public packages never contain
+        # this path or create runtime data in the developer's repository.
+        runtime["runtimeWorkspace"] = str(workspace.resolve())
+        runtime["sampleRoot"] = str(workspace.resolve() / "examples/sample_project")
+    return runtime
 
 
 def validate_links(root: Path) -> None:
@@ -441,7 +461,8 @@ def verify_relocation(app: Path, output_dir: Path) -> None:
         # mode. This environment keeps bytecode outside the signed bundle.
         tunnel_environment = {**environment, "PYTHONDONTWRITEBYTECODE": "1"}
         with (relocated / "Contents/Info.plist").open("rb") as stream:
-            expected_version = plistlib.load(stream)["CFBundleShortVersionString"]
+            info = plistlib.load(stream)
+            expected_version = info.get("CoLinkVersion", info["CFBundleShortVersionString"])
         cli_version = run_tool(
             [str(python), "-m", "code_context", "--version"],
             env=tunnel_environment,
@@ -498,10 +519,27 @@ def member_summary(root: Path) -> dict:
 
 
 def native_build(
-    workspace: Path, app: Path, node: str, sharp: str, client: Path, bundle_id: str
+    workspace: Path,
+    app: Path,
+    node: str,
+    sharp: str,
+    client: Path,
+    bundle_id: str,
+    *,
+    source_mode: str = "mirror",
 ) -> Path:
     build = runpy.run_path(str(Path(__file__).with_name("build.py")))["build"]
-    return build(workspace, app, node, sharp, client=client, chat_url=CHAT_URL, bundle_id=bundle_id)
+    options = {"source_mode": source_mode} if source_mode != "mirror" else {}
+    return build(
+        workspace,
+        app,
+        node,
+        sharp,
+        client=client,
+        chat_url=CHAT_URL,
+        bundle_id=bundle_id,
+        **options,
+    )
 
 
 def package(
@@ -514,11 +552,16 @@ def package(
     python_home: Path | None = None,
     site_packages: Path | None = None,
     bundle_id: str = "local.codeconnect.menubar",
+    source_mode: str = "mirror",
+    portable_runtime: bool = False,
 ) -> dict:
     workspace = workspace.resolve()
     output_dir = output_dir.absolute()
     if output_dir.exists() or output_dir.is_symlink():
         raise PackageError("Output already exists; choose a new --output-dir.")
+    runtime_configuration(workspace, source_mode, portable_runtime)
+    if portable_runtime and not output_dir.resolve().is_relative_to(workspace):
+        raise PackageError("Private acceptance output must stay within the workspace.")
     if sys.platform != "darwin" or platform.machine() != "arm64" or sys.version_info[:2] != (3, 11):
         raise PackageError("Packaging requires Apple Silicon macOS and the locked Python 3.11 env.")
     python_home = (python_home or Path(sys.base_prefix)).absolute()
@@ -533,13 +576,21 @@ def package(
     output_dir.mkdir(parents=True)
     image_root = output_dir / "image-root"
     app = image_root / "Colink.app"
-    native_build(workspace, app, node, sharp, client_root / "tunnel-client", bundle_id)
+    options = {"source_mode": source_mode} if source_mode != "mirror" else {}
+    native_build(workspace, app, node, sharp, client_root / "tunnel-client", bundle_id, **options)
     bundle_resources(
-        workspace, app / "Contents/Resources", python_home, site_packages, client, distributions
+        workspace,
+        app / "Contents/Resources",
+        python_home,
+        site_packages,
+        client,
+        distributions,
+        source_mode=source_mode,
+        portable_runtime=portable_runtime,
     )
     with (app / "Contents/Info.plist").open("rb") as stream:
         info = plistlib.load(stream)
-    if info["CFBundleShortVersionString"] != metadata["version"]:
+    if info.get("CoLinkVersion", info["CFBundleShortVersionString"]) != metadata["version"]:
         raise PackageError("Native app version differs from pyproject.toml.")
     validate_links(app)
     # The standalone dylib's LC_ID_DYLIB can contain the uv installation path.
@@ -582,6 +633,7 @@ def package(
     }
     report = {
         "version": metadata["version"],
+        "runtime": {"source_mode": source_mode, "private_workspace_contained": portable_runtime},
         "platform": {"os": "macos", "architecture": "arm64", "minimum_version": "14.0"},
         "members": {
             "Colink.app": member_summary(app),
@@ -622,6 +674,12 @@ def main() -> None:
     parser.add_argument("--python-home", type=Path)
     parser.add_argument("--site-packages", type=Path)
     parser.add_argument("--bundle-id", default="local.codeconnect.menubar")
+    parser.add_argument("--source-mode", choices=("mirror", "live"), default="mirror")
+    parser.add_argument(
+        "--portable-runtime",
+        action="store_true",
+        help="private workspace-contained acceptance only",
+    )
     arguments = parser.parse_args()
     try:
         package(
@@ -633,6 +691,8 @@ def main() -> None:
             python_home=arguments.python_home,
             site_packages=arguments.site_packages,
             bundle_id=arguments.bundle_id,
+            source_mode=arguments.source_mode,
+            portable_runtime=arguments.portable_runtime,
         )
     except PackageError as exc:
         parser.exit(1, f"{exc}\n")
