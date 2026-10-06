@@ -37,6 +37,16 @@
 
 ## 进度与证据
 
+- beta.1 关键节点 **1813 passed（79.64 秒）**，一条既有 Starlette/AnyIO 上游弃用警告；
+  `.artifacts/w-beta1-key-gate.bxwChi/pytest`。通用自包含 live 候选包已生成：
+  `.artifacts/w-beta1-delivery.z1TfWA/generic`，未携私有 runtime-workspace，包版本0.5.0b1；
+  重定位、签名、ZIP/DMG SHA 和公开内容 **1861 files / 0 findings** 通过。
+  包内 Python/后端实际复用现有三轮 stdio 演示，22 工具、默认关/授权、保存、重试、
+  创建、原 Diff、整项回退及撤权通过，未启动通用包 GUI 或安装到系统。
+  要求逐项与实际缺口见 [REFACTOR_ACCEPTANCE.md](REFACTOR_ACCEPTANCE.md)；锁屏门槛
+  仍保留，正式0.5.0/goal不提前完成。应用分配约133.53MiB、ZIP52.15MiB、DMG66.32MiB；
+  这是发行产物，不是每次代码小改的镜像或运行副本。所有产物保留，不自动清理。
+
 - 源码推进 **0.5.0b1**：真实网页十五个原工具只读回归通过；第二项任务的旧哈希
   `WRITE_HASH_CONFLICT` 保护、原生整体回退按钮和开关关闭后的网页 `WRITE_DISABLED`
   已实际验收。样例恢复起点。回退终态误显示为「任务待确认」的小缺陷补为「任务已回退」，

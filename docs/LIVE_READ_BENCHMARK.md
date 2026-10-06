@@ -5,6 +5,16 @@
 分布的新 fixture。既有结果全部保留且未重跑。所有测量都不是实际企业项目，
 不表示 R6、desktop、隧道、网页、模型或整体重构已验收。
 
+最新本机组件观测为 `.artifacts/live-benchmark.e3cd14`，没有为 beta 交付重跑基准；
+其边界与既有 fixture 相同：5000 定义文件、3 个 Java 文件、约 3.77 MB 合成内容，
+未查询 B 的正文/索引。cold 2866.318 ms、warm 三次中位 837.921 ms、单文件修改后
+1675.765 ms、重启 2749.899 ms；3 MiB 两页 46.525 / 45.174 ms。
+实测 SQLite 文件 26812416 字节/分配 27275264，空闲 RSS 54165504、cold 高水位
+126894080，非递归监听 6 目录/进程 FD 7。不是网页往返、真实企业/P95 或零占用保证。
+[最新短报告](../.artifacts/live-benchmark.e3cd14/summary.md)与
+[完整 JSON](../.artifacts/live-benchmark.e3cd14/performance.json)仅保留本地生成物，不上传。
+下面按时间保留优化前后测量，不能只保留最后快的样本。
+
 ## 重现与输出保护
 
 在本 checkout 根目录执行，所有 fixture / 数据库 / JSON / MD 都保留在新建的
