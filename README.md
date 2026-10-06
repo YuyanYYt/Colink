@@ -2,15 +2,22 @@
 
 <img src="macos/assets/logo.svg" width="96" alt="CoLink logo">
 
-**2026-10-06 · 0.5.0b2 维护源码说明（未重新安装或发行）：** 无 Git 新项目发现与同名
+**2026-10-07 · 当前维护者本机版本 0.5.0b2（尚未发布新安装包）：** 已构建并安装自包含
+菜单栏应用，保留既有目录、身份、配置和数据；安装后真实应用与包摘要一致。
+无 Git 新项目发现与同名
 项目区分已修正；不带项目标记的工作区根不再吞掉后来新增的 Python/Java 项目。
 已移除菜单栏代码回退按钮、`rollback_write_task` 网页工具和本机回退控制入口。
 当前为原十五读取工具与七项任务工具，仍保留 Diff、精准写入及中断提交恢复；
 主动恢复代码使用用户另行保存的 Git 版本，不自动提交或 reset。
-下方 beta.1 回退/网页验收条目是历史记录，不代表本次改动已完成安装或网页验收。
+下方 beta.1 回退/网页验收条目是历史记录；本次安装包本地验证不代替新的网页验收。
 登记格式兼容与当前功能边界见 [本次维护说明](docs/PROJECT_MANAGEMENT_AND_UNDO_REMOVAL.md)。
 终端能力目前**只有设计、没有执行权限或工具**，见
-[终端安全沙盒方案](docs/TERMINAL_SANDBOX_DESIGN.md)。
+[终端执行与 dry run 方案](docs/TERMINAL_EXECUTION_PLAN.md)。旧离线 VM 方案保留为历史备选。
+
+今后软件重大回归的**首选恢复目标为 0.5.0b2**，固定标签
+`anchor/colink-0.5.0b2-before-terminal-execution`，见
+[当前版本恢复说明](docs/RECOVERY_0.5.0b2.md)。原 0.4.3 / 0.4.1 标签不移动；
+保存锚点不等于发布 GitHub、不撤销用户项目修改，也不自动删除运行数据。
 
 让网页上的 ChatGPT 按需读取你指定的本机代码项目，通过个人私有连接提供文件清单、
 源码、搜索与代码关系；不用为了它购买一台服务器。公开 0.4.1 使用只读镜像；下方
@@ -29,9 +36,9 @@
 每次发布使用独立版本标签，保留原安装包和更新说明；需要历史版本时打开“所有版本”，
 例如 [0.4.0](https://github.com/YuyanYYt/Colink/releases/tag/v0.4.0)，不使用最新源码替代旧版源码。
 
-当前独立开发分支 `codex/colink-code-intelligence` 的源码版本为 **0.4.3**，尚未公开发布。
+历史 0.4.3 阶段：独立开发分支 `codex/colink-code-intelligence` 的源码版本为 **0.4.3**，当时尚未公开发布。
 自包含 0.4.3 已完成维护者本机安装；Python 自定义源码根的原缺陷已通过定向网页验收。
-本版已固定为重构前恢复锚点 `anchor/colink-0.4.3-before-live-workspace-refactor`，
+该版固定为历史重构前恢复锚点 `anchor/colink-0.4.3-before-live-workspace-refactor`，
 并在本机保存单份应用恢复包与源码 bundle；重大问题的回退流程见
 [0.4.3 恢复说明](docs/ROLLBACK_0.4.3.md)。保存不等于发布或重构已经开始。
 公开下载仍是 0.4.1；该验收不代表所有工具、任意项目或新账户都已完成验证。

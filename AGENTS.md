@@ -4,7 +4,7 @@
 - 当前版本是单用户代码镜像与只读 MCP。修改能力边界前先说明目的，保持工具返回源码文本。
 - 用户指定目录是代码来源；代码快照与索引是派生数据。旧镜像入口继续只读且保持历史语义。
 - 2026-10-06 用户已授权按 LIVE_WORKSPACE_REFACTOR.md / WRITE_CONTRACT.md 引入原文件直读、多项目和默认关闭的受控写入。只有新的写入协调器可在本机明确授权的项目内修改；禁止任意命令、目录扩权和绕过恢复记录。
-- 本次开发和实际写入验收必须限定在本工作目录内，网页读写使用 examples/sample_project，禁止修改其他项目源码。恢复锚点为 anchor/colink-0.4.3-before-live-workspace-refactor，不移动。
+- 本次开发和实际写入验收必须限定在本工作目录内，网页读写使用 examples/sample_project，禁止修改其他项目源码。2026-10-07 起首选恢复锚点为 anchor/colink-0.5.0b2-before-terminal-execution；旧 anchor/colink-0.4.3-before-live-workspace-refactor 保留且不移动。软件恢复先保留当前工作并检查数据兼容，不自动撤销用户项目代码或外部副作用，见 docs/RECOVERY_0.5.0b2.md。
 - 使用 `uv sync --locked` 与 `uv run`；升级官方 MCP SDK 时核对当前版本接口，保留 uv.lock。
 - 修改上传协议或存储后验证幂等重试、版本冲突、旧快照隔离、断网与重启恢复。
 - 新工具优先复用存储查询，并保持显式的只读注解、结构化结果、内部 revision / 对外不透明 snapshot 的一致性与响应大小限制；不向普通代码问答暴露递增版本编号。
