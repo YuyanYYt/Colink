@@ -7,7 +7,10 @@
 编辑及多轮整体回退工作流，保留隐式匹配。**已实际更新网页现有副本的描述和全文**，
 保留身份、图标和 `allow_implicit_invocation: true`，没有新建同名技能。网页写入中
 发现不同操作复用请求标识的问题，已补充新操作/相同参数重试规则并保存。
-**更新后的新对话不手选验证及充分代码反例仍待**；下面的旧账号证据不替代本次验证。
+**更新后的新对话已实际补验**：不手选 Skill/CoLink 的本机 `build_claims` 问题出现
+项目定位/源码读取活动，并返回真实原文；已给完整 `add_one(4)` 的反例直接解释为 5，
+未出现 CoLink 活动。这不证明平台每轮加载 Skill 正文或保证所有账号必定自动调用。
+下面的旧账号证据不替代本次验证。
 本次结果见 [WEB_WRITE_VALIDATION.md](WEB_WRITE_VALIDATION.md)，流程见
 [WEB_ACCEPTANCE_SOP.md](WEB_ACCEPTANCE_SOP.md)。
 

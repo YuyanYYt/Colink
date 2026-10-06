@@ -6,6 +6,10 @@
 [WEB_WRITE_VALIDATION.md](WEB_WRITE_VALIDATION.md)。仅显式 `--source-mode live`
 构建的新包使用直读；默认旧构建参数仍兼容镜像。不要给旧版套新语义。
 
+维护者在 2026-10-06 单独授权更新后，已将通用 0.5.0b1 安装到 `/Applications/Colink.app`。
+实际样例网页小改、菜单栏回退终态、正常关闭/退出重开默认关闭及网页拒绝均已补验。
+原 0.4.3 应用移至废纸篓可恢复，旧配置/凭据/数据库和固定锚点保留；没有公开发行。
+
 ## 两种构建，不要混用
 
 - **发行安装包**：GitHub Releases 的 DMG/ZIP 是自包含 Apple Silicon 应用，内含
