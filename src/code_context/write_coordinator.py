@@ -80,6 +80,7 @@ class WriteCoordinator:
                 "INSERT OR IGNORE INTO settings VALUES('next_task_request',?)",
                 ("req_" + uuid.uuid4().hex,),
             )
+        from code_context.write_deletion import WriteDeletion
         from code_context.write_diff import TaskDiff
         from code_context.write_operations import WriteOperations
         from code_context.write_recovery import WriteRecovery
@@ -89,6 +90,7 @@ class WriteCoordinator:
         self.diff = TaskDiff(self)
         self.recovery = WriteRecovery(self)
         self.rollback = WriteRollback(self)
+        self.deletion = WriteDeletion(self)
 
     def _pending(self):
         return bool(
@@ -330,7 +332,7 @@ class WriteCoordinator:
             future_body_bytes = sum(
                 ((json.loads(row["last_version"])[3] + 4095) // 4096) * 4096
                 for row in files
-                if row["kind"] in {"modified", "created"}
+                if row["kind"] in {"modified", "created"} and row["last_version"] is not None
             )
         # Covers UTF-8 previews/results, multiple SQLite UPDATE page versions,
         # object receipts, and one bounded per-file rollback record. Attribute
@@ -474,6 +476,9 @@ class WriteCoordinator:
 
     def create_directory(self, project_id, task_id, request_id, path):
         return self.operations.create_directory(project_id, task_id, request_id, path)
+
+    def delete_file(self, project_id, task_id, request_id, path, expected_sha256):
+        return self.deletion.delete_file(project_id, task_id, request_id, path, expected_sha256)
 
     def finish_write_task(self, project_id, task_id, request_id):
         return self.operations.finish_write_task(project_id, task_id, request_id)

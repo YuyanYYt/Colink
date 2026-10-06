@@ -23,6 +23,11 @@ MAX_LINE_PRODUCT = 4_000_000
 def verify_task_files(c, task, source):
     rows = c.store.query("SELECT * FROM files WHERE task_id=? ORDER BY path", (task["task_id"],))
     for row in rows:
+        if row["kind"] != "directory" and row["last_hash"] is None:
+            from code_context.write_deletion import verify_deleted
+
+            verify_deleted(source, row)
+            continue
         with source.parent_fd(row["path"], directory=row["kind"] == "directory") as (parent, name):
             before = source.scanner._stat(parent, name, row["path"])
             if row["kind"] == "directory":
@@ -147,12 +152,17 @@ class TaskDiff:
                 descriptions = [
                     {
                         "path": row["path"],
-                        "op": "add" if row["kind"] in {"created", "directory"} else "modify",
+                        "op": "delete"
+                        if row["last_hash"] is None and row["kind"] != "directory"
+                        else "add"
+                        if row["kind"] in {"created", "directory"}
+                        else "modify",
                         "kind": "directory" if row["kind"] == "directory" else "file",
                     }
                     for row in rows
                     if (path is None or row["path"] == path)
                     and (row["kind"] != "modified" or row["origin_hash"] != row["last_hash"])
+                    and not (row["kind"] == "created" and row["last_hash"] is None)
                 ]
                 selected = descriptions[offset : offset + limit]
                 changes, remaining, truncated = [], max_chars, False
@@ -166,18 +176,21 @@ class TaskDiff:
                     remaining -= charge + 128
                     if detail == "patch" and entry["kind"] != "directory":
                         row = by_path[entry["path"]]
-                        current = source.read(row["path"])
-                        if current.sha256 != row["last_hash"] or current.version != tuple(
-                            json.loads(row["last_version"])
-                        ):
-                            raise WriteError("WRITE_DIFF_CONFLICT: current patch input changed")
+                        current_text = ""
+                        if row["last_hash"] is not None:
+                            current = source.read(row["path"])
+                            if current.sha256 != row["last_hash"] or current.version != tuple(
+                                json.loads(row["last_version"])
+                            ):
+                                raise WriteError("WRITE_DIFF_CONFLICT: current patch input changed")
+                            current_text = current.content
                         original = (
                             self.store.read_blob(row["origin_hash"]).decode("utf-8")
                             if row["origin_hash"] is not None
                             else ""
                         )
                         patch, cut, reason = bounded_patch(
-                            row["path"], original, current.content, remaining
+                            row["path"], original, current_text, remaining
                         )
                         entry.update({"patch": patch, "patch_truncated": cut})
                         if reason:
@@ -205,7 +218,7 @@ class TaskDiff:
                 "directories_added": sum(item["kind"] == "directory" for item in descriptions),
                 "added": sum(item["op"] == "add" for item in descriptions),
                 "modified": sum(item["op"] == "modify" for item in descriptions),
-                "deleted": 0,
+                "deleted": sum(item["op"] == "delete" for item in descriptions),
                 "line_counts_available": False,
             },
             "changes": changes,

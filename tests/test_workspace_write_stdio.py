@@ -106,8 +106,20 @@ def test_workspace_stdio_default_off_three_round_edits_original_diff_and_whole_u
                     path="new/tool.py",
                     content="CREATED = True\n",
                 )
+                target = await call("read_file", path="b.py")
+                deletion = {
+                    "task_id": task,
+                    "request_id": "stdio_delete_001",
+                    "path": "b.py",
+                    "expected_sha256": target["sha256"],
+                }
+                deleted = await call("delete_file", **deletion)
+                assert deleted["state"] == "deleted" and deleted["readback_verified"]
+                assert await call("delete_file", **deletion) == deleted
+                assert not (root / "b.py").exists()
                 diff = await call("get_diff")
                 assert diff["summary"]["files_changed"] == 4
+                assert diff["summary"]["deleted"] == 1
                 patch = (await call("get_diff", path="a.py", detail="patch"))["changes"][0]["patch"]
                 assert "-    return 1" in patch and "+    return 2" in patch
                 await call("finish_write_task", task_id=task, request_id="stdio_finish_001")

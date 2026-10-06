@@ -87,6 +87,11 @@ def verify_created_parents(c, task_id, source, path):
 
 def verify_task_attributes(c, task, source, rows):
     for row in rows:
+        if row["kind"] != "directory" and row["last_hash"] is None:
+            # Absence and parent identity are verified by verify_task_files.
+            # Origin attributes remain protected for a later no-overwrite restore.
+            task_attributes(c, task["task_id"], row["path"])
+            continue
         expected = task_attributes(c, task["task_id"], row["path"])
         if row["kind"] == "directory":
             binding = json.loads(row["directory_identity"])

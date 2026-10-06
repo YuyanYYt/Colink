@@ -12,6 +12,7 @@ WRITE_TOOL_NAMES = {
     "apply_edit",
     "create_file",
     "create_directory",
+    "delete_file",
     "finish_write_task",
     "rollback_write_task",
     "write_task_status",
@@ -98,6 +99,21 @@ def register_write_tools(mcp, coordinator, authorize):
         """
         return call(
             project_id, lambda: coordinator.create_directory(project_id, task_id, request_id, path)
+        )
+
+    @mcp.tool(annotations=write, structured_output=True)
+    def delete_file(
+        project_id: str, task_id: str, request_id: str, path: str, expected_sha256: str
+    ) -> dict[str, Any]:
+        """Delete one declared UTF-8 source file only on the user's explicit request.
+        Read its current SHA256 first. Saves the task origin before verified removal;
+        whole-task rollback restores original files while the bounded recovery point
+        remains retained. No directory/recursive/system deletion, commands or forced
+        overwrite. Reuse identical request_id and arguments only for the same retry.
+        """
+        return call(
+            project_id,
+            lambda: coordinator.delete_file(project_id, task_id, request_id, path, expected_sha256),
         )
 
     @mcp.tool(annotations=write, structured_output=True)

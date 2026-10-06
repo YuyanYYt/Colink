@@ -31,13 +31,13 @@ def parts(tmp_path):
     store.close()
 
 
-def test_original_fifteen_and_seven_explicit_task_tools_no_local_grant_surface(parts):
+def test_original_fifteen_and_eight_explicit_task_tools_no_local_grant_surface(parts):
     _, c, mcp = parts
 
     async def inspect():
         tools = {t.name: t for t in await mcp.list_tools()}
         assert set(tools) == READ_TOOL_NAMES | WRITE_TOOL_NAMES
-        assert len(READ_TOOL_NAMES) == 15 and len(tools) == 22
+        assert len(READ_TOOL_NAMES) == 15 and len(tools) == 23
         assert all(tools[n].annotations.read_only_hint for n in READ_TOOL_NAMES)
         assert tools["write_task_status"].annotations.read_only_hint
         for name in WRITE_TOOL_NAMES - {"write_task_status"}:

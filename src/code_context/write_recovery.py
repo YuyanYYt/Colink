@@ -462,6 +462,8 @@ class WriteRecovery:
                             outcome = self._recover_file(source, task, operation, metadata)
                         elif metadata["kind"] == "create_directory":
                             outcome = self._recover_directory(source, task, operation, metadata)
+                        elif metadata["kind"] == "delete_file":
+                            outcome = self.c.deletion.recover(source, task, operation, metadata)
                         else:
                             raise WriteError(
                                 "WRITE_RECOVERY_METADATA: unsupported pending operation"

@@ -78,7 +78,7 @@ def test_mcp_cannot_grant_permissions_and_original_structural_tools_available(wo
     async def inspect():
         mcp = build_mcp(runtime.backend, status_provider=runtime.backend.mcp_status)
         tools = await mcp.list_tools()
-        assert len(tools) == 22
+        assert len(tools) == len(READ_TOOL_NAMES | WRITE_TOOL_NAMES) == 23
         assert all(t.annotations.read_only_hint for t in tools if t.name in READ_TOOL_NAMES)
         assert all(
             not t.annotations.read_only_hint

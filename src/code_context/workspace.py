@@ -159,6 +159,11 @@ class WorkspaceRuntime:
     def create_directory(self, project_id, task_id, request_id, path):
         return self.write_coordinator.create_directory(project_id, task_id, request_id, path)
 
+    def delete_file(self, project_id, task_id, request_id, path, expected_sha256):
+        return self.write_coordinator.delete_file(
+            project_id, task_id, request_id, path, expected_sha256
+        )
+
     def finish_task(self, project_id, task_id, request_id):
         return self.write_coordinator.finish_write_task(project_id, task_id, request_id)
 

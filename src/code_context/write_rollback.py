@@ -281,6 +281,8 @@ class WriteRollback:
         for row in rows:
             parent, _, name = row["path"].rpartition("/")
             if parent in children:
+                if row["kind"] == "created" and row["last_hash"] is None:
+                    continue  # A task-created file already deleted is not a directory entry.
                 if row["kind"] not in {"created", "directory"}:
                     conflicts.add(row["path"])
                 children[parent].add(name)
@@ -293,18 +295,26 @@ class WriteRollback:
                 if row["kind"] == "directory":
                     item["directory_binding"] = self._directory(source, row, children[row["path"]])
                 else:
-                    document, parent = self._file(source, row["path"])
-                    if document.sha256 != row["last_hash"] or document.version != tuple(
-                        json.loads(row["last_version"])
-                    ):
-                        raise WriteError(
-                            "WRITE_ROLLBACK_CONFLICT: task file differs from its last state"
-                        )
+                    deleted = row["last_hash"] is None
+                    if deleted:
+                        from code_context.write_deletion import verify_deleted
+
+                        parent = verify_deleted(source, row)
+                        document = None
+                    else:
+                        document, parent = self._file(source, row["path"])
+                        if document.sha256 != row["last_hash"] or document.version != tuple(
+                            json.loads(row["last_version"])
+                        ):
+                            raise WriteError(
+                                "WRITE_ROLLBACK_CONFLICT: task file differs from its last state"
+                            )
                     item.update(
-                        latest_hash=document.sha256,
-                        latest_version=document.version,
-                        latest_mode=document.mode,
-                        latest_size=document.size,
+                        latest_deleted=deleted,
+                        latest_hash=document.sha256 if document else None,
+                        latest_version=document.version if document else None,
+                        latest_mode=document.mode if document else None,
+                        latest_size=document.size if document else 0,
                         parent_identity=parent,
                         origin_hash=row["origin_hash"],
                         origin_mode=row["origin_mode"],
@@ -337,6 +347,11 @@ class WriteRollback:
 
     def _check_attributes(self, source, item, phase):
         data = item.get("data", item)
+        if phase == "before" and data.get("latest_deleted"):
+            # _deleted_restore_progress proves origin attrs on both links of a
+            # no-overwrite restore. The ordinary single-link check cannot be used
+            # at the crash boundary between installation and temporary unlink.
+            return
         if phase == "after" and data["kind"] != "modified":
             return  # _done has already proven absence, including removed ancestors.
         if data["kind"] == "directory":
@@ -393,7 +408,7 @@ class WriteRollback:
             if item["kind"] == "directory":
                 peak = max(peak, 4096)
             else:
-                if not self.store.query(
+                if not item.get("latest_deleted") and not self.store.query(
                     "SELECT sha256 FROM objects WHERE sha256=?", (item["latest_hash"],)
                 ):
                     missing[item["latest_hash"]] = _allocated(item["latest_size"])
@@ -514,15 +529,30 @@ class WriteRollback:
                     raise WriteError("WRITE_ROLLBACK_SCOPE: directory journal binding changed")
             else:
                 if (
-                    not _integers(data["latest_version"], 6)
+                    type(data.get("latest_deleted", False)) is not bool
                     or not _integers(data["parent_identity"], 2)
+                    or data["origin_hash"] != recorded["origin_hash"]
+                    or data["origin_mode"] != recorded["origin_mode"]
+                ):
+                    raise WriteError("WRITE_ROLLBACK_METADATA: invalid file journal binding")
+                if data.get("latest_deleted"):
+                    if (
+                        data["latest_hash"] is not None
+                        or data["latest_version"] is not None
+                        or data["latest_mode"] is not None
+                        or data["latest_size"] != 0
+                    ):
+                        raise WriteError("WRITE_ROLLBACK_METADATA: invalid absence journal")
+                    binding = _metadata(recorded["directory_identity"])
+                    if binding.get("deleted_parent_identity") != data["parent_identity"]:
+                        raise WriteError("WRITE_ROLLBACK_SCOPE: deleted parent binding changed")
+                elif (
+                    not _integers(data["latest_version"], 6)
                     or not isinstance(data["latest_hash"], str)
                     or _HASH.fullmatch(data["latest_hash"]) is None
                     or not 0 <= data["latest_size"] <= MAX_FILE_BYTES
                     or data["latest_size"] != data["latest_version"][3]
                     or data["latest_mode"] != stat.S_IMODE(data["latest_version"][2])
-                    or data["origin_hash"] != recorded["origin_hash"]
-                    or data["origin_mode"] != recorded["origin_mode"]
                 ):
                     raise WriteError("WRITE_ROLLBACK_METADATA: invalid file journal binding")
                 if row["state"] == "done":
@@ -616,7 +646,9 @@ class WriteRollback:
         for item in items:
             data = item["data"]
             if item["kind"] != "directory":
-                if not data["backup_verified"]:
+                if data.get("latest_deleted"):
+                    data["backup_verified"] = True  # There is no current body to copy.
+                elif not data["backup_verified"]:
                     document, parent = self._file(source, item["path"])
                     if (
                         document.sha256 != data["latest_hash"]
@@ -633,7 +665,8 @@ class WriteRollback:
                     if sha != data["latest_hash"]:
                         raise WriteError("WRITE_ROLLBACK_METADATA: recovery body binding changed")
                     data["backup_verified"] = True
-                self._blob(data["latest_hash"])
+                if not data.get("latest_deleted"):
+                    self._blob(data["latest_hash"])
                 if item["kind"] == "modified":
                     self._blob(data["origin_hash"])
             data["origin_verified"] = True
@@ -787,6 +820,8 @@ class WriteRollback:
                     )
 
     def _restore(self, source, task, operation, item):
+        if item["data"].get("latest_deleted"):
+            return self._restore_deleted(source, task, operation, item)
         data = item["data"]
         current, temp = self._temp(source, item)
         receipt = self._prepared(source, item)
@@ -864,9 +899,101 @@ class WriteRollback:
         data["restored_version"] = final.version
         self._save_item(task, item, "done")
 
+    def _deleted_restore_progress(self, source, item):
+        """Only accept an absent target or our fully verified prepared origin."""
+        data = item["data"]
+        current, temporary = self._temp(source, item)
+        receipt = self._prepared(source, item)
+        if current is not None:
+            if receipt is None or _identity(current) != receipt.temp_identity:
+                raise WriteError("WRITE_ROLLBACK_CONFLICT: deleted target reappeared")
+            with source.parent_fd(item["path"]) as (parent, name):
+                restored = _read_named(parent, name, links=(1, 2), attributes=True)
+                if (
+                    restored.sha256 != data["origin_hash"]
+                    or restored.attributes != self._attributes(item, origin=True)
+                    or len(restored.raw) != data["origin_size"]
+                    or _identity(restored.info) != receipt.temp_identity
+                ):
+                    raise WriteError("WRITE_ROLLBACK_CONFLICT: restored deletion target changed")
+                if temporary is not None:
+                    prepared = _read_named(parent, receipt.temp_name, links=(2,), attributes=True)
+                    if (
+                        prepared.sha256 != restored.sha256
+                        or prepared.attributes != restored.attributes
+                        or _identity(prepared.info) != receipt.temp_identity
+                        or restored.info.st_nlink != 2
+                    ):
+                        raise WriteError("WRITE_ROLLBACK_CONFLICT: restored deletion links changed")
+                elif restored.info.st_nlink != 1:
+                    raise WriteError("WRITE_ROLLBACK_CONFLICT: restored deletion links changed")
+            return current, temporary, receipt
+        if temporary is not None:
+            if receipt is None:
+                raise WriteError("WRITE_ROLLBACK_UNKNOWN_TEMP: preserve unregistered origin")
+            self._prepared_temp(source, item, receipt)
+        elif receipt is not None:
+            raise WriteError("WRITE_ROLLBACK_CONFLICT: registered origin preparation disappeared")
+        elif item["state"] not in {"queued", "preparing"}:
+            raise WriteError("WRITE_ROLLBACK_METADATA: deletion restore has unknown progress")
+        return current, temporary, receipt
+
+    def _restore_deleted(self, source, task, operation, item):
+        data = item["data"]
+        current, temporary, receipt = self._deleted_restore_progress(source, item)
+        if current is None:
+            if temporary is None:
+                self._save_item(task, item, "preparing")
+
+                def created(prepared):
+                    data["prepared"] = asdict(prepared)
+                    self._save_item(task, item, "preparing")
+
+                receipt = prepare_file(
+                    source,
+                    item["path"],
+                    self._blob(data["origin_hash"]),
+                    data["origin_mode"],
+                    data["temp_name"],
+                    created,
+                    self._attributes(item, origin=True),
+                )
+            else:
+                self._prepared_temp(source, item, receipt, sync=True)
+            self._save_item(task, item, "installing")
+            self._source_policy(source, task, operation)
+            commit_file(source, receipt, None)  # Atomic no-overwrite creation, not replacement.
+            self._source_policy(source, task, operation)
+            self._deleted_restore_progress(source, item)
+        self._save_item(task, item, "installed")
+        self._source_policy(source, task, operation)
+        discard_prepared(
+            source,
+            receipt,
+            receipt.sha256,
+            receipt.temp_identity,
+            self._attributes(item, origin=True),
+        )
+        data["temp_cleaned"] = True
+        self._restore_attributes(source, item)
+        final, _ = self._file(source, item["path"])
+        if (
+            final.sha256 != data["origin_hash"]
+            or final.mode != data["origin_mode"]
+            or final.version[:2] != receipt.temp_identity
+        ):
+            raise WriteError("WRITE_ROLLBACK_CONFLICT: deleted file restore changed")
+        data["restored_version"] = final.version
+        self._save_item(task, item, "done")
+
     def _remove(self, source, task, operation, item):
         data, directory = item["data"], item["kind"] == "directory"
         current, temp = self._temp(source, item)
+        if data.get("latest_deleted"):
+            if current is not None or temp is not None:
+                raise WriteError("WRITE_ROLLBACK_CONFLICT: deleted creation reappeared")
+            self._save_item(task, item, "done")
+            return
         receipt = self._removal_receipt(source, item)
 
         def moved(actual):
@@ -967,6 +1094,12 @@ class WriteRollback:
             data = item["data"]
             current, temp = self._temp(source, item)
             self._check_attributes(source, item, "before")
+            if data.get("latest_deleted"):
+                if item["kind"] == "modified":
+                    self._deleted_restore_progress(source, item)
+                elif current is not None or temp is not None:
+                    raise WriteError("WRITE_ROLLBACK_CONFLICT: deleted creation reappeared")
+                continue
             if item["kind"] == "modified":
                 receipt = self._prepared(source, item)
                 document, _ = self._file(source, item["path"])
@@ -1064,13 +1197,16 @@ class WriteRollback:
             ):
                 raise WriteError("WRITE_ROLLBACK_METADATA: recovery materials are not verified")
             if item["kind"] != "directory":
-                self._blob(item["data"]["latest_hash"])
+                if not item["data"].get("latest_deleted"):
+                    self._blob(item["data"]["latest_hash"])
                 if item["kind"] == "modified":
                     self._blob(item["data"]["origin_hash"])
                 refs = self.store.query(
                     "SELECT sha256 FROM object_refs WHERE owner=?", (item["data"]["backup_owner"],)
                 )
-                if not refs or refs[0]["sha256"] != item["data"]["latest_hash"]:
+                if not item["data"].get("latest_deleted") and (
+                    not refs or refs[0]["sha256"] != item["data"]["latest_hash"]
+                ):
                     raise WriteError("WRITE_ROLLBACK_METADATA: required latest owner is missing")
         self._preflight(source, items)
         self._source_policy(source, task, operation)
@@ -1093,7 +1229,9 @@ class WriteRollback:
             "task_id": task["task_id"],
             "state": "rolled_back",
             "files_restored": sum(row["kind"] == "modified" for row in items),
-            "files_removed": sum(row["kind"] == "created" for row in items),
+            "files_removed": sum(
+                row["kind"] == "created" and not row["data"].get("latest_deleted") for row in items
+            ),
             "directories_removed": sum(row["kind"] == "directory" for row in items),
             "source_mode": "live",
             "readback_verified": True,

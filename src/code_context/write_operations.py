@@ -127,7 +127,9 @@ class WriteOperations:
         rollback_bytes = allocated(len(raw)) + sum(
             allocated(json.loads(row["last_version"])[3])
             for row in touched
-            if row["path"] != path and row["kind"] in {"modified", "created"}
+            if row["path"] != path
+            and row["kind"] in {"modified", "created"}
+            and row["last_version"] is not None
         )
         metadata = 64 * 1024 + (len(touched) + (previous is None)) * 1024 + 4 * attribute_bytes
         self.c.reserve_growth(
@@ -186,7 +188,8 @@ class WriteOperations:
                 )
             else:
                 db.execute(
-                    "UPDATE files SET last_hash=?,last_version=? WHERE task_id=? AND path=?",
+                    "UPDATE files SET last_hash=?,last_version=?,directory_identity=NULL "
+                    "WHERE task_id=? AND path=?",
                     (after.sha256, encode_metadata(after.version), task_id, path),
                 )
             if attributes is not None:
@@ -211,7 +214,11 @@ class WriteOperations:
         mode = before.mode if before is not None else 0o644
         before_attributes = read_file_attributes(source, before) if before is not None else None
         after_attributes = before_attributes
-        if previous is not None and before_attributes != task_attributes(c, task_id, path):
+        if (
+            previous is not None
+            and before is not None
+            and before_attributes != task_attributes(c, task_id, path)
+        ):
             raise WriteError("WRITE_ATTRIBUTE_CONFLICT: source attributes differ from task state")
         before_record = (
             encode_metadata(before_attributes.to_record()) if before_attributes else None
@@ -427,9 +434,18 @@ class WriteOperations:
             with source.lock, source.parent_fd(path) as (parent, name):
                 if source.scanner._stat(parent, name, path) is not None:
                     raise WriteError("WRITE_TARGET_EXISTS: new file must not overwrite any object")
-                if self._file(task_id, path) is not None:
+                previous = self._file(task_id, path)
+                if previous is not None and (
+                    previous["last_hash"] is not None
+                    or previous["kind"] not in {"modified", "created"}
+                ):
                     raise WriteError("WRITE_FILE_CONFLICT: a previously touched path disappeared")
-                self.c.check_first_touch(project, task_id, path, None)
+                if previous is None:
+                    self.c.check_first_touch(project, task_id, path, None)
+                else:
+                    from code_context.write_deletion import verify_deleted
+
+                    verify_deleted(source, previous)
                 return self._install(
                     project,
                     task_id,
@@ -437,7 +453,7 @@ class WriteOperations:
                     path,
                     digest,
                     None,
-                    None,
+                    previous,
                     raw,
                     {
                         "start_line": 1,

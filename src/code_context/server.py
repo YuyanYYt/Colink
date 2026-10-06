@@ -115,6 +115,8 @@ def build_mcp(
             "be enabled locally for this project. Read current SHA and narrow code, save through "
             "the write tools, then start fresh read contexts. Use stable request IDs on retries. "
             "Rollback the whole task only when requested; conflicts require local inspection. "
+            "Delete only explicitly requested individual source files through delete_file; "
+            "read the current SHA first. No recursive directory deletion or renaming tool. "
             "No command execution. Platform approvals remain controlled by the client."
         )
         if live_mode
