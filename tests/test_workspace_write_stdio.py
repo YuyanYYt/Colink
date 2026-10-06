@@ -41,7 +41,9 @@ def test_workspace_stdio_default_off_three_round_edits_diff_without_undo():
         )
         async with stdio_client(process) as (read, write):
             async with ClientSession(read, write, read_timeout_seconds=15) as session:
-                await session.initialize()
+                initialized = await session.initialize()
+                assert "user-saved Git checkpoints" in initialized.instructions
+                assert "Rollback the whole task" not in initialized.instructions
                 tools = {tool.name: tool for tool in (await session.list_tools()).tools}
                 assert set(tools) == READ_TOOL_NAMES | WRITE_TOOL_NAMES
 
