@@ -128,6 +128,7 @@ struct ConnectPanel: View {
                     if let task = controller.taskDetail {
                         Text(task).font(.system(size: 11)).lineLimit(2)
                             .foregroundStyle(.secondary)
+                            .help(task)
                         HStack {
                             if controller.recoveryRequired {
                                 Button("恢复未完成任务") { controller.recoverWrite() }

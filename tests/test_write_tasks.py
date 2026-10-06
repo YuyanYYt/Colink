@@ -63,6 +63,37 @@ def test_start_captures_hashes_not_full_content_and_replays_once(parts):
         c.begin_write_task("a", c.status()["next_task_request_id"])
 
 
+def test_status_preserves_task_goal_after_completion_and_restart(parts):
+    roots, store, c = parts
+    title = "超市系统登录与角色权限"
+    task = begin(c, title=title)["task_id"]
+    active = c.status()["active_task"]
+    assert active["title"] == title and active["task_id"] == task
+    assert "metadata" not in active and "scope" not in active and "begin_digest" not in active
+    c.finish_write_task("a", task, "finish_title_01")
+    assert c.status()["active_task"] is None
+    assert c.status()["recent_task"]["title"] == title
+    c.close()
+    store.close()
+    with RecoveryStore(store.root) as restarted_store:
+        restarted = WriteCoordinator(restarted_store, roots.__getitem__, control_alive=lambda: True)
+        try:
+            assert restarted.status()["recent_task"]["title"] == title
+            assert not restarted.status()["write_enabled"]
+        finally:
+            restarted.close()
+
+
+@pytest.mark.parametrize("metadata", ["{}", '{"title":null}', '{"title":123}', "[]", "invalid"])
+def test_status_uses_empty_goal_for_legacy_or_malformed_labels(parts, metadata):
+    _, store, c = parts
+    task = begin(c)["task_id"]
+    with store.transaction() as db:
+        db.execute("UPDATE tasks SET metadata=? WHERE task_id=?", (metadata, task))
+    assert c.status()["active_task"]["title"] == ""
+    assert c.status()["active_task"]["state"] == "active"
+
+
 def test_late_join_external_change_not_misrepresented_as_origin(parts):
     roots, store, c = parts
     task = begin(c)["task_id"]

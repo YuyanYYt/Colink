@@ -124,6 +124,7 @@ struct WorkspaceWriteTask: Equatable {
     let id: String
     let projectID: String
     let state: String
+    let summary: String
 
     init?(_ value: [String: Any]) {
         guard let id = value["task_id"] as? String, !id.isEmpty, id.count <= 256,
@@ -132,12 +133,29 @@ struct WorkspaceWriteTask: Equatable {
         self.id = id
         self.projectID = projectID
         self.state = state
+        let summary = Self.compact(value["title"] as? String ?? "")
+        self.summary = summary == id || summary == projectID ? "" : summary
+    }
+
+    private static func compact(_ text: String) -> String {
+        let line = text.components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }.joined(separator: " ")
+        let visible = String(String.UnicodeScalarView(line.unicodeScalars.filter {
+            !CharacterSet.controlCharacters.contains($0)
+        })).trimmingCharacters(in: .whitespacesAndNewlines)
+        return visible.count > 48 ? String(visible.prefix(48)) + "…" : visible
+    }
+
+    func detail(projectName: String? = nil) -> String {
+        let name = Self.compact(projectName ?? "")
+        let fallback = name.isEmpty || name == projectID ? "代码修改任务" : "\(name)的代码修改"
+        return "\(title)：\(summary.isEmpty ? fallback : summary)"
     }
 
     var title: String {
         switch state {
         case "active": return "任务进行中"
-        case "completed": return "最近任务已完成"
+        case "completed": return "最近完成"
         case "rolled_back": return "任务已回退"
         case "rolling_back": return "任务回退待恢复"
         case "recovery_required": return "任务需要恢复"
@@ -270,8 +288,8 @@ final class ConnectionController: ObservableObject {
     }
     var taskDetail: String? {
         guard let task = activeTask ?? recentTask else { return nil }
-        let name = projects.first(where: { $0.id == task.projectID })?.selectionTitle ?? task.projectID
-        return "\(task.title) · \(name)"
+        let name = projects.first(where: { $0.id == task.projectID })?.selectionTitle
+        return task.detail(projectName: name)
     }
     private var modeArguments: [String] { configuration.isLive ? ["--mode", "live"] : [] }
     var detail: String {

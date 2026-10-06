@@ -43,6 +43,8 @@ def register_write_tools(mcp, coordinator, authorize):
     ) -> dict[str, Any]:
         """Begin one explicit user-requested editing task. Requires the local app's default-off
         project grant. Obtain next_task_request_id from write_task_status; reuse it on retry.
+        Pass title as a short, user-readable goal in the user's language, e.g. "Add login and
+        role permissions". It appears in the local app; do not use IDs or paste source code.
         Prefer declaring the exact target files and all future parent directories for large
         projects. Keep one task across related A/B/C edits. No commands or directory expansion.
         """

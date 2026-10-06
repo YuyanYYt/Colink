@@ -164,8 +164,17 @@ class WriteCoordinator:
                 self.grants = {}
                 self.stop_requested.set()
             tasks = self.store.query(
-                "SELECT task_id,project_id,state,created,completed FROM tasks ORDER BY created DESC"
+                "SELECT task_id,project_id,state,created,completed,metadata "
+                "FROM tasks ORDER BY created DESC"
             )
+            for task in tasks:
+                # Reuse the saved goal, not source text or an inferred AI summary.
+                # Old/malformed labels must not hide recovery state or expose raw metadata.
+                try:
+                    title = json.loads(task.pop("metadata")).get("title", "")
+                except (ValueError, AttributeError, TypeError):
+                    title = ""
+                task["title"] = title[:256] if isinstance(title, str) else ""
             active = next((row for row in tasks if row["state"] not in TERMINAL), None)
             return {
                 "write_enabled": bool(self.grants) and not self.stop_requested.is_set(),
