@@ -132,9 +132,6 @@ struct ConnectPanel: View {
                             if controller.recoveryRequired {
                                 Button("恢复未完成任务") { controller.recoverWrite() }
                                     .disabled(!controller.canRecoverWrite)
-                            } else {
-                                Button("回退这项任务") { controller.rollbackWriteTask() }
-                                    .disabled(!controller.canRollbackWrite)
                             }
                         }
                         .font(.system(size: 11)).buttonStyle(.bordered)
@@ -199,7 +196,7 @@ private struct WriteAuthorizationView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     ForEach(controller.writableProjects) { project in
-                        Toggle(project.displayName, isOn: Binding(
+                        Toggle(project.selectionTitle, isOn: Binding(
                             get: { controller.selectedWriteProjectIDs.contains(project.id) },
                             set: { selected in
                                 if selected { controller.selectedWriteProjectIDs.insert(project.id) }
@@ -263,10 +260,11 @@ private struct ProjectManagementView: View {
                     ForEach(controller.projects) { project in
                         HStack(spacing: 12) {
                             VStack(alignment: .leading, spacing: 3) {
-                                Text(project.displayName).font(.system(size: 13, weight: .medium))
-                                    .lineLimit(1)
+                                Text(project.selectionTitle).font(.system(size: 13, weight: .medium))
+                                    .lineLimit(2)
                                 Text(project.relativeRoot.isEmpty ? "." : project.relativeRoot)
                                     .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                                    .truncationMode(.middle).help(project.relativeRoot)
                                 if project.status == "unavailable" {
                                     Text("暂不可用").font(.system(size: 10)).foregroundStyle(.orange)
                                 }
@@ -275,7 +273,7 @@ private struct ProjectManagementView: View {
                             Text(project.enabled ? "允许" : "待确认")
                                 .font(.system(size: 11))
                                 .foregroundStyle(project.enabled ? accent : .secondary)
-                            Toggle("允许网页读取 \(project.displayName)", isOn: Binding(
+                            Toggle("允许网页读取 \(project.selectionTitle)", isOn: Binding(
                                 get: { project.enabled },
                                 set: { controller.setProjectEnabled(project, enabled: $0) }
                             ))

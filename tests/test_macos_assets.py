@@ -121,15 +121,16 @@ def test_colink_branding_preserves_the_connection_and_preferences_identity():
     assert 'string(forKey: "SelectedFolder")' in runtime
 
 
-def test_rolled_back_task_has_a_final_native_status_without_another_undo_action():
+def test_native_ui_removes_user_undo_but_preserves_interrupted_recovery():
     runtime = (WORKSPACE / "macos/CodeConnect/Runtime.swift").read_text()
+    panel = (WORKSPACE / "macos/CodeConnect/Panel.swift").read_text()
     assert 'case "rolled_back": return "任务已回退"' in runtime
-    rollback = runtime.split("var rollbackTask: WorkspaceWriteTask? {")[1].split(
-        "var canRollbackWrite: Bool {"
-    )[0]
-    assert 'task.state == "active"' in rollback
-    assert 'task.state == "completed"' in rollback
-    assert '"rolled_back"' not in rollback
+    assert "rollbackWriteTask" not in runtime + panel
+    assert "canRollbackWrite" not in runtime + panel
+    assert "rollback_write_task" not in runtime + panel
+    assert "回退这项任务" not in panel
+    assert 'Button("恢复未完成任务")' in panel
+    assert 'control("recover_write"' in runtime
 
 
 def test_complete_mark_is_center_symmetric_about_the_canvas_center():

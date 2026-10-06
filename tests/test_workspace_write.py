@@ -175,10 +175,6 @@ def test_profiles_share_one_recovery_lease_and_release_on_close(configured, tmp_
         ("discover", {}),
         ("register", {}),
         ("set_enabled", {"project_id": "synthetic", "enabled": False}),
-        (
-            "rollback_write_task",
-            {"project_id": "synthetic", "task_id": "wt_fake", "request_id": "undo_0001"},
-        ),
     ],
 )
 def test_privileged_control_actions_require_actual_authenticated_control_thread(
@@ -286,21 +282,14 @@ def test_real_edit_invalidates_context_index_and_diff_delegates(runtime, monkeyp
     assert r.backend.source(project(r, "b")).metrics["body_reads"] == 0
 
 
-def test_local_rollback_button_uses_coordinator_not_general_edit(runtime, monkeypatch):
+def test_removed_rollback_is_not_an_authenticated_local_action(runtime):
     pid = project(runtime)
-    calls = []
-
-    def rollback(*args):
-        assert threading.current_thread() is runtime.control.thread
-        calls.append(args)
-        return {"state": "synthetic_delegate_only"}
-
-    monkeypatch.setattr(runtime.write_coordinator, "rollback_write_task", rollback)
     parameters = {"project_id": pid, "task_id": "wt_fake", "request_id": "undo_0001"}
-    assert control_request(runtime.data_dir, "rollback_write_task", parameters) == {
-        "state": "synthetic_delegate_only"
-    }
-    assert calls == [(pid, "wt_fake", "undo_0001")]
+    assert "rollback_write_task" not in runtime.status()["local_actions"]
+    assert not hasattr(runtime, "rollback_task")
+    assert not hasattr(runtime.write_coordinator, "rollback_write_task")
+    with pytest.raises(SourceError, match="UNKNOWN_CONTROL_ACTION"):
+        control_request(runtime.data_dir, "rollback_write_task", parameters)
     for action in ("apply_edit", "create_file", "begin_task"):
         with pytest.raises(SourceError, match="UNKNOWN_CONTROL_ACTION"):
             control_request(runtime.data_dir, action, {})

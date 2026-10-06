@@ -167,9 +167,6 @@ class WorkspaceRuntime:
     def finish_task(self, project_id, task_id, request_id):
         return self.write_coordinator.finish_write_task(project_id, task_id, request_id)
 
-    def rollback_task(self, project_id, task_id, request_id):
-        return self.write_coordinator.rollback_write_task(project_id, task_id, request_id)
-
     def recover_local(self, project_id):
         self._local_only()
         return self.write_coordinator.recover(project_id)
@@ -196,7 +193,6 @@ class WorkspaceRuntime:
                 "enable_write",
                 "disable_write",
                 "recover_write",
-                "rollback_write_task",
             ]
             if available
             else [],
@@ -246,13 +242,6 @@ class WorkspaceRuntime:
             return self.status()
         if action == "recover_write" and set(parameters) == {"project_id"}:
             return self.recover_local(parameters["project_id"])
-        if action == "rollback_write_task" and set(parameters) == {
-            "project_id",
-            "task_id",
-            "request_id",
-        }:
-            self._local_only()
-            return self.rollback_task(**parameters)
         raise SourceError("UNKNOWN_CONTROL_ACTION: use a supported local action")
 
     def close(self):

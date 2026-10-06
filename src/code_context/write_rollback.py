@@ -1,4 +1,8 @@
-"""Journaled whole-task rollback candidate, not a Runtime/MCP authorization surface.
+"""Legacy journal compatibility, not a user-facing undo authorization surface.
+
+New code-undo requests are no longer exposed by the coordinator, Runtime, desktop
+or MCP. Retain this engine for old interrupted journals and their checked Diff
+semantics; tests construct legacy transactions directly to protect that migration.
 
 The coordinator owns grants and local recovery dispatch. This module owns only
 rollback_items and the rollback operation's durable state. Bodies remain in the

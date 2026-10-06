@@ -14,7 +14,7 @@ from code_context.workspace import initialize_workspace
 from code_context.write_tools import WRITE_TOOL_NAMES
 
 
-def test_workspace_stdio_default_off_three_round_edits_original_diff_and_whole_undo():
+def test_workspace_stdio_default_off_three_round_edits_diff_without_undo():
     # The control socket must also fit when the CI checkout path is longer.
     base = Path(tempfile.mkdtemp(prefix="s-", dir=Path.cwd() / ".artifacts"))
     root, state = base / "r", base / ".code-context" / "live-v1"
@@ -124,13 +124,17 @@ def test_workspace_stdio_default_off_three_round_edits_original_diff_and_whole_u
                 patch = (await call("get_diff", path="a.py", detail="patch"))["changes"][0]["patch"]
                 assert "-    return 1" in patch and "+    return 2" in patch
                 await call("finish_write_task", task_id=task, request_id="stdio_finish_001")
-                undone = await call(
-                    "rollback_write_task", task_id=task, request_id="stdio_undo_001"
+                assert "rollback_write_task" not in tools
+                denied_undo = await session.call_tool(
+                    "rollback_write_task",
+                    {"project_id": pid, "task_id": task, "request_id": "stdio_undo_001"},
                 )
-                assert undone["state"] == "rolled_back"
-                assert (await call("get_diff"))["summary"]["files_changed"] == 0
-                assert all((root / path).read_text() == origin for path in paths)
-                assert not (root / "new").exists()
+                assert denied_undo.is_error
+                assert (await call("get_diff"))["summary"]["files_changed"] == 4
+                assert "return 2" in (root / "a.py").read_text()
+                assert "return 2" in (root / "c.py").read_text()
+                assert not (root / "b.py").exists()
+                assert (root / "new/tool.py").read_text() == "CREATED = True\n"
                 await asyncio.to_thread(control_request, state, "disable_write", {})
                 assert not (await call("write_task_status"))["write_enabled"]
                 assert not (state / "server" / "mirror.sqlite3").exists()

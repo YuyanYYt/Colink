@@ -332,8 +332,8 @@ def build_mcp(
         description=(
             "Compare the retained write task's original files against verified current source. "
             "summary is default; request a narrow patch only when needed. NO_TASK_BASELINE means "
-            "no comparable history, not zero changes. After verified whole rollback it reports "
-            "zero only if restored participants still match. No arbitrary external-edit history. "
+            "no comparable history, not zero changes. This tool does not restore code or "
+            "provide arbitrary external-edit history. "
             "baseline=empty is an explicit current-source listing, not a prior version."
         )
         if live_mode

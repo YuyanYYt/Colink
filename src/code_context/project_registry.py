@@ -1,7 +1,8 @@
 """Local project registration and bounded discovery, with no source-body storage.
 
 Registration and enablement are local control-plane operations, not MCP tools.
-Discovery considers markers below a project only at nested Git boundaries; local
+Discovery considers markers below a real project only at nested Git boundaries;
+an unmarked workspace root is a container, even when locally registered. Local
 registration can explicitly split other directories into independent projects.
 """
 
@@ -55,6 +56,7 @@ _PRUNED = frozenset(
     }
 )
 _STATE_FILE = "projects.json"
+_STATE_SCHEMA = 2
 _MAX_STATE_BYTES = 1024 * 1024
 
 
@@ -74,6 +76,7 @@ class _Project:
     display_name: str
     aliases: tuple[str, ...]
     enabled: bool
+    name_origin: str
 
 
 class _RegisteredSource(SourceAccess):
@@ -187,6 +190,9 @@ class ProjectRegistry:
                 candidate = (
                     registered or ".git" in markers or (bool(markers) and not inside_project)
                 )
+                # Selecting an unmarked workspace authorizes its root, but does not
+                # turn every later Python/Java project into one of its submodules.
+                boundary = bool(markers) or (registered and bool(relative))
                 if candidate:
                     try:
                         project = self._candidate(relative, _identity(os.fstat(fd)))
@@ -230,7 +236,7 @@ class ProjectRegistry:
                         return
                     try:
                         with self._workspace.scanner._directory(fd, name, path, info) as child:
-                            walk(child, path, depth + 1, inside_project or candidate)
+                            walk(child, path, depth + 1, inside_project or boundary)
                     except (OSError, ScanError):
                         reasons.add("unavailable_directory")
 
@@ -260,10 +266,22 @@ class ProjectRegistry:
             relative = self._relative_root(relative_root)
             self._validate_enabled(enabled)
             source = self._probe_root(relative)
-            name = self._text(display_name if display_name is not None else source.root.name[:128])
+            name = self._text(
+                display_name if display_name is not None else self._default_name(relative)
+            )
             aliases = self._aliases(aliases)
             project_id = self._project_id(relative, source.source_id)
-            self._put(_Project(project_id, relative, source.source_id, name, aliases, enabled))
+            self._put(
+                _Project(
+                    project_id,
+                    relative,
+                    source.source_id,
+                    name,
+                    aliases,
+                    enabled,
+                    "custom" if display_name is not None else "auto",
+                )
+            )
             return project_id
 
     def set_enabled(self, project_id: str, enabled: bool) -> None:
@@ -298,7 +316,9 @@ class ProjectRegistry:
         name = self._text(name)
         projects = self.list_projects()["projects"]
         exact = {
-            p["project_id"] for p in projects if name == p["display_name"] or name in p["aliases"]
+            p["project_id"]
+            for p in projects
+            if name in (p["display_name"], p["qualified_name"], *p["aliases"])
         }
         if len(exact) == 1:
             return next(iter(exact))
@@ -308,7 +328,8 @@ class ProjectRegistry:
             p["project_id"]
             for p in projects
             if any(
-                name.casefold() in value.casefold() for value in (p["display_name"], *p["aliases"])
+                name.casefold() in value.casefold()
+                for value in (p["display_name"], p["qualified_name"], *p["aliases"])
             )
         )
         raise RegistryError("PROJECT_NAME_NOT_FOUND: choose an exact name or alias", candidates)
@@ -446,6 +467,13 @@ class ProjectRegistry:
         encoded = json.dumps([self._workspace.source_id, relative, source_id]).encode()
         return "p_" + hashlib.sha256(encoded).hexdigest()[:32]
 
+    def _default_name(self, relative):
+        name = relative or self.workspace.name
+        if len(name) > 128:
+            digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
+            name = name[:111] + "~" + digest
+        return self._text(name)
+
     def _put(self, project):
         old = next(
             (p for p in self._projects.values() if p.relative_root == project.relative_root), None
@@ -465,7 +493,7 @@ class ProjectRegistry:
         if project_id in self._projects:
             return self._projects[project_id]
         project = _Project(
-            project_id, relative, source.source_id, self._text(source.root.name[:128]), (), False
+            project_id, relative, source.source_id, self._default_name(relative), (), False, "auto"
         )
         self._put(project)
         return project
@@ -482,13 +510,18 @@ class ProjectRegistry:
             exclusions.add(self.data_dir.relative_to(root).as_posix())
         return exclusions
 
-    @staticmethod
-    def _row(project, available):
+    def _row(self, project, available):
         return {
             "project_id": project.project_id,
             "display_name": project.display_name,
             "aliases": list(project.aliases),
             "relative_root": project.relative_root,
+            # Old schemas cannot distinguish a user-entered basename from a default.
+            # Keep it intact; this path-qualified name disambiguates without renaming.
+            "qualified_name": self._default_name(project.relative_root)
+            if project.relative_root
+            else ".",
+            "name_origin": project.name_origin,
             "status": "unavailable"
             if not available
             else "available"
@@ -502,8 +535,13 @@ class ProjectRegistry:
         with self._change():
             for project_id, project in list(self._projects.items()):
                 available[project_id] = self._available(project)
+                if project.name_origin == "auto":
+                    project = replace(
+                        project, display_name=self._default_name(project.relative_root)
+                    )
                 if not available[project_id] and project.enabled:
-                    self._projects[project_id] = replace(project, enabled=False)
+                    project = replace(project, enabled=False)
+                self._projects[project_id] = project
         return available
 
     @contextmanager
@@ -628,7 +666,7 @@ class ProjectRegistry:
                 "authorized_projects",
             }:
                 raise ValueError
-            if type(state["schema"]) is not int or state["schema"] != 1:
+            if type(state["schema"]) is not int or state["schema"] not in (1, _STATE_SCHEMA):
                 raise RegistryError(
                     "UNKNOWN_REGISTRY_SCHEMA: unsupported registry metadata version"
                 )
@@ -644,14 +682,17 @@ class ProjectRegistry:
                 raise ValueError
             roots = set()
             for row in rows:
-                if not isinstance(row, dict) or set(row) != {
+                keys = {
                     "project_id",
                     "relative_root",
                     "source_id",
                     "display_name",
                     "aliases",
                     "enabled",
-                }:
+                }
+                if state["schema"] == _STATE_SCHEMA:
+                    keys.add("name_origin")
+                if not isinstance(row, dict) or set(row) != keys:
                     raise ValueError
                 relative = self._relative_root(row["relative_root"])
                 source_id = row["source_id"]
@@ -663,6 +704,9 @@ class ProjectRegistry:
                 if not isinstance(row["aliases"], list):
                     raise ValueError
                 self._validate_enabled(row["enabled"])
+                name_origin = row["name_origin"] if state["schema"] == _STATE_SCHEMA else "legacy"
+                if name_origin not in ("auto", "custom", "legacy"):
+                    raise ValueError
                 self._projects[project_id] = _Project(
                     project_id,
                     relative,
@@ -670,6 +714,7 @@ class ProjectRegistry:
                     self._text(row["display_name"]),
                     self._aliases(tuple(row["aliases"])),
                     row["enabled"],
+                    name_origin,
                 )
                 roots.add(relative)
             authorized = state["authorized_projects"]
@@ -686,7 +731,7 @@ class ProjectRegistry:
         if self._state_directory is None:
             return
         state = {
-            "schema": 1,
+            "schema": _STATE_SCHEMA,
             "workspace": {"path": str(self.workspace), "source_id": self._workspace.source_id},
             "projects": [
                 {
@@ -696,6 +741,7 @@ class ProjectRegistry:
                     "display_name": p.display_name,
                     "aliases": list(p.aliases),
                     "enabled": p.enabled,
+                    "name_origin": p.name_origin,
                 }
                 for p in sorted(self._projects.values(), key=lambda p: p.relative_root)
             ],

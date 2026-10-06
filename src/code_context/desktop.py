@@ -327,7 +327,8 @@ def desktop_control(workspace: Path, root: Path, action: str, parameters: dict):
 
     Write authorization requires an explicit nonempty project list and an exact
     backend acknowledgement. An uncertain enable is revoked best-effort, not
-    presented as success. Recovery/rollback remain workspace-owned local actions.
+    presented as success. Interrupted-operation recovery remains a local action;
+    intentional code rollback is no longer a supported desktop action.
     """
     from code_context.local_control import control_request
     from code_context.source_access import SourceError
@@ -339,7 +340,6 @@ def desktop_control(workspace: Path, root: Path, action: str, parameters: dict):
         "enable_write": {"project_ids"},
         "disable_write": set(),
         "recover_write": {"project_id"},
-        "rollback_write_task": {"project_id", "task_id", "request_id"},
     }
     if (
         not isinstance(action, str)

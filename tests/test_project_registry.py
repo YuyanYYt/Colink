@@ -8,6 +8,7 @@ from threading import Event, Thread, current_thread
 import pytest
 
 import code_context.project_registry as registry_module
+from code_context.live import LiveQueries
 from code_context.project_registry import ProjectRegistry, RegistryError
 from code_context.scanner import Scanner
 from code_context.source_access import SourceAccess, SourceError
@@ -90,6 +91,83 @@ def test_git_marker_file_is_supported_without_reading_its_target(workspace):
     result = registry.discover()
     assert [p["relative_root"] for p in result["candidates"]] == ["worktree"]
     assert "/unrelated/private/location" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("marker", registry_module._MARKERS[1:])
+@pytest.mark.parametrize("schema", [1, 2])
+def test_registered_unmarked_workspace_discovers_new_non_git_projects_after_restart(
+    workspace, tmp_path, monkeypatch, marker, schema
+):
+    data = tmp_path / "state"
+    registry = ProjectRegistry(workspace, data_dir=data)
+    parent = registry.register(display_name="Workspace", aliases=("root",), enabled=True)
+    registry.discover()
+    if schema == 1:
+        state = json.loads(state_file(data).read_text())
+        state["schema"] = 1
+        for row in state["projects"]:
+            row.pop("name_origin")
+        save_test_state(data, state)
+
+    project(workspace, "new-project", marker, body="NEW_PROJECT_BODY\n")
+    project(workspace, "new-project/module", marker)
+    project(workspace, "plain", marker=None, body="PLAIN_BODY\n")
+    project(workspace, "empty", marker=None)
+    reopened = ProjectRegistry(workspace, data_dir=data)
+
+    def no_body(*args, **kwargs):
+        pytest.fail("discovery must only inspect metadata")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Scanner, "_read_text", no_body)
+        result = reopened.discover()
+    assert not result["partial"]
+    assert {p["relative_root"] for p in result["candidates"]} == {"", "new-project"}
+    found = rows(reopened)
+    assert found[""]["project_id"] == parent
+    assert found[""]["display_name"] == "Workspace" and found[""]["aliases"] == ["root"]
+    assert found[""]["enabled"] and not found["new-project"]["enabled"]
+    assert set(reopened.authorized_sources()) == {parent}
+    with pytest.raises(SourceError, match="PATH_EXCLUDED"):
+        reopened.source(parent).read("new-project/main.py")
+    with pytest.raises(RegistryError, match="PROJECT_NOT_AUTHORIZED"):
+        reopened.source(found["new-project"]["project_id"])
+    assert reopened.source(parent).read("plain/main.py").content == "PLAIN_BODY\n"
+
+    plain = reopened.register("plain")
+    empty = reopened.register("empty")
+    restarted = ProjectRegistry(workspace, data_dir=data)
+    assert rows(restarted)["plain"]["project_id"] == plain
+    assert rows(restarted)["empty"]["project_id"] == empty
+    assert not rows(restarted)["plain"]["enabled"] and not rows(restarted)["empty"]["enabled"]
+
+
+@pytest.mark.parametrize("marker", registry_module._MARKERS)
+def test_registered_marked_workspace_remains_a_real_project_boundary(workspace, marker):
+    project(workspace, "", marker)
+    project(workspace, "module", "pom.xml")
+    project(workspace, "src/package", "pyproject.toml")
+    project(workspace, "module/nested-git")
+    registry = ProjectRegistry(workspace)
+    parent = registry.register(enabled=True)
+    result = registry.discover()
+    assert {p["relative_root"] for p in result["candidates"]} == {"", "module/nested-git"}
+    assert rows(registry)[""]["project_id"] == parent
+    assert not rows(registry)["module/nested-git"]["enabled"]
+
+
+def test_manual_unmarked_nonroot_project_keeps_its_module_boundary(workspace):
+    project(workspace, "manual", marker=None)
+    project(workspace, "manual/package", "pyproject.toml")
+    project(workspace, "sibling", "pom.xml")
+    registry = ProjectRegistry(workspace)
+    registry.register(enabled=True)
+    manual = registry.register("manual")
+    registry.discover()
+    found = rows(registry)
+    assert set(found) == {"", "manual", "sibling"}
+    assert found["manual"]["project_id"] == manual and not found["manual"]["enabled"]
+    assert not found["sibling"]["enabled"]
 
 
 def test_maven_modules_python_packages_and_src_do_not_become_projects(workspace):
@@ -175,6 +253,164 @@ def test_new_candidates_do_not_inherit_current_authorization_or_reset_existing_n
     assert found["A"]["enabled"]
     assert not found["B"]["enabled"]
     assert set(registry.authorized_sources()) == {first}
+
+
+def test_nested_repository_defaults_are_path_qualified_and_persist_without_name_collisions(
+    workspace, tmp_path
+):
+    paths = (
+        "NailGlow/backend",
+        "NailGlow/frontend",
+        "NailGlow/github-20260919/backend",
+        "NailGlow/github-20260919/frontend",
+    )
+    for path in paths:
+        project(workspace, path)
+    data = tmp_path / "state"
+    registry = ProjectRegistry(workspace, data_dir=data)
+    discovered = registry.discover()
+    assert not discovered["partial"]
+    found = rows(registry)
+    assert {p["display_name"] for p in found.values()} == set(paths)
+    assert all(p["name_origin"] == "auto" for p in found.values())
+    first = found[paths[0]]["project_id"]
+    registry.set_enabled(first, True)
+    restarted = ProjectRegistry(workspace, data_dir=data)
+    assert rows(restarted) == rows(registry)
+    assert restarted.resolve_name(paths[0]) == first
+    assert set(restarted.authorized_sources()) == {first}
+    assert len(restarted.list_projects()["projects"]) == 1
+
+
+def test_qualified_names_preserve_manual_names_aliases_and_pending_isolation(workspace, tmp_path):
+    project(workspace, "NailGlow/backend")
+    project(workspace, "NailGlow/github-20260919/backend")
+    data = tmp_path / "state"
+    registry = ProjectRegistry(workspace, data_dir=data)
+    first = registry.register(
+        "NailGlow/backend", display_name="backend", aliases=("My API",), enabled=True
+    )
+    second = registry.register("NailGlow/github-20260919/backend", display_name="backend")
+    reopened = ProjectRegistry(workspace, data_dir=data)
+    reopened.discover()
+    found = rows(reopened)
+    assert found["NailGlow/backend"]["display_name"] == "backend"
+    assert found["NailGlow/backend"]["name_origin"] == "custom"
+    assert found["NailGlow/backend"]["aliases"] == ["My API"]
+    assert found["NailGlow/backend"]["qualified_name"] == "NailGlow/backend"
+    assert reopened.resolve_name("My API") == first
+    assert reopened.resolve_name("NailGlow/backend") == first
+    with pytest.raises(RegistryError, match="PROJECT_NAME_NOT_FOUND") as error:
+        reopened.resolve_name("NailGlow/github-20260919/backend")
+    assert second not in error.value.candidates
+    assert set(reopened.authorized_sources()) == {first}
+    reopened.set_enabled(second, True)
+    with pytest.raises(RegistryError, match="AMBIGUOUS_PROJECT") as error:
+        reopened.resolve_name("backend")
+    assert set(error.value.candidates) == {first, second}
+    assert reopened.resolve_name("NailGlow/github-20260919/backend") == second
+
+
+def test_legacy_basename_records_are_not_silently_renamed_during_upgrade(workspace, tmp_path):
+    paths = ("NailGlow/backend", "NailGlow/github-20260919/backend")
+    for path in paths:
+        project(workspace, path)
+    data = tmp_path / "state"
+    registry = ProjectRegistry(workspace, data_dir=data)
+    first = registry.register(paths[0], display_name="backend", aliases=("API",), enabled=True)
+    second = registry.register(paths[1], display_name="backend")
+    legacy = json.loads(state_file(data).read_text())
+    legacy["schema"] = 1
+    for row in legacy["projects"]:
+        row.pop("name_origin")
+    save_test_state(data, legacy)
+    before = state_file(data).read_bytes()
+
+    reopened = ProjectRegistry(workspace, data_dir=data)
+    reopened.discover()
+    assert state_file(data).read_bytes() == before
+    found = rows(reopened)
+    assert all(p["display_name"] == "backend" for p in found.values())
+    assert all(p["name_origin"] == "legacy" for p in found.values())
+    assert {p["qualified_name"] for p in found.values()} == set(paths)
+    assert found[paths[0]]["aliases"] == ["API"]
+    assert found[paths[0]]["project_id"] == first and found[paths[1]]["project_id"] == second
+    assert reopened.resolve_name("API") == first
+    assert reopened.resolve_name(paths[0]) == first
+    assert set(reopened.authorized_sources()) == {first}
+
+    # A later local write upgrades the schema, not unknown user choices or authorizations.
+    project(workspace, "new-python", "pyproject.toml")
+    reopened.discover()
+    saved = json.loads(state_file(data).read_text())
+    assert saved["schema"] == 2
+    assert saved["authorized_projects"] == [first]
+    assert {p["name_origin"] for p in saved["projects"]} == {"auto", "legacy"}
+    restarted = ProjectRegistry(workspace, data_dir=data)
+    assert rows(restarted) == rows(reopened)
+    assert set(restarted.authorized_sources()) == {first}
+    assert not rows(restarted)["new-python"]["enabled"]
+
+
+def test_proven_automatic_basename_can_migrate_without_touching_custom_name_or_authorization(
+    workspace, tmp_path
+):
+    paths = ("NailGlow/backend", "NailGlow/github-20260919/backend")
+    for path in paths:
+        project(workspace, path)
+    data = tmp_path / "state"
+    registry = ProjectRegistry(workspace, data_dir=data)
+    automatic = registry.register(paths[0], aliases=("API",), enabled=True)
+    custom = registry.register(paths[1], display_name="backend")
+    state = json.loads(state_file(data).read_text())
+    for row in state["projects"]:
+        row["display_name"] = "backend"
+    save_test_state(data, state)
+
+    reopened = ProjectRegistry(workspace, data_dir=data)
+    found = rows(reopened)
+    assert found[paths[0]]["display_name"] == paths[0]
+    assert found[paths[0]]["name_origin"] == "auto"
+    assert found[paths[0]]["project_id"] == automatic and found[paths[0]]["aliases"] == ["API"]
+    assert found[paths[1]]["display_name"] == "backend"
+    assert found[paths[1]]["name_origin"] == "custom" and found[paths[1]]["project_id"] == custom
+    assert not found[paths[1]]["enabled"]
+    assert reopened.resolve_name("API") == automatic
+    assert set(reopened.authorized_sources()) == {automatic}
+    assert rows(ProjectRegistry(workspace, data_dir=data)) == found
+
+
+def test_path_qualified_name_conflicting_with_an_explicit_alias_is_still_ambiguous(workspace):
+    project(workspace, "NailGlow/backend")
+    project(workspace, "Other/backend")
+    registry = ProjectRegistry(workspace)
+    first = registry.register("NailGlow/backend", enabled=True)
+    second = registry.register("Other/backend", aliases=("NailGlow/backend",), enabled=True)
+    with pytest.raises(RegistryError, match="AMBIGUOUS_PROJECT") as error:
+        registry.resolve_name("NailGlow/backend")
+    assert set(error.value.candidates) == {first, second}
+
+
+def test_live_project_list_keeps_qualified_names_but_never_exposes_pending_projects(workspace):
+    paths = ("NailGlow/backend", "NailGlow/github-20260919/backend")
+    for path in paths:
+        project(workspace, path)
+    registry = ProjectRegistry(workspace)
+    first = registry.register(paths[0], display_name="backend", aliases=("API",), enabled=True)
+    second = registry.register(paths[1], display_name="backend")
+    backend = LiveQueries(registry=registry)
+    try:
+        exposed = backend.list_projects()["projects"]
+        assert len(exposed) == 1 and exposed[0]["project_id"] == first
+        assert exposed[0]["display_name"] == "backend"
+        assert exposed[0]["qualified_name"] == paths[0]
+        assert exposed[0]["aliases"] == ["API"] and exposed[0]["name_origin"] == "custom"
+        assert "relative_root" not in exposed[0]
+        assert str(workspace) not in json.dumps(exposed)
+        assert second not in json.dumps(exposed) and paths[1] not in json.dumps(exposed)
+        assert backend.source(first).metrics["body_reads"] == 0
+    finally:
+        backend.close()
 
 
 def test_stable_ids_bind_roots_and_source_identity_not_names(workspace):
@@ -443,7 +679,7 @@ def test_persistent_metadata_restores_stable_ids_names_authorizations_and_nested
     parent = registry.register("A", display_name="Alpha", aliases=("first",), enabled=True)
     child = registry.register("A/child")
     saved = json.loads(state_file(data).read_text())
-    assert saved["schema"] == 1 and saved["authorized_projects"] == [parent]
+    assert saved["schema"] == 2 and saved["authorized_projects"] == [parent]
     assert saved["workspace"]["source_id"]
     assert all(p["source_id"] for p in saved["projects"])
     assert "PARENT_PRIVATE_BODY" not in state_file(data).read_text()
@@ -495,7 +731,7 @@ def test_persistent_state_rejects_other_or_replaced_workspace(workspace, tmp_pat
     assert state_file(data).read_bytes() == before
 
 
-@pytest.mark.parametrize("schema", [2, True, "1"])
+@pytest.mark.parametrize("schema", [3, True, "1"])
 def test_unknown_schema_is_rejected_without_overwriting_metadata(workspace, tmp_path, schema):
     data = tmp_path / "state"
     ProjectRegistry(workspace, data_dir=data)
@@ -761,9 +997,45 @@ def test_long_directory_names_get_bounded_display_names_and_survive_restart(work
     data = tmp_path / "state"
     registry = ProjectRegistry(workspace, data_dir=data)
     candidate = registry.discover()["candidates"][0]
-    assert candidate["display_name"] == name[:128]
+    assert len(candidate["display_name"]) == 128
+    assert candidate["display_name"].startswith(name[:111] + "~")
     reopened = ProjectRegistry(workspace, data_dir=data)
     assert rows(reopened)[name]["project_id"] == candidate["project_id"]
+    assert rows(reopened)[name]["display_name"] == candidate["display_name"]
+
+
+def test_long_common_prefixes_have_distinct_stable_bounded_defaults(workspace, tmp_path):
+    prefix = "a" * 160
+    paths = (f"{prefix}/backend", f"{prefix}/frontend")
+    for path in paths:
+        project(workspace, path)
+    data = tmp_path / "state"
+    registry = ProjectRegistry(workspace, data_dir=data)
+    registry.discover()
+    found = rows(registry)
+    names = {p["display_name"] for p in found.values()}
+    assert len(names) == 2 and all(len(name) == 128 for name in names)
+    for row in found.values():
+        registry.set_enabled(row["project_id"], True)
+    reopened = ProjectRegistry(workspace, data_dir=data)
+    assert rows(reopened) == rows(registry)
+    for path in paths:
+        assert reopened.resolve_name(found[path]["display_name"]) == found[path]["project_id"]
+
+
+@pytest.mark.parametrize("origin", ["forged", None, True, [], {}])
+def test_invalid_name_origin_is_rejected_without_changing_metadata(workspace, tmp_path, origin):
+    project(workspace, "A")
+    data = tmp_path / "state"
+    registry = ProjectRegistry(workspace, data_dir=data)
+    registry.register("A", enabled=True)
+    state = json.loads(state_file(data).read_text())
+    state["projects"][0]["name_origin"] = origin
+    save_test_state(data, state)
+    before = state_file(data).read_bytes()
+    with pytest.raises(RegistryError, match="INVALID_REGISTRY_METADATA"):
+        ProjectRegistry(workspace, data_dir=data)
+    assert state_file(data).read_bytes() == before
 
 
 @pytest.mark.parametrize(

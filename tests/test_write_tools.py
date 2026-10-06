@@ -31,19 +31,20 @@ def parts(tmp_path):
     store.close()
 
 
-def test_original_fifteen_and_eight_explicit_task_tools_no_local_grant_surface(parts):
+def test_original_fifteen_and_seven_task_tools_without_undo_or_local_grant(parts):
     _, c, mcp = parts
 
     async def inspect():
         tools = {t.name: t for t in await mcp.list_tools()}
         assert set(tools) == READ_TOOL_NAMES | WRITE_TOOL_NAMES
-        assert len(READ_TOOL_NAMES) == 15 and len(tools) == 23
+        assert len(READ_TOOL_NAMES) == 15 and len(tools) == 22
         assert all(tools[n].annotations.read_only_hint for n in READ_TOOL_NAMES)
         assert tools["write_task_status"].annotations.read_only_hint
         for name in WRITE_TOOL_NAMES - {"write_task_status"}:
             assert not tools[name].annotations.read_only_hint
             assert tools[name].annotations.idempotent_hint
-        assert tools["rollback_write_task"].annotations.destructive_hint
+        assert "rollback_write_task" not in tools
+        assert not hasattr(c, "rollback_write_task")
         assert "expected_context" in tools["apply_edit"].description
         assert "NO_TASK_BASELINE" in tools["get_diff"].description
         assert not c.status()["write_enabled"]
@@ -51,7 +52,7 @@ def test_original_fifteen_and_eight_explicit_task_tools_no_local_grant_surface(p
     asyncio.run(inspect())
 
 
-def test_mcp_real_edit_read_diff_and_whole_undo_using_fresh_context(parts):
+def test_mcp_real_edit_read_diff_finish_and_removed_undo_using_fresh_context(parts):
     root, c, mcp = parts
 
     async def run():
@@ -87,9 +88,14 @@ def test_mcp_real_edit_read_diff_and_whole_undo_using_fresh_context(parts):
         assert "-VALUE = 1" in patch["changes"][0]["patch"]
         assert "+VALUE = 2" in patch["changes"][0]["patch"]
         await call("finish_write_task", task_id=task, request_id="finish_001")
-        await call("rollback_write_task", task_id=task, request_id="rollback_001")
-        assert (root / "a.py").read_text() == "VALUE = 1\n" and not (root / "new.py").exists()
-        assert (await call("get_diff"))["summary"]["files_changed"] == 0
+        with pytest.raises(ToolError, match="Unknown tool"):
+            await mcp.call_tool(
+                "rollback_write_task",
+                {"project_id": "sample", "task_id": task, "request_id": "rollback_001"},
+            )
+        assert (root / "a.py").read_text() == "VALUE = 2\n"
+        assert (root / "new.py").read_text() == "B = 2\n"
+        assert (await call("get_diff"))["summary"]["files_changed"] == 2
         c.disable()
         assert not (await call("write_task_status"))["write_enabled"]
 

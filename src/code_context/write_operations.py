@@ -484,7 +484,7 @@ class WriteOperations:
                     "state": "completed",
                     "source_mode": "live",
                     "recovery_point_retained": True,
-                    "rollback_available": False,  # Whole-task recovery layer is not attached yet.
+                    "rollback_available": False,  # Intentional undo is not a supported feature.
                 }
                 with self.store.transaction() as db:
                     sequence = db.execute(
