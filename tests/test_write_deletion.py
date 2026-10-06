@@ -68,7 +68,7 @@ def test_delete_diff_finish_and_undo_restore_exact_origin_and_attributes(parts):
     assert diff["changes"][0]["op"] == "delete"
     assert "-second" in diff["changes"][0]["patch"]
     c.finish_write_task("a", task, "finish_001")
-    result = c.rollback_write_task("a", task, "rollback_001")
+    result = c.rollback.rollback("a", task, "rollback_001")  # Legacy recovery fixture only.
     assert result["files_restored"] == 1
     assert (source.root / "a.py").read_bytes() == raw
     assert source.read("a.py").mode == 0o640
@@ -91,7 +91,7 @@ def test_retry_never_removes_a_recreated_external_file(parts):
     with pytest.raises(SourceError):
         c.get_diff("a")
     with pytest.raises(WriteError, match="WRITE_ROLLBACK_CONFLICT"):
-        c.rollback_write_task("a", task, "rollback_001")
+        c.rollback.rollback("a", task, "rollback_001")
     assert store.query("SELECT count(*) AS n FROM operations")[0]["n"] == 1
 
 
@@ -141,7 +141,7 @@ def test_lifecycle_keeps_one_task_origin_and_whole_undo(parts, sequence):
         c.create_file("a", task, "create_002", path, "recreated\n")
     assert c.get_diff("a")["summary"]["files_changed"] == (0 if sequence == "create-delete" else 1)
     c.finish_write_task("a", task, "finish_001")
-    c.rollback_write_task("a", task, "rollback_001")
+    c.rollback.rollback("a", task, "rollback_001")
     assert (source.root / "a.py").read_bytes() == raw
     assert not (source.root / "new.py").exists()
     assert c.get_diff("a")["summary"]["files_changed"] == 0
@@ -154,7 +154,7 @@ def test_created_directory_with_created_then_deleted_file_rolls_back(parts):
     c.create_directory("a", task, "mkdir_001", "new")
     c.create_file("a", task, "create_001", "new/a.py", "created\n")
     delete(source, c, task, path="new/a.py")
-    c.rollback_write_task("a", task, "rollback_001")
+    c.rollback.rollback("a", task, "rollback_001")
     assert not (source.root / "new").exists()
     assert c.get_diff("a")["summary"]["files_changed"] == 0
 
@@ -166,7 +166,7 @@ def test_multi_file_preflight_refuses_foreign_reappearance_without_partial_resto
     delete(source, c, task, path="b.py")
     (source.root / "b.py").write_text("external\n")
     with pytest.raises(WriteError, match="WRITE_ROLLBACK_CONFLICT"):
-        c.rollback_write_task("a", task, "rollback_001")
+        c.rollback.rollback("a", task, "rollback_001")
     assert "updated" in source.read("a.py").content
     assert (source.root / "b.py").read_text() == "external\n"
 
@@ -237,7 +237,7 @@ def test_interrupted_delete_recovers_without_repeating_source_mutation(parts, mo
     if phase != "before-move":
         other.enable(["a"])
         assert other.delete_file("a", task, "delete_001", "a.py", sha)["state"] == "deleted"
-        other.rollback_write_task("a", task, "rollback_001")
+        other.rollback.rollback("a", task, "rollback_001")
     assert (source.root / "a.py").read_bytes() == raw
     assert not list(source.root.glob(".colink-write-*"))
     other.close()
@@ -314,7 +314,7 @@ def test_deleted_parent_replacement_cannot_be_adopted(parts):
     for operation in (
         lambda: c.create_file("a", task, "create_002", "folder/a.py", "not adopted\n"),
         lambda: c.get_diff("a"),
-        lambda: c.rollback_write_task("a", task, "rollback_001"),
+        lambda: c.rollback.rollback("a", task, "rollback_001"),
     ):
         with pytest.raises(SourceError):
             operation()
@@ -340,7 +340,7 @@ def test_interrupted_deleted_restore_resumes_without_overwrite(parts, monkeypatc
 
     monkeypatch.setattr(rollback, method, interrupted)
     with pytest.raises(WriteError, match="WRITE_ROLLBACK_RECOVERY_REQUIRED"):
-        c.rollback_write_task("a", task, "rollback_001")
+        c.rollback.rollback("a", task, "rollback_001")
     monkeypatch.setattr(rollback, method, actual)
     c.close()
     other = WriteCoordinator(store, lambda _: source, control_alive=lambda: True)

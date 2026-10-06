@@ -14,7 +14,6 @@ WRITE_TOOL_NAMES = {
     "create_directory",
     "delete_file",
     "finish_write_task",
-    "rollback_write_task",
     "write_task_status",
 }
 
@@ -107,8 +106,8 @@ def register_write_tools(mcp, coordinator, authorize):
     ) -> dict[str, Any]:
         """Delete one declared UTF-8 source file only on the user's explicit request.
         Read its current SHA256 first. Saves the task origin before verified removal;
-        whole-task rollback restores original files while the bounded recovery point
-        remains retained. No directory/recursive/system deletion, commands or forced
+        there is no user-facing undo tool; use an independently saved Git version
+        for intentional code restoration. No directory/recursive/system deletion, commands or forced
         overwrite. Reuse identical request_id and arguments only for the same retry.
         """
         return call(
@@ -119,22 +118,11 @@ def register_write_tools(mcp, coordinator, authorize):
     @mcp.tool(annotations=write, structured_output=True)
     def finish_write_task(project_id: str, task_id: str, request_id: str) -> dict[str, Any]:
         """Complete a related edit task after requested checks, retaining at most the latest
-        completed recovery point for seven days. No command execution/test runner is provided.
+        completed comparison baseline for seven days. No command execution/test runner is provided.
         Readback proves content, not business behavior. External changes cause a conflict.
         """
         return call(
             project_id, lambda: coordinator.finish_write_task(project_id, task_id, request_id)
-        )
-
-    @mcp.tool(annotations=write, structured_output=True)
-    def rollback_write_task(project_id: str, task_id: str, request_id: str) -> dict[str, Any]:
-        """Undo the entire related A/B/C task, not just its last edit. Checks all participants
-        before any restore; never overwrite external edits. Restores saved origins and removes
-        only task-owned unchanged new files and empty directories. Interrupted progress stays
-        protected for local recovery; this tool cannot bypass conflicts or enable permission.
-        """
-        return call(
-            project_id, lambda: coordinator.rollback_write_task(project_id, task_id, request_id)
         )
 
     @mcp.tool(annotations=read, structured_output=True)

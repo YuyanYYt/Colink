@@ -1,9 +1,9 @@
-"""Offline controlled-write candidate: local grants and durable task origins.
+"""Controlled writes with local grants, comparison origins and crash recovery.
 
-Not yet attached to Runtime or MCP. Permission, a task's declared scope, source
-identity and persistent recovery capacity are independent checks. Task origins
-contain hashes/identity only; full origin text is saved on first actual edit.
-The candidate is not yet attached to Runtime/MCP or the installed application.
+Permission, declared scope, source identity and persistent recovery capacity are
+independent checks. Origin text is saved on first actual edit for Diff and safe
+interrupted-operation recovery, not a user-facing code-undo service. The legacy
+rollback engine only supports retained old recovery records and compatibility tests.
 """
 
 import hashlib
@@ -482,9 +482,6 @@ class WriteCoordinator:
 
     def finish_write_task(self, project_id, task_id, request_id):
         return self.operations.finish_write_task(project_id, task_id, request_id)
-
-    def rollback_write_task(self, project_id, task_id, request_id):
-        return self.rollback.rollback(project_id, task_id, request_id)
 
     def recover(self, project_id):
         """Authenticated local control only. Never expose this method as an MCP tool."""

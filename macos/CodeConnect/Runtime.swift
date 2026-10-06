@@ -96,6 +96,7 @@ struct WorkspaceProject: Identifiable {
     let id: String
     let displayName: String
     let relativeRoot: String
+    let qualifiedName: String
     let enabled: Bool
     let status: String
 
@@ -107,8 +108,15 @@ struct WorkspaceProject: Identifiable {
         self.id = id
         self.displayName = name
         self.relativeRoot = root
+        self.qualifiedName = value["qualified_name"] as? String ?? root
         self.enabled = enabled
         self.status = value["status"] as? String ?? "unknown"
+    }
+
+    var selectionTitle: String {
+        guard !relativeRoot.isEmpty, !qualifiedName.isEmpty,
+              displayName != qualifiedName else { return displayName }
+        return "\(displayName) · \(qualifiedName)"
     }
 }
 
@@ -225,7 +233,6 @@ final class ConnectionController: ObservableObject {
     private var stateEpoch = 0
     private var localOperation: LocalControlOperation?
     private var acknowledgedWriteProjectIDs: Set<String> = []
-    private var rollbackRequest: (taskID: String, requestID: String)?
     private var timer: Timer?
     private let queue = DispatchQueue(label: "Colink.status", qos: .utility)
 
@@ -261,21 +268,9 @@ final class ConnectionController: ObservableObject {
         && !projectBusy && recoveryRequired && activeTask != nil
         && localActions.contains("recover_write")
     }
-    var rollbackTask: WorkspaceWriteTask? {
-        if let task = activeTask, task.state == "active" { return task }
-        if let task = recentTask, task.state == "completed" { return task }
-        return nil
-    }
-    var canRollbackWrite: Bool {
-        guard let task = rollbackTask else { return false }
-        return configuration.isLive && ownsConnection && isReady && phase == .running
-            && !projectBusy && !recoveryRequired && writeEnabled
-            && acknowledgedWriteProjectIDs.contains(task.projectID)
-            && localActions.contains("rollback_write_task")
-    }
     var taskDetail: String? {
         guard let task = activeTask ?? recentTask else { return nil }
-        let name = projects.first(where: { $0.id == task.projectID })?.displayName ?? task.projectID
+        let name = projects.first(where: { $0.id == task.projectID })?.selectionTitle ?? task.projectID
         return "\(task.title) · \(name)"
     }
     private var modeArguments: [String] { configuration.isLive ? ["--mode", "live"] : [] }
@@ -537,30 +532,6 @@ final class ConnectionController: ObservableObject {
         }
     }
 
-    func rollbackWriteTask() {
-        guard canRollbackWrite, let task = rollbackTask else { return }
-        let alert = NSAlert()
-        alert.messageText = "回退这项任务的全部修改？"
-        alert.informativeText = "\(task.title)\n\n恢复本任务修改的文件，撤销本任务新建且未被外部改动的文件与空目录。检测到冲突时会保留现场，不强制覆盖。"
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "回退整项任务")
-        alert.addButton(withTitle: "取消")
-        guard alert.runModal() == .alertFirstButtonReturn,
-              canRollbackWrite, rollbackTask == task else { return }
-        if rollbackRequest?.taskID != task.id {
-            rollbackRequest = (task.id, "desktop_rollback_" + UUID().uuidString.replacingOccurrences(of: "-", with: ""))
-        }
-        guard let request = rollbackRequest else { return }
-        control("rollback_write_task", parameters: [
-            "project_id": task.projectID, "task_id": task.id, "request_id": request.requestID
-        ]) { [weak self] result in
-            guard let self, result == nil else { return }
-            self.clearWriteAuthorization()
-            self.control("disable_write") { [weak self] disabled in
-                if disabled == nil { self?.stop() }
-            }
-        }
-    }
 
     func configure(tunnelID: String, apiKey: String, completion: @escaping () -> Void) {
         guard !configuring, !ownsConnection, !isConfigured else { return }
@@ -645,7 +616,6 @@ final class ConnectionController: ObservableObject {
         hasActiveTask = false
         recoveryRequired = false
         localActions = []
-        rollbackRequest = nil
         projects = []
         errorText = nil
         phase = isConfigured ? .stopped : .unconfigured

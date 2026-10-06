@@ -1,5 +1,10 @@
 # CoLink · 写入实现决策与验收边界
 
+2026-10-06 后续决策：用户要求移除主动代码回退，新维护源码已删除 UI/MCP/本机
+入口；Diff 与中断恢复保留，详情及登记格式兼容见
+[当前维护说明](PROJECT_MANAGEMENT_AND_UNDO_REMOVAL.md)。下方回退实现与验收是旧版
+历史，不再作为新功能目标；终端仍只设计，不开放主机命令。
+
 2026-10-06，写入分支。本文解释实现选择；当前实际网页证据与剩余门槛见
 [WEB_WRITE_VALIDATION.md](WEB_WRITE_VALIDATION.md)，不是任意生产环境承诺。
 基线为 [WRITE_CONTRACT.md](WRITE_CONTRACT.md)，阶段与证据见

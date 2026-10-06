@@ -54,11 +54,11 @@ def test_three_hundred_native_small_edits_have_bounded_bodies_and_real_diff(tmp_
         assert "-VALUE = 0" in current["changes"][0]["patch"]
         assert "+VALUE = 300" in current["changes"][0]["patch"]
         c.finish_write_task("sample", task, "finish_001")
-        c.rollback_write_task("sample", task, "rollback_001")
-        assert (root / "a.py").read_text() == original
-        assert backend.get_recent_diff("sample")["summary"]["files_changed"] == 0
+        assert not hasattr(c, "rollback_write_task")
+        assert (root / "a.py").read_text().startswith("VALUE = 300\n")
+        assert backend.get_recent_diff("sample")["summary"]["files_changed"] == 1
         after_usage = store.usage()
-        assert after_usage["object_count"] == 2  # One task start + one undo/latest body.
+        assert after_usage["object_count"] == 1  # Diff origin only, no undo/latest body.
         assert after_usage["resident_bytes"] < 4 * 1024 * 1024
         (tmp_path / "evidence.json").write_text(
             json.dumps(
@@ -68,8 +68,8 @@ def test_three_hundred_native_small_edits_have_bounded_bodies_and_real_diff(tmp_
                     "operations": 300,
                     "edit_elapsed_seconds": elapsed,
                     "source_bytes": len(original.encode()),
-                    "before_rollback": before_usage,
-                    "after_rollback": after_usage,
+                    "before_finish": before_usage,
+                    "after_finish": after_usage,
                 },
                 indent=2,
             )

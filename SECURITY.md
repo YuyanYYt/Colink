@@ -1,5 +1,11 @@
 # Security and privacy
 
+2026-10-06 maintenance source removes intentional code undo from the native UI,
+MCP and local control plane. Diff origins, crash recovery and compatibility with
+old interrupted journals remain protected; no existing database is deleted.
+The terminal sandbox is design-only, not an implemented command execution feature.
+See docs/PROJECT_MANAGEMENT_AND_UNDO_REMOVAL.md and docs/TERMINAL_SANDBOX_DESIGN.md.
+
 CoLink's published distribution is a single-user, read-only code mirror and MCP
 server. It is not a system sandbox, a complete secret scanner or a shared
 multi-tenant service.
@@ -7,7 +13,7 @@ multi-tenant service.
 This describes the published mirror distribution. The unreleased 0.5.0-beta.1
 development branch also has live source reads and task-scoped writes, subject to
 explicit local project grants (default off every connection). The fifteen read
-tools retain read-only annotations; write/rollback tools do not pretend to be
+tools retain read-only annotations; write tools do not pretend to be
 read-only. The web client cannot enable permission, register a source, execute
 commands or force recovery. Client approvals are separate from local grants.
 
@@ -17,10 +23,10 @@ content/attribute checks and retention. Conflicts or uncertain partial states
 stop writes and require authenticated local recovery; they are not automatically
 discarded. Full arbitrary external-edit history and a multi-file atomic filesystem
 transaction are not promised. Unknown recovery objects are never auto-adopted.
-Native-local controls, the fifteen read tools, scoped web writes, task Diff,
-whole-task undo, stale hashes and external-file rollback protection have actual
-sample-only web/UI evidence in docs/WEB_WRITE_VALIDATION.md. Restart/quit UI,
-fresh-chat Skill routing and a production security audit remain unverified.
+The previous beta.1 native-local controls, fifteen read tools, scoped web writes,
+task Diff and now-removed whole-task undo have sample-only web/UI evidence in
+docs/WEB_WRITE_VALIDATION.md. Those historical results do not verify the current
+maintenance changes, a future terminal sandbox or a production security audit.
 
 - Only start sharing after selecting a specific project and confirming access.
 - Mirror MCP tools cannot write to sources. Live write tools can modify only

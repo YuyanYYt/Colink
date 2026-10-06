@@ -154,12 +154,12 @@ def test_whole_rollback_proves_native_attributes_and_zero_diff(parts):
     c.create_directory("a", task, "mkdir_0001", "created")
     c.create_file("a", task, "create_001", "created/b.py", "B = 2\n")
     assert c.get_diff("a")["summary"]["files_changed"] == 2
-    result = c.rollback_write_task("a", task, "rollback_001")
+    result = c.rollback.rollback("a", task, "rollback_001")  # Old journal compatibility.
     assert result["readback_verified"] and result["state"] == "rolled_back"
     assert read_file_attributes(source, source.read("a.py")) == original
     assert not (source.root / "created").exists()
     assert c.get_diff("a")["summary"]["files_changed"] == 0
-    assert c.rollback_write_task("a", task, "rollback_001") == result
+    assert c.rollback.rollback("a", task, "rollback_001") == result
     # Zero must not hide a new external change after a verified rollback.
     (source.root / "a.py").write_text("external now\n")
     with pytest.raises(WriteError, match="WRITE_ROLLBACK_CONFLICT"):
@@ -173,7 +173,7 @@ def test_attribute_conflict_in_late_participant_causes_zero_rollback_changes(par
     c.create_file("a", task, "create_001", "z.py", "last participant\n")
     set_test_attribute(source.root / "z.py", "user.colink.external", b"outside")
     with pytest.raises(WriteError, match="WRITE_ROLLBACK_CONFLICT"):
-        c.rollback_write_task("a", task, "rollback_001")
+        c.rollback.rollback("a", task, "rollback_001")
     assert (source.root / "a.py").read_text() == "VALUE = 2\n"
     assert (source.root / "z.py").exists()
     assert not store.query("SELECT * FROM rollback_items")

@@ -104,14 +104,14 @@ def test_actual_local_frontend_grant_read_edit_diff_undo_and_disable(monkeypatch
         )
         assert "VALUE = 2" in runtime.backend.read_file(pid, "module.py")["content"]
         assert runtime.backend.get_recent_diff(pid)["summary"]["files_changed"] == 1
-        undo = desktop_control(
-            base,
-            root,
-            "rollback_write_task",
-            {"project_id": pid, "task_id": task, "request_id": "desktop_undo_001"},
-        )
-        assert undo["state"] == "rolled_back"
-        assert runtime.backend.get_recent_diff(pid)["summary"]["files_changed"] == 0
-        assert (root / "module.py").read_text() == "VALUE = 1\n"
+        with pytest.raises(SyncError, match="unsupported desktop action"):
+            desktop_control(
+                base,
+                root,
+                "rollback_write_task",
+                {"project_id": pid, "task_id": task, "request_id": "desktop_undo_001"},
+            )
+        assert runtime.backend.get_recent_diff(pid)["summary"]["files_changed"] == 1
+        assert (root / "module.py").read_text() == "VALUE = 2\n"
         assert not desktop_control(base, root, "disable_write", {})["write_enabled"]
         assert not (state / "server" / "mirror.sqlite3").exists()

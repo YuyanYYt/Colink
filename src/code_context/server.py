@@ -114,7 +114,8 @@ def build_mcp(
             "Edit only on explicit user request using one task for related files. Writing must "
             "be enabled locally for this project. Read current SHA and narrow code, save through "
             "the write tools, then start fresh read contexts. Use stable request IDs on retries. "
-            "Rollback the whole task only when requested; conflicts require local inspection. "
+            "No user code rollback tool. Use user-saved Git checkpoints for code history; "
+            "conflicts require local inspection. "
             "Delete only explicitly requested individual source files through delete_file; "
             "read the current SHA first. No recursive directory deletion or renaming tool. "
             "No command execution. Platform approvals remain controlled by the client."
@@ -332,8 +333,8 @@ def build_mcp(
         description=(
             "Compare the retained write task's original files against verified current source. "
             "summary is default; request a narrow patch only when needed. NO_TASK_BASELINE means "
-            "no comparable history, not zero changes. After verified whole rollback it reports "
-            "zero only if restored participants still match. No arbitrary external-edit history. "
+            "no comparable history, not zero changes. This tool does not restore code or "
+            "provide arbitrary external-edit history. "
             "baseline=empty is an explicit current-source listing, not a prior version."
         )
         if live_mode
