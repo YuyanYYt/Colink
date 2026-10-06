@@ -3,6 +3,7 @@ import os
 
 import pytest
 
+import code_context.file_attributes as attributes
 import code_context.file_mutation as mutation
 from code_context.file_attributes import _set_xattr
 from code_context.file_mutation import read_file_attributes
@@ -52,7 +53,7 @@ def test_original_mode_gid_xattrs_persist_without_attribute_copy_per_edit(parts)
     source, store, c = parts
     path = source.root / "a.py"
     path.chmod(0o640)
-    set_test_attribute(path, "com.colink.synthetic", "metadata文字".encode())
+    set_test_attribute(path, "user.colink.synthetic", "metadata文字".encode())
     # A real alternate supplementary group tests non-parent-GID preservation.
     alternate = next((group for group in os.getgroups() if group != path.stat().st_gid), None)
     if alternate is not None:
@@ -89,7 +90,7 @@ def test_late_external_attribute_change_is_pending_not_labeled_verified(parts, m
     def exchange(parent, temporary, target):
         fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
         try:
-            _set_xattr(fd, "com.colink.external", b"outside")
+            _set_xattr(fd, "user.colink.external", b"outside")
         finally:
             os.close(fd)
         return actual(parent, temporary, target)
@@ -112,7 +113,7 @@ def test_created_directory_attribute_change_refuses_finish_and_diff(parts):
     source, store, c = parts
     task = begin(c)
     c.create_directory("a", task, "mkdir_0001", "directory")
-    set_test_attribute(source.root / "directory", "com.colink.external", b"outside")
+    set_test_attribute(source.root / "directory", "user.colink.external", b"outside")
     for query in (lambda: c.get_diff("a"), lambda: c.finish_write_task("a", task, "finish_001")):
         with pytest.raises(WriteError, match="WRITE_ATTRIBUTE_CONFLICT"):
             query()
@@ -128,10 +129,14 @@ def test_created_directory_attribute_change_refuses_finish_and_diff(parts):
     assert not (source.root / "directory/nested").exists()
 
 
-def test_unsupported_attribute_budget_refuses_before_intent_or_source_change(parts):
+def test_unsupported_attribute_budget_refuses_before_intent_or_source_change(parts, monkeypatch):
     source, store, c = parts
     original = source.read("a.py")
-    set_test_attribute(source.root / "a.py", "com.colink.synthetic", b"x" * (64 * 1024 + 1))
+    # Linux filesystems may reject a 64 KiB xattr before our capture runs. Test
+    # the same native admission path with a small test-only bound; default
+    # 64 KiB/128 KiB boundaries remain covered in test_file_attributes.py.
+    monkeypatch.setattr(attributes, "MAX_XATTR_BYTES", 128)
+    set_test_attribute(source.root / "a.py", "user.colink.synthetic", b"x" * 129)
     task = begin(c)
     with pytest.raises(SourceError, match="ATTRIBUTE_BUDGET"):
         edit(source, c, task)
@@ -142,7 +147,7 @@ def test_unsupported_attribute_budget_refuses_before_intent_or_source_change(par
 
 def test_whole_rollback_proves_native_attributes_and_zero_diff(parts):
     source, store, c = parts
-    set_test_attribute(source.root / "a.py", "com.colink.synthetic", b"saved-original")
+    set_test_attribute(source.root / "a.py", "user.colink.synthetic", b"saved-original")
     original = read_file_attributes(source, source.read("a.py"))
     task = begin(c)
     edit(source, c, task)
@@ -166,7 +171,7 @@ def test_attribute_conflict_in_late_participant_causes_zero_rollback_changes(par
     task = begin(c)
     edit(source, c, task)
     c.create_file("a", task, "create_001", "z.py", "last participant\n")
-    set_test_attribute(source.root / "z.py", "com.colink.external", b"outside")
+    set_test_attribute(source.root / "z.py", "user.colink.external", b"outside")
     with pytest.raises(WriteError, match="WRITE_ROLLBACK_CONFLICT"):
         c.rollback_write_task("a", task, "rollback_001")
     assert (source.root / "a.py").read_text() == "VALUE = 2\n"

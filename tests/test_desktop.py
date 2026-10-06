@@ -218,8 +218,8 @@ def test_live_supervisor_uses_original_tunnel_and_closes_all_owned_children(
 ):
     import tempfile
 
-    # The long regular pytest path would exceed macOS's AF_UNIX byte ceiling.
-    workspace = Path(tempfile.mkdtemp(prefix="live-desk-", dir=Path.cwd() / ".artifacts"))
+    # Keep room for the longer GitHub checkout and the AF_UNIX byte ceiling.
+    workspace = Path(tempfile.mkdtemp(prefix="d-", dir=Path.cwd() / ".artifacts"))
     root = workspace / "r"
     root.mkdir()
     (root / "models.py").write_text("class Model: pass\n")

@@ -54,7 +54,7 @@ def test_delete_diff_finish_and_undo_restore_exact_origin_and_attributes(parts):
     os.chmod(source.root / "a.py", 0o640)
     fd = os.open(source.root / "a.py", os.O_RDONLY | os.O_NOFOLLOW)
     try:
-        _set_xattr(fd, "com.colink.synthetic", b"synthetic attribute")
+        _set_xattr(fd, "user.colink.synthetic", b"synthetic attribute")
     finally:
         os.close(fd)
     origin_attributes = read_file_attributes(source, source.read("a.py"))

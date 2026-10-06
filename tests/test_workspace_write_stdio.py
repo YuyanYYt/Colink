@@ -15,7 +15,8 @@ from code_context.write_tools import WRITE_TOOL_NAMES
 
 
 def test_workspace_stdio_default_off_three_round_edits_original_diff_and_whole_undo():
-    base = Path(tempfile.mkdtemp(prefix="wmcp-", dir=Path.cwd() / ".artifacts"))
+    # The control socket must also fit when the CI checkout path is longer.
+    base = Path(tempfile.mkdtemp(prefix="s-", dir=Path.cwd() / ".artifacts"))
     root, state = base / "r", base / ".code-context" / "live-v1"
     root.mkdir()
     paths = ["a.py", "b.py", "c.py"]
