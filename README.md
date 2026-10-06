@@ -1,374 +1,157 @@
-# CoLink · 连接你的代码
+<p align="center">
+  <img src="macos/assets/logo.svg" width="96" alt="CoLink logo">
+</p>
 
-<img src="macos/assets/logo.svg" width="96" alt="CoLink logo">
+<h1 align="center">CoLink · 连接你的代码</h1>
 
-**2026-10-07 · 当前维护者本机版本 0.5.0b2（尚未发布新安装包）：** 已构建并安装自包含
-菜单栏应用，保留既有目录、身份、配置和数据；安装后真实应用与包摘要一致。
-无 Git 新项目发现与同名
-项目区分已修正；不带项目标记的工作区根不再吞掉后来新增的 Python/Java 项目。
-已移除菜单栏代码回退按钮、`rollback_write_task` 网页工具和本机回退控制入口。
-当前为原十五读取工具与七项任务工具，仍保留 Diff、精准写入及中断提交恢复；
-主动恢复代码使用用户另行保存的 Git 版本，不自动提交或 reset。
-下方 beta.1 回退/网页验收条目是历史记录；本次安装包本地验证不代替新的网页验收。
-登记格式兼容与当前功能边界见 [本次维护说明](docs/PROJECT_MANAGEMENT_AND_UNDO_REMOVAL.md)。
-终端能力目前**只有设计、没有执行权限或工具**，见
-[终端执行与 dry run 方案](docs/TERMINAL_EXECUTION_PLAN.md)。旧离线 VM 方案保留为历史备选。
+<p align="center">
+  让网页 AI 看懂本机项目，并在你允许时直接修改代码。<br>
+  一款轻量的 macOS 菜单栏应用，不必另外购买服务器。
+</p>
 
-今后软件重大回归的**首选恢复目标为 0.5.0b2**，固定标签
-`anchor/colink-0.5.0b2-before-terminal-execution`，见
-[当前版本恢复说明](docs/RECOVERY_0.5.0b2.md)。原 0.4.3 / 0.4.1 标签不移动；
-保存锚点不等于发布 GitHub、不撤销用户项目修改，也不自动删除运行数据。
+<p align="center">
+  <a href="https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b2">下载 macOS 安装包</a> ·
+  <a href="docs/INSTALL.md">安装与使用</a> ·
+  <a href="docs/AGENT_INSTALL.md">让 Agent 帮你安装</a> ·
+  <a href="https://github.com/YuyanYYt/Colink/releases">历史版本</a>
+</p>
 
-让网页上的 ChatGPT 按需读取你指定的本机代码项目，通过个人私有连接提供文件清单、
-源码、搜索与代码关系；不用为了它购买一台服务器。公开 0.4.1 使用只读镜像；下方
-未发布开发分支已采用原文件直读，并增加默认关闭、有任务起点的受控写入与 Diff。
+**当前版本：0.5.0 Beta 2（`0.5.0b2`）** · macOS 14+ · Apple Silicon · [MIT](LICENSE)
 
-**开源预览版 0.4.1：macOS 14+ / Apple Silicon。**
-[下载安装包](https://github.com/YuyanYYt/Colink/releases/tag/v0.4.1) ·
-[所有版本](https://github.com/YuyanYYt/Colink/releases) ·
-[安装与使用](docs/INSTALL.md) · [让 Agent 帮你安装](docs/AGENT_INSTALL.md) ·
-[技术架构](docs/ARCHITECTURE.md) · [安全边界](SECURITY.md) ·
-[ChatGPT 自动匹配 Skill](docs/CHATGPT_SKILL.md)
+CoLink 把你选定的本机项目接入 MCP。你可以在 ChatGPT 网页端询问项目结构、查找
+函数、理解跨文件依赖；需要改代码时，在本机打开写入开关，让 AI 精准编辑、创建
+或删除文件。默认只读，项目访问范围始终由你在本机确认。
 
-公开安装包仍为 0.4.1：差异摘要优先、连接状态检查、分页和文件过滤，
-并提供通用代码上下文 Skill。该版样例热更新已完成实际 ChatGPT 网页验收；结果与限制见
-[验证记录](docs/VALIDATION.md)，后续功能重构边界见 [重构锚点](docs/REFACTOR_ANCHOR.md)。
-每次发布使用独立版本标签，保留原安装包和更新说明；需要历史版本时打开“所有版本”，
-例如 [0.4.0](https://github.com/YuyanYYt/Colink/releases/tag/v0.4.0)，不使用最新源码替代旧版源码。
+## 能做什么
 
-历史 0.4.3 阶段：独立开发分支 `codex/colink-code-intelligence` 的源码版本为 **0.4.3**，当时尚未公开发布。
-自包含 0.4.3 已完成维护者本机安装；Python 自定义源码根的原缺陷已通过定向网页验收。
-该版固定为历史重构前恢复锚点 `anchor/colink-0.4.3-before-live-workspace-refactor`，
-并在本机保存单份应用恢复包与源码 bundle；重大问题的回退流程见
-[0.4.3 恢复说明](docs/ROLLBACK_0.4.3.md)。保存不等于发布或重构已经开始。
-公开下载仍是 0.4.1；该验收不代表所有工具、任意项目或新账户都已完成验证。
-新增 Python / Java 按需符号、引用、类关系、调用关系、文件/模块依赖、反向影响、
-依赖层级与循环查询；原有源码读取和只读权限不变。能力、限制与验证范围见
-[代码结构查询](docs/CODE_INTELLIGENCE.md)。不能用 0.4.1 的网页验收代替新工具的验收。
+| 功能 | 你可以用它做什么 |
+| --- | --- |
+| 按需读取源码 | 查找文件、搜索代码、读取指定行或片段；直接读取磁盘上已保存的文件，不复制完整项目镜像 |
+| 多项目管理 | 选择一个工作目录，分别启用其中的项目；在对话中指定项目，不必来回切换文件夹 |
+| Python / Java 代码关系 | 查找符号、定义和引用，按需查询类关系、调用关系、文件/模块依赖、反向影响和依赖层级 |
+| 精准写入 | 本机授权后按行插入、替换指定范围或唯一片段；修改前核对原文和文件哈希 |
+| 创建与删除 | 创建文件和目录，删除明确指定的单个文件；不提供递归删除 |
+| 任务 Diff | 查看同一任务跨多轮、跨文件的累计改动，不在普通问答里展示递增版本编号 |
+| 菜单栏控制 | 启动、关闭、选择文件夹和管理项目；跟随系统深浅主题，不占 Dock 位置 |
+| 可选自动匹配 Skill | 本机代码缺少上下文时优先读取；已经贴出足够代码时直接回答，无需每次手选技能 |
 
-默认关闭写入开关、精准编辑、先备份后写入、跨轮多文件整体回退和有界恢复区，
-记录在 [MCP 受控写入契约](docs/WRITE_CONTRACT.md)。这些不是公开 0.4.1 的能力；
-新分支实施状态和实际验收见下方，旧镜像入口继续只读。
+普通文本源码读取不限于 Python / Java；结构化关系分析目前重点支持这两种语言。
+关系来自静态分析，动态调用、外部库内部实现等可能无法确定，工具会标明不确定项。
+Skill 是否自动匹配由客户端决定，不保证每轮触发。
 
-本次重构基线为 [多项目工作区与原文件直读计划](docs/LIVE_WORKSPACE_REFACTOR.md)：
-先解耦，再由完整源码镜像迁移到原文件按需直读；一个工作区发现并登记多个项目，
-网页按项目名称选择、按唯一项目标识隔离读取，不必反复切换菜单栏文件夹。
-关系索引按项目、按需更新，恢复副本独立且有界。该方案已在开发分支实施，不代表旧
-公开包或系统安装版已有这些功能，也不授权扩大现有目录、启用写入或删除旧数据库。
+## 开始使用
 
-### 当前未发布开发分支
+### 1. 安装应用
 
-2026-10-06 已获实施授权，`codex/colink-controlled-write` 已到 **0.5.0-beta.1**。
-上述 0.4.1 公开包、0.4.3 原安装版和设计记录是历史边界，不代表开发分支仍未实施。
-原文件按需直读、多项目登记、Python/Java 按需关系以及有界任务写入/整体回退核心
-已有本地证据。原十五工具、三轮同任务写入、保存读回、原 Diff、整项回退、外来文件
-冲突保护和撤权拒绝已完成实际 ChatGPT 网页样例验收；原生项目授权、回退按钮及
-关闭写入开关也已实际操作。按维护者本次明确要求，通用 beta.1 已安装到本机，补完
-修正后终态、正常关闭/退出/重开默认关闭，以及网页新对话自然读取/充分代码反例。
-**这是本机已可用的未公开 beta，不是正式发行或跨账号保证**。证据见
-[网页写入验收](docs/WEB_WRITE_VALIDATION.md)，使用方法见
-[原文件直读与任务写入](docs/LIVE_USAGE.md)，阶段和恢复点见
-[实施记录](docs/IMPLEMENTATION_LOG.md)。旧 0.4.3 应用移至废纸篓可恢复，原配置、凭据、
-数据库和固定恢复锚点保留；本次没有发布 GitHub。
+打开 [0.5.0 Beta 2 下载页](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b2)，
+下载 `Colink-macos-arm64.dmg`，将 `Colink.app` 拖入“应用程序”，然后打开 **CoLink**。
+也可以下载 ZIP 安装。
 
-没有完整镜像也能 Diff：只为实际编辑的文件保存任务起点，原 `get_diff` 比较起点与
-核验过的实际当前文件，多轮 A/B/C 使用同一任务。没有起点就明确
-`NO_TASK_BASELINE`，不猜测外部编辑历史。恢复区全局默认 64 MiB 常驻/128 MiB 管理
-峰值、最多 1024 操作/任务，保留最近一项完成点/七天；容量不足拒绝新写入，未完成
-恢复不为腾空间而删除。详见 [实现决策](docs/WRITE_IMPLEMENTATION.md)。
+安装包已包含 Python、MCP 运行依赖和隧道客户端，**不需要先安装开发环境**。
+目前支持 Apple Silicon Mac（M 系列芯片），macOS 14 或更新版本。
+Beta 包尚未完成 Apple Developer ID 签名和公证，首次打开可能出现系统安全提示；
+详情与文件校验方法见 [安装指南](docs/INSTALL.md)。
 
-旧 `serve`、`mcp`、`local` 仍为只读镜像兼容入口；新 `workspace` 是已本机授权的
-多项目直读入口。当前已安装 beta.1 带协调器时保留 15 个原工具并另提供 7 个任务工具，写权限每次启动
-默认关闭，只能通过本机控制开启准确项目。网页不能登记目录、启用开关或执行命令。
-平台工具确认与本机开关独立，不承诺“全部权限后永不弹窗”。此版本不自动清理旧库。
+### 2. 配置自己的连接
 
-2026-10-06 源码候选补充 `delete_file`，现在为原十五读取工具加八个任务工具，
-支持先保存再删除单个已声明源文件及整项恢复。尚未重新打包安装或进行网页删除验收，
-不能把源码通过测试当成现有安装版已有新工具。边界与响应时长复查见
-[文件删除与响应时长](docs/FILE_DELETE_AND_LATENCY.md)。
+在菜单栏面板完成“首次连接设置”，填写你自己的 Tunnel ID 和运行密钥，再在
+ChatGPT 中添加对应的私有 MCP 连接。首次配置步骤见
+[连接指南](docs/INSTALL.md#只需首次完成你自己的-chatgpt-私有连接)。
 
-本次 GitHub 更新同步这套 `0.5.0b1` 开发源码及既有实施记录，并合入源码主线；
-没有发行新的 Releases 安装包。上方 0.4.1 下载链接和历史安装包保留，不能用旧包
-取得新写入/删除工具。本机已有的 beta.1 安装版也不包含最后新增的 `delete_file`；
-新增删除仍只有源码与本地协议验证，未完成新版安装/实际网页删除验收。
+连接通过出站私有隧道建立，不需要 VPS、路由器端口映射或本机公网入站端口。
+你仍需要具有相应功能和权限的 ChatGPT / Platform 账号；安装软件不会自动获得这些权限。
 
-下载 DMG，拖入“应用程序”，打开应用，完成首次连接设置，然后选择文件夹并点击启动。
-安装包包含 Python、MCP 运行依赖和经过校验的官方隧道客户端，使用者不需要先安装
-Python、uv、Node.js 或编辑 YAML。自己的 Tunnel ID、运行密钥和 ChatGPT 连接仍需要
-用户授权配置；不是安装即自动共享。当前安装包仅本地 ad-hoc 签名，尚未完成 Apple
-Developer ID 签名/公证，不承诺像 App Store 应用一样无安全提示。
+### 3. 选择项目并启动
 
-本项目采用 [MIT](LICENSE) 开源；GitHub 源码/安装包发布不等于已进入 ChatGPT 公共插件目录。
-每位用户各自配置私有隧道，不共享开发者的服务器、组织或密钥。
+先用自带样例确认连接可用，再选择自己的项目或工作目录。在“项目管理”中启用
+要提供给 AI 的项目，点击“启动”。新发现的项目不会自动获得访问许可。
 
-## 项目概览
+在新对话中可以这样问：
 
-一套可维护的代码上下文 MVP：macOS/Linux 读取指定项目，保存待同步批次，在本机
-或通过 HTTP/HTTPS 更新代码镜像，再用 MCP 按需读取源码文本。代码采集与 MCP 不需要模型
-API Key，也不调用模型。可选的官方 Secure MCP Tunnel 需要独立的运行 API Key。
+> 看看我已连接的项目有哪些。请只读取项目清单。
+>
+> 解释指定项目的入口函数，并查一下它依赖哪些文件。
+>
+> 找到这个 Python 类的定义、调用位置，以及修改它可能影响的模块。
 
-已有两种入口：本地 `stdio` MCP、带 Bearer 令牌的 Streamable HTTP MCP。
-HTTP 同步接口和 MCP 查询工具分开；MCP 工具全部只读。
+需要修改时，再打开本机的 **“允许修改代码”**，选择准确项目，并明确告诉 AI
+要改什么。关闭连接、退出或重启后，写入权限都会关闭。更新旧版后，应在 ChatGPT
+原连接页刷新工具并新建对话。写入使用方法见 [读取与写入指南](docs/LIVE_USAGE.md)。
 
-## macOS 菜单栏应用：CoLink
+### 让 Agent 协助安装
 
-安装后应用位于 `/Applications/Colink.app`（或你自己的 `~/Applications`）。无需终端启动：
+把下面这句话交给你已有的本机编码助手：
 
-1. 在 Finder 的“应用程序”中双击应用，或在 macOS 应用搜索中输入 `CoLink`（旧版显示 `Colink`）。
-2. 点击菜单栏代码连接图标；选择文件夹只改变选择，不开始采集。
-3. 点击“启动”，应用管理采集与私有隧道；更换为非样例目录时先确认共享给 OpenAI。
-4. 点击“关闭”真正停止整条连接，保持关闭直到再次手动启动。
+> 请按照 https://github.com/YuyanYYt/Colink/blob/main/docs/AGENT_INSTALL.md
+> 帮我安装 CoLink，先检查系统、版本和校验值，再说明安装计划；保留现有配置，
+> 由我自己完成登录、密钥输入和项目授权。
 
-退出或重启后仍可从系统应用入口打开；打开应用本身不启动连接。新发行包只显示
-菜单栏图标，不占用 Dock 位置，也不修改系统 Dock 设置。面板只显示状态、文件夹
-和操作按钮，技术指标保留在命令行诊断与维护文档。原生 SwiftUI + AppKit
-毛玻璃界面，跟随系统深浅主题；SVG 品牌标志见
-[macos/assets/logo.svg](macos/assets/logo.svg)。没有开机自启或自动恢复运行的开关。
-收起面板不停止连接；“退出应用”则停止连接并退出。关闭不删除文件夹、密钥或两份快照。
-应用与终端不要同时运行同一 Tunnel，应用不会杀掉外部进程。
+Agent 可以协助下载、校验和安装，但不能代替账号授权或绕过系统安全提示。
+想减少日常手动选择，另见 [自动匹配 Skill 的安装方法](docs/CHATGPT_SKILL.md)。
 
-初次安装默认自带样例，不自动选择或共享真实项目。运行依赖、构建与故障边界见
-[docs/MACOS_APP.md](docs/MACOS_APP.md)，验收见 [docs/VALIDATION.md](docs/VALIDATION.md)。
+## 从源码运行
 
-## 推荐：电脑本机作为服务器，网页通过私有隧道调用
-
-0.2.0 新增 `local`：一个进程持续更新指定目录的本机镜像，并提供只读 stdio MCP。
-搭配官方 Secure MCP Tunnel，无需 VPS、路由器端口映射或本机公网入站监听。
-
-```sh
-uv sync --locked
-uv run colink demo-local
-```
-
-本机演示验证修改自动更新、旧版本隔离与完整进程重启；不启动远程连接，不读取 API Key。
-持续 MCP 的客户端启动命令为：
-
-```sh
-uv run colink local --root examples/sample_project --project sample \
-  --data-dir .code-context/local-sample
-```
-
-这是由客户端/隧道客户端启动的 stdio 命令，不是网页访问的 HTTP 地址。
-每个数据目录绑定一个 root/project；源监听异常时拒绝工具读取，避免把过时镜像冒充在线状态。
-下列命令只读查看状态，不读取密钥、采集源码或占用采集锁；内部同步序号仅用于诊断：
-
-```sh
-uv run colink local-status --data-dir .code-context/local-sample
-```
-
-网页连接、官方客户端安装记录、安全边界和日常启动方法见
-[docs/LOCAL_HOST.md](docs/LOCAL_HOST.md)。是否已完成实际网页调用，以
-[docs/VALIDATION.md](docs/VALIDATION.md) 为准；本机协议测试不能替代网页证据。
-
-## 先运行完整演示
-
-在项目目录运行：
+适合开发者、Linux 用户或使用本地 stdio MCP 客户端的用户。准备 Git、Python 3.11+
+和 [uv](https://docs.astral.sh/uv/getting-started/installation/)，然后运行：
 
 ```sh
 git clone https://github.com/YuyanYYt/Colink.git
 cd Colink
 uv sync --locked
-uv run colink demo
 ```
 
-演示自动创建样例目录、监听在本机的临时服务和两个代码版本，通过官方 SDK 连接
-MCP，并模拟“服务端已保存、客户端没收到确认”的恢复过程。成功时输出
-`"status": "passed"`。每次演示的数据保存在新的 `.artifacts/demo/<run-id>/`，不会清理旧产物。
-演示的服务退出后停止；没有安装后台启动服务。
-
-## 最快开始使用：本地镜像 + stdio
-
-先把自带的样例项目建立为本地镜像：
+让支持 stdio 的 MCP 客户端在仓库目录启动以下命令，即可只读连接自带样例：
 
 ```sh
-uv run colink snapshot --root examples/sample_project --project sample
+uv run colink live --root examples/sample_project --project sample \
+  --data-dir .code-context/live-sample
 ```
 
-然后让支持 stdio 的 MCP 客户端启动下列命令：
+这不是网页访问地址，不会自动配置 ChatGPT 或打开写入权限。
+多项目、HTTP、旧镜像兼容入口和客户端配置见 [命令行指南](docs/CLI_USAGE.md)。
 
-```sh
-uv run colink mcp --data-dir "/absolute/path/to/Colink/.code-context"
-```
+## 版本更新
 
-常见客户端配置示例（由你添加到目标客户端，程序不会修改客户端的全局配置）：
+这里只列使用者能感受到的变化。开发阶段也保留在表中，不代表每个阶段都有独立安装包；
+已发布包和对应源码可在 [Releases](https://github.com/YuyanYYt/Colink/releases) 找到。
 
-```json
-{
-  "mcpServers": {
-    "colink": {
-      "command": "/absolute/path/to/Colink/.venv/bin/colink",
-      "args": [
-        "mcp",
-        "--data-dir",
-        "/absolute/path/to/Colink/.code-context"
-      ]
-    }
-  }
-}
-```
-
-使用你的真实项目时，将 `--root` 换成指定目录、`--project` 换成唯一的小写标识。
-`snapshot` 只采集一次；再次执行会更新镜像。持续同步使用下面的 `watch`。
-stdio 只向标准输出写协议消息，不需要 HTTP 令牌。
-
-## 持续同步：HTTP 服务 + 本地监听
-
-服务端启动前，设置两个不同的环境变量，值各至少 32 个非空白 ASCII 字符：
-
-- `CODE_CONTEXT_READ_TOKEN`：读取镜像的客户端使用。
-- `CODE_CONTEXT_SYNC_TOKEN`：本地上传进程使用，拥有上传与读取权限。
-
-令牌不作为命令行参数、不保存到源码、不在输出中展示。可在终端通过静默输入设置：
-
-```sh
-read -rs 'CODE_CONTEXT_READ_TOKEN?输入读取令牌：'
-export CODE_CONTEXT_READ_TOKEN
-read -rs 'CODE_CONTEXT_SYNC_TOKEN?输入同步令牌：'
-export CODE_CONTEXT_SYNC_TOKEN
-uv run colink serve --host 127.0.0.1 --port 8765
-```
-
-以上输入写法适用于本机 zsh；其他 shell 请使用相应的静默输入方式。
-两个终端运行时，在上传终端设置相同的 `CODE_CONTEXT_SYNC_TOKEN`。预览和启动监听：
-
-```sh
-uv run colink scan --root examples/sample_project
-uv run colink watch --root examples/sample_project --project live-sample \
-  --server http://127.0.0.1:8765
-```
-
-也可以只上传一次或查看本地队列：
-
-```sh
-uv run colink sync --root examples/sample_project --project live-sample \
-  --server http://127.0.0.1:8765
-uv run colink status --root examples/sample_project --project live-sample \
-  --server http://127.0.0.1:8765
-```
-
-`status` 在本地只读查看状态，可与正在运行的监听进程同时使用，也不需要令牌。
-
-服务器健康检查为 `http://127.0.0.1:8765/health`，MCP 地址为
-`http://127.0.0.1:8765/mcp`。HTTP MCP 客户端需发送
-`Authorization: Bearer <读取令牌>`。不会在未授权时返回代码。
-
-使用 `live-sample` 等新标识，是为了避免把首次同步与已经建立的 `sample` 镜像混用。
-每个远程项目只允许一个上传来源；新客户端状态不能覆盖已有项目。
-
-## MCP 工具
-
-| 工具 | 返回内容 |
+| 版本 | 主要变化 |
 | --- | --- |
-| `list_projects()` | 项目标识、可读名称、文件数量与采集时间，不返回递增版本号或绝对源路径 |
-| `connection_status()` | 可达服务的本机同步状态、最近同步时间及过滤规则；不证明远程隧道健康 |
-| `repo_overview(project_id, snapshot?, offset?, limit?, include_hashes?)` | 分页文件清单、大小与内部读取标识；文件哈希默认隐藏，可诊断时开启 |
-| `read_file(project_id, path, snapshot?, start_line?, end_line?)` | UTF-8 源码、行范围、完整文件哈希和 `next_start_line` |
-| `search_code(project_id, query, snapshot?, limit?)` | 区分大小写的字面量匹配、路径、行号与片段 |
-| `get_diff(project_id, snapshot?, path?, baseline?, detail?, offset?, limit?, max_chars?)` | 默认返回前次到当前的分页差异摘要；按需请求单文件补丁，不填写版本编号 |
+| **0.5.0 Beta 2 · 当前** | 改善无 Git 项目发现和同名项目区分；发布直读、多项目及受控写入安装包；移除主动代码回退，代码历史交给项目 Git 管理 |
+| 0.5.0 Beta 1 | 原文件按需直读、多项目授权、默认关闭的精准编辑与文件/目录创建、任务 Diff；后续源码补充单文件删除 |
+| 0.4.3 · 开发阶段 | 修复自定义 Python 源码根的模块定位，支持显式源码根配置 |
+| 0.4.2 · 开发阶段 | Python / Java 符号与关系查询；单文件上限提高到 4 MiB；品牌统一为 CoLink |
+| [0.4.1](https://github.com/YuyanYYt/Colink/releases/tag/v0.4.1) | Diff 摘要、分页读取、连接状态检查、文件过滤与自动匹配 Skill |
+| [0.4.0](https://github.com/YuyanYYt/Colink/releases/tag/v0.4.0) | 首个公开自包含 DMG / ZIP、首次连接设置、菜单栏运行和 Agent 安装指南 |
+| 0.3.3 | 项目与插件统一品牌；旧镜像只保留当前和前一次代码状态，取消面向用户的递增版本编号 |
+| 0.3.2 | 插件名称统一，Logo 间距与中心对称优化 |
+| 0.3.1 | 精简界面、平滑 Logo，支持从“应用程序”重新打开 |
+| 0.3.0 | 原生 macOS 毛玻璃菜单栏界面，加入启动、关闭和选择文件夹 |
+| 0.2.0 | 本机持续托管和私有隧道连接，无需另购服务器 |
+| 0.1.0 | 初版源码读取、搜索、Diff、同步和 stdio / HTTP MCP |
 
-一次分析先调用 `repo_overview`，随后把其返回的内部 `snapshot` 标识传给每次读取、搜索。
-标识不是递增编号，工具说明要求仅用它维持读取一致性，除非用户要求诊断，不在回答中展示
-标识、哈希或同步细节。省略 `snapshot` 默认读当前代码；`"previous"` 可读前一次状态。
-只保留当前和前一份状态；标识过期时明确拒绝，必须重新获取清单并重做该轮分析，
-不会悄悄换成最新代码。首次没有前一份时，差异工具返回 `NO_PREVIOUS_SNAPSHOT`，
-不导出整仓源码；只有显式指定 `baseline="empty"` 才与空目录比较。
-默认 `detail="summary"` 返回改动文件数、增删行数和分页描述；需要源码时用
-`path` 限定文件并设置 `detail="patch"`。使用 `next_offset` 继续同一快照的分页。
-补丁字符预算默认 20,000，可调至 50,000；`truncated` 表示补丁被截断，
-`has_more` 表示还有未返回的文件，这两个标志不是同一含义。
-代码中的注释、文档和字符串作为数据返回，不能充当模型指令。
+完整记录见 [CHANGELOG](CHANGELOG.md)。更新应用请先关闭并退出旧版，保留原配置与数据；
+历史版本可下载，但不保证能直接读取新版数据格式，详见 [升级说明](docs/INSTALL.md#升级已有安装)。
 
-更新工具后，在 ChatGPT 的原连接管理页刷新工具，并用新对话验证。带旧 `revision`
-参数的缓存调用会明确要求刷新，不会忽略参数后误读当前代码。
+## 使用前需要知道
 
-CoLink 的调用规则可以安装为独立 Skill，按问题自动匹配，不需要每次手动选中。
-它只指导使用已经连接的 CoLink，不携带凭据、不增加目录权限。网页安装步骤和
-不能保证每次自动命中的边界见 [ChatGPT Skill](docs/CHATGPT_SKILL.md)。
+- **你决定可读范围。** 只开放本机已确认的项目；不要直接共享个人主目录、系统目录或凭据目录。
+- **私有连接不等于代码不出电脑。** 被查询到的源码会发送给使用它的 AI 客户端及其服务提供方。
+- **写入默认关闭。** 本机许可和客户端工具确认相互独立；不会自动授予“全部权限”。
+- **代码历史使用 Git。** 当前版没有主动代码回退按钮；修改前保存重要稳定点，任务 Diff 不是 Git 历史。
+- **不提供终端执行。** 当前不能替网页 AI 安装项目依赖、运行项目或提交仓库，这些仍是后续规划。
+- **存储有界，但不是零。** 读取不保留完整源码镜像；结构索引、任务比较起点和中断保护仍占空间，并有容量限制。
 
-## 同步与文件策略
+过滤规则、隐私与写入边界见 [SECURITY](SECURITY.md)。
 
-首次完整采集，以后只上传变化文件的完整内容和删除记录。重命名表示“删除旧路径 +
-新增新路径”。SHA-256 按原始 UTF-8 字节计算；保留 CRLF、中文与末尾换行。
+## 更多资料与贡献
 
-监听使用 `watchfiles` 合并事件；普通文件事件只重读相应文件。启动时、监听建立后
-及每 60 秒进行完整对账；目录或忽略规则变化触发对账。读取权限失败、目录不可用或
-文件读取中变化不会被解释为批量删除。
+[安装与升级](docs/INSTALL.md) · [读取与写入](docs/LIVE_USAGE.md) ·
+[Python / Java 代码关系](docs/CODE_INTELLIGENCE.md) · [自动匹配 Skill](docs/CHATGPT_SKILL.md) ·
+[技术架构](docs/ARCHITECTURE.md) · [开发与贡献](CONTRIBUTING.md)
 
-本地 SQLite 保存已确认版本、文件哈希和一个不可变待发送批次。网络失败采用
-1/2/4/8/16/30 秒退避；重新运行使用原 request_id 重试。后续磁盘修改成为下一批，
-不会改写已经使用的幂等请求。冲突和认证失败会停止并给出原因。
+欢迎通过 [Issues](https://github.com/YuyanYYt/Colink/issues) 提交问题和功能建议。
+请附系统、芯片、应用版本和复现步骤，不要上传运行密钥或私人源码。
 
-默认排除 `.git`、`.venv`、`node_modules`、构建与缓存目录、`.env`/`.env.*`、密钥、
-凭据文件名（包括 `service-account*.json`、`service_account*.json` 和
-`client_secret*.json`）、数据库文件、符号链接、二进制、非 UTF-8 文本。
-强制排除目录的匹配不区分大小写。客户端和服务端同时拒绝
-部分已知凭据格式；这只是基础过滤，不能保证识别全部敏感信息。同步前使用 `scan`
-查看允许文件。根目录 `.gitignore`、`.codecontextignore` 提供额外规则；当前不处理
-嵌套目录内的 `.gitignore`，规则也不能解除强制排除。
-
-## 当前限制与后续维护
-
-- 支持 macOS/Linux，使用 Python 3.11+；Windows 客户端暂未适配。
-- 0.4.2 开发版每个镜像最多 50,000 个文本文件、128 MiB 总文本；单文件最多 4 MiB。
-  0.4.1 安装版仍是 10,000 / 8 MiB / 1 MiB，需要升级后才生效。
-- 读取默认 200 行，最多 1,000 行；新增默认 20,000 字符、最大 50,000 字符的源码页，
-  长行沿 `next_start_line` / `next_char_offset` 续读，不截断后丢失内容。
-  搜索最多 200 条；Diff 最多 100 个文件、50,000 字符。
-- 快照表示一次采集并确认的代码状态；没有文件系统原子快照，持续编辑期间会继续同步直到收敛。
-- 每个项目仅保留当前与前一次代码快照；同内容去重，提交时原子清理更早的文件清单、
-  无引用源码和过期同步记录。新配额下两份源码文本最多合计 256 MiB，数据库元数据、
-  有界结构索引、空闲页及短期
-  WAL 另计。旧数据库升级时压缩，后续复用空闲页和增量回收，不按编辑次数无限保留源码。
-- HTTP 入口使用单用户 Bearer 令牌；私有隧道使用官方组织/工作区授权，尚未实现
-  公网 OAuth、多用户隔离和钥匙串保存。
-- 图形界面目前仅为 macOS 菜单栏应用；CLI 仍可用于 macOS/Linux。
-- Python/Java 的结构关系查询在 0.4.2 开发分支中实现；其他语言尚未有结构解析。
-  正式公开包暂未实现向量检索、Google Drive、代码写入或远程执行。
-  开发分支写入状态见上面的未发布说明，远程执行不在计划内。
-
-后续执行链路按 [工作区直读重构计划](docs/LIVE_WORKSPACE_REFACTOR.md)：先冻结/解耦，
-再单项目直读、多项目路由、按需索引及实际客户端验收，最后按写入契约另行实施受控写入。
-重构计划不提前扩大权限；旧历史读取兼容与容量规则须在实施前定稿。
-
-## 公网部署与 ChatGPT 接入边界
-
-远程上传强制使用 HTTPS。本机 HTTP 例外只适用于 `localhost`、`127.0.0.1`、`::1`。
-在反向代理提供 TLS 后，将服务监听到所需网卡，并设置准确的公网 origin：
-
-```sh
-uv run colink serve --host 0.0.0.0 --port 8765 \
-  --public-url https://colink.example.com
-```
-
-`--public-url` 只配置 Host/Origin 白名单，不会自动购买域名、申请证书或部署服务。
-反向代理需保留正确 Host，并限制上传大小；在只读客户端能访问 `/mcp` 之前，先验证
-认证与 HTTPS。本轮仅验证本机调用，没有发布代码到外部服务器。
-
-这是与前面的 **Secure MCP Tunnel + stdio** 不同的部署方式。对公网 HTTPS `/mcp`，
-受保护 MCP 的官方认证流程采用 OAuth 2.1，不能把自定义静态令牌当成已完成的网页
-OAuth 连接。若只需个人私有连接，优先用官方 Tunnel，不必公开本机 HTTP 同步接口；
-公开发布插件仍需单独完成公网 HTTPS/OAuth 和实际验收。
-参考：[OpenAI MCP 快速开始](https://developers.openai.com/plugins/build/app-quickstart)、
-[OpenAI MCP 认证](https://developers.openai.com/plugins/build/auth)。
-
-## 开发与验证
-
-```sh
-uv sync --locked
-uv run ruff check src tests
-uv run ruff format --check src tests
-uv run pytest -q
-```
-
-每次改协议或工具后验证 `demo` 和测试，再在 [CHANGELOG.md](CHANGELOG.md) 记录变化。
-文件职责与同步协议见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，后续任务见
-[docs/ROADMAP.md](docs/ROADMAP.md)。
-
-默认数据位于 `.code-context/server/mirror.sqlite3` 与 `.code-context/clients/`。
-这是可复用的数据状态，应保留；不要把它当成普通缓存删除。依赖版本由 `uv.lock` 固定。
-
-当前开发分支源码与维护者本机安装版为 0.4.3，对外显示名为 CoLink；公开安装包仍为 0.4.1。
-推荐 CLI 为 `uv run colink`；
-原 `code-context` 命令仍兼容，以免现有应用/profile 失效。工作区路径、`code_context`
-模块、`CODE_CONTEXT_*` 配置、GitHub 仓库、`Colink.app` 文件路径和连接 ID 保持不变；
-新构建的界面与 bundle 显示为 CoLink。旧发布/验收记录保留当时真实名称。
+CoLink 使用 [MIT 许可证](LICENSE)。这是每位用户独立运行的开源软件，不是共享维护者
+账号的公共连接，也不代表已经上架 ChatGPT 公共插件目录。

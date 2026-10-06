@@ -1,20 +1,16 @@
 # CoLink · 原文件直读与任务写入
 
-适用：当前 `0.5.0b2` 维护源码、新 `workspace` 入口及显式以
-`--source-mode live` 构建的应用。GitHub 已公开的 0.4.1 和旧 mirror 入口不使用
-这些语义。安装/发布不由本文自动授权，真实证据见
-[WEB_WRITE_VALIDATION.md](WEB_WRITE_VALIDATION.md)。
+适用：**0.5.0 Beta 2（`0.5.0b2`）安装包**、当前维护源码与 `workspace` 入口。
+旧 0.4.1 包及 mirror 兼容入口不使用这些语义。安装和升级见
+[INSTALL.md](INSTALL.md)，[下载新版](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b2)。
 
-2026-10-06 后续维护已移除用户主动代码回退；项目发现与同名消歧已修正。
-当前安装版尚未更新，旧版回退验收仍为历史；登记格式升级/降级限制见
-[本次维护说明](PROJECT_MANAGEMENT_AND_UNDO_REMOVAL.md)。终端目前只设计，不能执行。
+本版包含单文件 `delete_file`，已移除用户主动代码回退；无 Git 项目发现与同名
+消歧已改善。代码历史由项目 Git 管理。登记格式兼容限制见
+[维护说明](PROJECT_MANAGEMENT_AND_UNDO_REMOVAL.md)。终端目前只有设计，不能执行。
 
-维护者已于 2026-10-06 明确授权并完成本机 beta.1 更新；通用安装版的实际网页小改、
-菜单栏回退、关闭/退出重开和默认拒绝均已确认。结束时连接/写入关闭，来源仅自带样例。
-
-后续源码候选新增单文件 `delete_file`，未覆盖上述安装版；新增删除的本地验证和
-当前界面/时长复查见 [FILE_DELETE_AND_LATENCY.md](FILE_DELETE_AND_LATENCY.md)。
-使用前以客户端实际列出的工具为准，不把旧安装版缺少的接口视为已可调用。
+当前客户端应列出十五项读取工具和七项任务工具；更新旧版后刷新连接并新建对话。
+历史实际网页与本地证据分别见 [WEB_WRITE_VALIDATION.md](WEB_WRITE_VALIDATION.md)
+和 [FILE_DELETE_AND_LATENCY.md](FILE_DELETE_AND_LATENCY.md)，不代表任意账号均已验证。
 
 ## 日常操作
 
@@ -53,8 +49,8 @@
    核验、空间预留、首次触及的起点保存、持久意图、原子提交及实际读回，
    网页不必再调用独立「备份工具」。
 4. 新对象用 `create_directory` 和 `create_file`，先逐个创建已声明的父目录。
-   已有对象不覆盖。原安装版没有独立删除接口；客户端升级且实际列出 `delete_file`
-   后，才可在同一任务中用当前完整 SHA 删除明确要求的单个源文件。新维护源码
+   已有对象不覆盖。客户端实际列出 `delete_file` 后，可在同一任务中用当前完整 SHA
+   删除明确要求的单个源文件。本版本
    不提供用户撤销；删除前请确认需要的 Git 版本。不提供递归删除、重命名、终端。
 5. 每笔不同操作用新的 `request_id`；同一次重试才复用同标识与全部相同参数。
    `REQUEST_ID_CONFLICT` 只表示标识复用错误，不是源码冲突。
@@ -118,6 +114,6 @@ uv run python macos/package.py --output-dir .artifacts/releases/colink-0.5.0b2 -
 这种包绑定维护者独立状态，不是公开分发物；通用包不能带这两个参数。实际验收
 与候选归档分别留证，不把生成 DMG 当成系统安装/任意账号网页成功。
 
-维护者原 0.4.3 应用已在明确更新授权后移到废纸篓可恢复，没有再复制一份应用备份；
-旧持久数据、配置和固定恢复锚点保留。遇到重大问题按
-[ROLLBACK_0.4.3.md](ROLLBACK_0.4.3.md) 退回，不靠删除旧数据「解决」兼容。
+维护者当前首选软件恢复基线固定在本版，见
+[RECOVERY_0.5.0b2.md](RECOVERY_0.5.0b2.md)。旧锚点仍保留，不靠删除持久化数据
+“解决”兼容。软件恢复和用户项目 Git 恢复是两件事，操作前均须保存现有工作。
