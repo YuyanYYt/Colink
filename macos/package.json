@@ -2,7 +2,7 @@
   "name": "colink-icon-build",
   "version": "0.4.0",
   "private": true,
-  "description": "Development-only SVG renderer for Colink's native macOS app",
+  "description": "Development-only SVG renderer for CoLink's native macOS app",
   "license": "MIT",
   "dependencies": {
     "sharp": "0.35.5"

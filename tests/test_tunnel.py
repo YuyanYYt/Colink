@@ -58,6 +58,29 @@ def test_profile_refuses_overwrite(profile):
     assert profile.read_bytes() == before
 
 
+def test_workspace_profile_is_explicit_and_keeps_exact_scope(profile):
+    config, root, _, data = load_profile(profile)
+    live = profile.parent / "workspace.yaml"
+    prepare_profile(
+        root,
+        "workspace",
+        data.parent / "live",
+        config["control_plane"]["tunnel_id"],
+        live,
+        mode="workspace",
+    )
+    accepted, accepted_root, project, _ = load_profile(live)
+    assert accepted_root == root and project == "workspace"
+    assert shlex.split(accepted["mcp"]["commands"][0]["command"])[3] == "workspace"
+    assert tunnel_status(live)["source_mode"] == "live"
+    assert not tunnel_status(live)["workspace_status"]["write_enabled"]
+    assert not (data.parent / "live").exists()
+    accepted["mcp"]["commands"][0]["command"] += " --allow-write"
+    private(live, json.dumps(accepted))
+    with pytest.raises(SyncError, match="expanded-scope"):
+        load_profile(live)
+
+
 def test_profile_requires_official_yaml_extension(profile, tmp_path):
     _, root, project, data = load_profile(profile)
     wrong_path = tmp_path / "profile.json"

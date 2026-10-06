@@ -82,6 +82,7 @@ def test_all_mandatory_directories_are_pruned(tmp_path: Path, path: str) -> None
         "cache.sqlite3",
         "file.pyc",
         ".DS_Store",
+        ".colink-write-0123456789abcdef0123456789abcdef.tmp",
         "nested/credentials-folder/source.py",
     ],
 )

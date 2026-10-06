@@ -65,7 +65,12 @@ echo "Retained staging directory: $colink_stage"
 ditto -x -k "$colink_archive" "$colink_stage"
 codesign --verify --deep --strict "$colink_stage/Colink.app"
 colink_name=$(plutil -extract CFBundleName raw "$colink_stage/Colink.app/Contents/Info.plist")
-[ "$colink_name" = Colink ] || { echo "Unexpected application identity" >&2; exit 1; }
+colink_bundle_id=$(plutil -extract CFBundleIdentifier raw "$colink_stage/Colink.app/Contents/Info.plist")
+case "$colink_name" in
+  CoLink|Colink) ;;
+  *) echo "Unexpected application identity" >&2; exit 1 ;;
+esac
+[ "$colink_bundle_id" = local.codeconnect.menubar ] || { echo "Unexpected application identity" >&2; exit 1; }
 mkdir -p "$colink_destination"
 # Reserve the exact target rather than overwriting a racing install.
 mkdir "$colink_target"

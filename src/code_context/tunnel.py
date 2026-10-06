@@ -87,13 +87,15 @@ def read_runtime_key(env_file: Path) -> str:
     return values[0]
 
 
-def _command(root: Path, project: str, data: Path) -> str:
+def _command(root: Path, project: str, data: Path, mode="local") -> str:
+    if mode not in {"local", "workspace"}:
+        raise SyncError("unsupported source mode")
     return shlex.join(
         [
             str(Path(sys.executable).absolute()),
             "-m",
             "code_context",
-            "local",
+            mode,
             "--root",
             str(root),
             "--project",
@@ -104,7 +106,9 @@ def _command(root: Path, project: str, data: Path) -> str:
     )
 
 
-def _profile(root: Path, project: str, data: Path, tunnel_id: str, directory: Path) -> dict:
+def _profile(
+    root: Path, project: str, data: Path, tunnel_id: str, directory: Path, mode="local"
+) -> dict:
     return {
         "config_version": 1,
         "control_plane": {
@@ -115,11 +119,13 @@ def _profile(root: Path, project: str, data: Path, tunnel_id: str, directory: Pa
         "health": {"listen_addr": "127.0.0.1:0", "url_file": str(directory / "health.url")},
         "admin_ui": {"open_browser": False},
         "log": {"level": "warn", "format": "json"},
-        "mcp": {"commands": [{"channel": "main", "command": _command(root, project, data)}]},
+        "mcp": {"commands": [{"channel": "main", "command": _command(root, project, data, mode)}]},
     }
 
 
-def prepare_profile(root: Path, project: str, data_dir: Path, tunnel_id: str, output: Path) -> dict:
+def prepare_profile(
+    root: Path, project: str, data_dir: Path, tunnel_id: str, output: Path, *, mode="local"
+) -> dict:
     """Create a local JSON/YAML-compatible official profile; no network or key read."""
     if output.suffix != ".yaml":
         raise SyncError("official tunnel-client profiles must use the .yaml extension")
@@ -128,15 +134,15 @@ def prepare_profile(root: Path, project: str, data_dir: Path, tunnel_id: str, ou
         raise SyncError("provide the tunnel_id obtained from Platform tunnel settings")
     data = data_dir.expanduser().resolve()
     scanner = Scanner(root.expanduser(), excluded_roots=(data,))
-    existing = read_local_mirror_status(data)
-    if existing["initialized"] and (
+    existing = read_local_mirror_status(data) if mode == "local" else {}
+    if existing.get("initialized") and (
         existing.get("root") != str(scanner.root) or existing.get("project_id") != project
     ):
         raise SyncError("data directory is already bound to a different source or project")
     output = output.expanduser().absolute()
     output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     output = output.parent.resolve() / output.name
-    profile = _profile(scanner.root, project, data, tunnel_id, output.parent)
+    profile = _profile(scanner.root, project, data, tunnel_id, output.parent, mode)
     try:
         fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError as exc:
@@ -156,7 +162,7 @@ def prepare_profile(root: Path, project: str, data_dir: Path, tunnel_id: str, ou
 
 
 def load_profile(path: Path, *, verify_source: bool = True) -> tuple[dict, Path, str, Path]:
-    """Accept only our exact one-project, official-host, stdio profile shape."""
+    """Accept only our exact local/workspace, official-host, stdio profile shapes."""
     if path.suffix != ".yaml":
         raise SyncError("official tunnel-client profiles must use the .yaml extension")
     try:
@@ -165,7 +171,8 @@ def load_profile(path: Path, *, verify_source: bool = True) -> tuple[dict, Path,
         args = shlex.split(command)
         if (
             len(args) != 10
-            or args[:4] != [str(Path(sys.executable).absolute()), "-m", "code_context", "local"]
+            or args[:3] != [str(Path(sys.executable).absolute()), "-m", "code_context"]
+            or args[3] not in {"local", "workspace"}
             or args[4] != "--root"
             or args[6] != "--project"
             or args[8] != "--data-dir"
@@ -180,7 +187,7 @@ def load_profile(path: Path, *, verify_source: bool = True) -> tuple[dict, Path,
         ):
             raise ValueError
         expected = _profile(
-            root, project, data, tunnel_id, path.expanduser().absolute().parent.resolve()
+            root, project, data, tunnel_id, path.expanduser().absolute().parent.resolve(), args[3]
         )
         if profile != expected:
             raise ValueError
@@ -188,8 +195,8 @@ def load_profile(path: Path, *, verify_source: bool = True) -> tuple[dict, Path,
             raise ValueError
         if verify_source and Scanner(root, excluded_roots=(data,)).root != root:
             raise ValueError
-        existing = read_local_mirror_status(data)
-        if existing["initialized"] and (
+        existing = read_local_mirror_status(data) if args[3] == "local" else {}
+        if existing.get("initialized") and (
             existing.get("root") != str(root) or existing.get("project_id") != project
         ):
             raise ValueError
@@ -271,10 +278,19 @@ def tunnel_status(profile_file: Path) -> dict:
     # Offline inspection must remain possible after the source was moved/deleted.
     # Starting a connection still uses the full, nofollow source verification.
     profile, _, project, data = load_profile(profile_file, verify_source=False)
+    mode = shlex.split(profile["mcp"]["commands"][0]["command"])[3]
+    if mode == "workspace":
+        from code_context.workspace import read_workspace_status
+
+        local = read_workspace_status(data)
+    else:
+        local = read_local_mirror_status(data)
     result = {
         "project_id": project,
         "tunnel_id": profile["control_plane"]["tunnel_id"],
-        "local_mirror": read_local_mirror_status(data),
+        "local_mirror": local if mode == "local" else {},
+        "workspace_status": local if mode == "workspace" else None,
+        "source_mode": "live" if mode == "workspace" else "mirror",
         "health_reachable": False,
         "healthy": False,
         "ready": False,

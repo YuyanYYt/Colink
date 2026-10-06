@@ -140,6 +140,23 @@ def test_local_status_does_not_create_files(tmp_path, capsys):
     assert not data.exists()
 
 
+def test_local_status_during_schema_initialization_is_read_only(tmp_path):
+    import fcntl
+
+    data = tmp_path / "state"
+    data.mkdir()
+    database = data / "local.sqlite3"
+    sqlite3.connect(database).close()
+    original = database.read_bytes()
+    assert read_local_mirror_status(data)["status"] == "incomplete_state"
+    with (data / "local.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        status = read_local_mirror_status(data)
+        assert status["running"] and not status["initialized"]
+        assert status["status"] == "initializing"
+    assert database.read_bytes() == original
+
+
 def test_real_local_watcher_and_safe_stderr(source, tmp_path, capsys):
     with LocalMirror(source, "sample", tmp_path / "data") as mirror:
         mirror.start()

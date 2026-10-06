@@ -24,7 +24,7 @@ def emit(value):
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         prog="colink",
-        description="Colink · 连接你的代码（本地同步与只读 MCP）",
+        description="CoLink · 连接你的代码（本地同步与只读 MCP）",
     )
     result.add_argument("--version", action="version", version=__version__)
     commands = result.add_subparsers(dest="command", required=True)
@@ -45,10 +45,30 @@ def parser() -> argparse.ArgumentParser:
     local_status = commands.add_parser("local-status", help="只读查看本机持续镜像的状态")
     local_status.add_argument("--data-dir", type=Path, default=Path(".code-context/local"))
 
-    for name in ("desktop-status", "desktop-run"):
-        command = commands.add_parser(name, help="Colink 菜单栏应用的本机生命周期接口")
+    live = commands.add_parser("live", help="按需直读指定项目的已保存源码，不保留正文镜像")
+    live.add_argument("--root", type=Path, required=True)
+    live.add_argument("--project", required=True)
+    live.add_argument("--data-dir", type=Path, default=Path(".code-context/live"))
+
+    workspace = commands.add_parser("workspace", help="运行已本机授权的多项目直读 MCP")
+    workspace.add_argument("--root", type=Path, required=True)
+    workspace.add_argument("--project", default="workspace", help="连接标签，不替代项目 ID")
+    workspace.add_argument("--data-dir", type=Path, default=Path(".code-context/workspace"))
+    initialize = commands.add_parser("workspace-init", help="本机登记选定目录并发现待确认子项目")
+    initialize.add_argument("--root", type=Path, required=True)
+    initialize.add_argument("--name")
+    initialize.add_argument("--data-dir", type=Path, default=Path(".code-context/workspace"))
+    control = commands.add_parser("workspace-control", help="通过私有本机通道管理项目/状态")
+    control.add_argument("--data-dir", type=Path, required=True)
+    control.add_argument("--action", required=True)
+
+    for name in ("desktop-status", "desktop-run", "desktop-control", "desktop-select"):
+        command = commands.add_parser(name, help="CoLink 菜单栏应用的本机生命周期接口")
         command.add_argument("--workspace", type=Path, default=Path.cwd())
         command.add_argument("--root", type=Path, required=True)
+        command.add_argument("--mode", choices=("mirror", "live"), default="mirror")
+        if name == "desktop-control":
+            command.add_argument("--action", required=True)
         if name == "desktop-run":
             command.add_argument("--client", required=True)
             command.add_argument("--app-pid", type=int, default=0)
@@ -108,6 +128,32 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        if args.command == "workspace-init":
+            from code_context.workspace import initialize_workspace
+
+            emit(initialize_workspace(args.root, args.data_dir, args.name))
+            return 0
+        if args.command == "workspace-control":
+            from code_context.local_control import control_request
+
+            payload = sys.stdin.read(65537)
+            if len(payload) > 65536:
+                raise ValueError("local control input exceeds its size limit")
+            parameters = json.loads(payload) if payload.strip() else {}
+            if not isinstance(parameters, dict):
+                raise ValueError("local control requires an object")
+            emit(control_request(args.data_dir, args.action, parameters))
+            return 0
+        if args.command == "workspace":
+            from code_context.workspace import WorkspaceRuntime
+
+            os.environ.pop("CONTROL_PLANE_API_KEY", None)
+            os.environ.pop("OPENAI_API_KEY", None)
+            with WorkspaceRuntime(args.root, args.data_dir) as runtime:
+                build_mcp(runtime.backend, status_provider=runtime.backend.mcp_status).run(
+                    transport="stdio"
+                )
+            return 0
         if args.command == "desktop-setup":
             from code_context.onboarding import configure_desktop
 
@@ -117,12 +163,33 @@ def main(argv: list[str] | None = None) -> int:
             emit(configure_desktop(args.workspace, payload))
             return 0
         if args.command.startswith("desktop-"):
-            from code_context.desktop import desktop_status, run_desktop
+            from code_context.desktop import (
+                desktop_control,
+                desktop_select,
+                desktop_status,
+                run_desktop,
+            )
 
             if args.command == "desktop-status":
-                emit(desktop_status(args.workspace, args.root))
+                emit(desktop_status(args.workspace, args.root, args.mode))
                 return 0
-            return run_desktop(args.workspace, args.root, args.client, args.app_pid)
+            if args.command == "desktop-select":
+                if args.mode != "live":
+                    raise ValueError("workspace selection requires live mode")
+                emit(desktop_select(args.workspace, args.root))
+                return 0
+            if args.command == "desktop-control":
+                if args.mode != "live":
+                    raise ValueError("workspace control requires live mode")
+                payload = sys.stdin.read(65537)
+                if len(payload) > 65536:
+                    raise ValueError("local control input exceeds its size limit")
+                values = json.loads(payload) if payload.strip() else {}
+                if not isinstance(values, dict):
+                    raise ValueError("local control requires an object")
+                emit(desktop_control(args.workspace, args.root, args.action, values))
+                return 0
+            return run_desktop(args.workspace, args.root, args.client, args.app_pid, args.mode)
         if args.command.startswith("tunnel-"):
             from code_context.tunnel import launch_tunnel, prepare_profile, tunnel_status
 
@@ -160,6 +227,26 @@ def main(argv: list[str] | None = None) -> int:
                     project_names={args.project: source.root.name},
                     status_provider=source.mcp_status,
                 ).run(transport="stdio")
+            return 0
+        if args.command == "live":
+            from code_context.live import LiveQueries
+            from code_context.source_access import SourceAccess
+
+            os.environ.pop("CONTROL_PLANE_API_KEY", None)
+            os.environ.pop("OPENAI_API_KEY", None)
+            source = SourceAccess(
+                args.root, excluded_roots=(args.data_dir.expanduser().absolute(),)
+            )
+            backend = LiveQueries({args.project: source})
+            try:
+                build_mcp(
+                    backend,
+                    args.project,
+                    project_names={args.project: source.root.name},
+                    status_provider=backend.mcp_status,
+                ).run(transport="stdio")
+            finally:
+                backend.close()
             return 0
         if args.command in {"demo", "demo-local"}:
             from code_context.demo import run_demo, run_local_demo

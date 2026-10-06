@@ -1,4 +1,20 @@
-# Colink · 架构与协议 v1
+# CoLink · 架构与协议 v1
+
+2026-10-06 实施补充：下文主体保留**旧 mirror 兼容架构与协议**，不是新 live 的读取
+语义。开发分支 0.5.0-beta.1 已引入 SourceAccess / LiveQueries / ProjectRegistry / 有界
+ReadContexts、单生产线程按需 LiveIndexService 和 WatchCoordinator。本机私有控制
+与网页 MCP 分离，WriteCoordinator / RecoveryStore 负责默认关闭项目授权、任务起点、
+先保存后提交、持久幂等、整项回退和冲突恢复；未完成操作时停止该项目正常查询发布。
+live 索引只存当前结构事实，读取直接核验原文件；`get_diff` 的 previous 参数表示
+保留任务起点，而非不可变旧源码快照，返回 task_origin 或 NO_TASK_BASELINE。
+旧 mirror 工具的历史语义不改，旧数据库不删除。当前本地/网页证据分别见
+[实施记录](IMPLEMENTATION_LOG.md)和[网页写入验收](WEB_WRITE_VALIDATION.md)；实际样例
+主链路已通过，最终关闭/重启界面及自动匹配仍待。流程见[网页 SOP](WEB_ACCEPTANCE_SOP.md)。
+
+本文下方描述已实现并继续兼容的镜像架构。2026-10-06 的重构基线为“先解耦，再原文件
+按需直读、多项目工作区与按需索引”，详见
+[LIVE_WORKSPACE_REFACTOR.md](LIVE_WORKSPACE_REFACTOR.md)；实施状态以上方新模式记录为准。
+不能把新读取语义套到旧镜像入口；既有数据库、历史状态和来源限制继续有效。
 
 ```text
 指定项目目录
@@ -11,11 +27,11 @@ LocalState（已确认状态 + 不可变 outbox）
     ▼
 同步接口 /api/projects/{project_id}/sync
     ▼
-MirrorStore（SQLite 原子提交 / 不可变快照 / 内容去重）
+MirrorStore（SQLite 原子提交 / 不可变快照 / 内容去重 / Python-Java 结构索引）
     ▼
 只读 MCP：stdio 或 /mcp
     ▼
-客户端按路径、文本、固定内部 snapshot 标识查询
+客户端按路径、文本、结构关系和固定内部 snapshot 标识按需查询
 ```
 
 ## 模块职责
@@ -32,6 +48,9 @@ MirrorStore（SQLite 原子提交 / 不可变快照 / 内容去重）
 | `desktop.py` | 原生应用的本机监督进程、来源隔离、全连接关闭和只读状态 |
 | `macos/CodeConnect/` | 原生 SwiftUI/AppKit 菜单栏、系统文件夹选择和透明材质 |
 | `storage.py` | 快照事务、幂等、revision 冲突、读取与搜索 |
+| `intelligence_models.py` / `intelligence_python.py` / `intelligence_java.py` | 有界语法事实与两种语言解析，不执行项目代码 |
+| `intelligence_roots.py` / `intelligence_resolver.py` / `intelligence_index.py` | 镜像内源码根配置/发现、保守静态绑定、哈希复用、生产端原子索引与两份状态清理 |
+| `intelligence_queries.py` / `intelligence_tools.py` | 只读符号、引用、关系、层级、循环和影响查询 |
 | `server.py` | MCP 工具注册、生命周期、HTTP 认证和独立同步接口 |
 | `demo.py` | 保留数据的端到端演示 |
 
@@ -42,7 +61,7 @@ LocalMirror 复用批次生成、
 LocalState、watchfiles 与 MirrorStore，直接在本机事务提交。提交与确认之间崩溃时，
 先用同一 request_id 重放，再采集停机期间的新修改。新数据目录绑定唯一 root/project。
 
-本机采集与 stdio 查询分开：启动前先安全对账，后台生产端监听后续变化；六个工具只
+本机采集与 stdio 查询分开：启动前先安全对账，后台生产端监听后续变化；十五个工具只
 查询已提交快照，不采集、更改或执行源目录代码。`project_scope` 拒绝其他项目；
 监听不可用时工具 fail closed。不同根目录不能借用既有绑定目录的历史快照。
 
@@ -87,7 +106,8 @@ Tunnel profile 固定官方控制面、一个 stdio 命令和回环管理端点�
 大小、文件策略与 JSON。UTF-8/BOM、重复 JSON 键、非法路径和额外字段不得绕过校验。
 
 提交在 `BEGIN IMMEDIATE` 中完成：校验幂等记录 → 校验 base_revision →
-计算最终文件清单 → 校验配额 → 写入快照与幂等记录 → 更新最新指针 → 清理超出两份窗口的派生历史 → 提交。
+计算最终文件清单 → 校验配额 → 写入快照与幂等记录 → 建立同状态结构索引 →
+更新最新指针 → 清理超出两份窗口的派生历史 → 提交。
 异常自动回滚。保留窗口内相同 request_id 与相同消息返回原 revision；同 ID 不同消息被拒绝。
 版本不一致返回 409，客户端保留批次并停止，避免自动覆盖另一个来源。
 
@@ -118,7 +138,7 @@ MCP 参数与结果不再暴露这个编号。`files` 为当前和前一份状�
 
 schema 1 升级在事务中保留两份并补齐随机标识，持久化 compaction_pending 后压缩。
 中断后重启继续回收，保留已生成标识。新数据库启用增量回收，提交时回收少量空页，
-其余复用；WAL 大小策略不能替代读者及时结束事务，不宣称整个目录始终小于 16 MiB。
+其余复用；WAL 大小策略不能替代读者及时结束事务，不宣称整个目录有固定物理大小上限。
 MCP 工具读取本身不进行清理，保留只读注解；源目录始终只读。
 
 采集并不是磁盘原子快照：单文件稳定读取和监听后的补偿扫描，使远端向指定目录的
@@ -128,10 +148,12 @@ MCP 工具读取本身不进行清理，保留只读注解；源目录始终只�
 ## 维护约束
 
 协议版本、数据库 user_version 与包版本分别维护。同步协议/客户端 schema 为 1，
-镜像 schema 为 2，当前包版本为 0.4.1；本轮不改存储 schema，不自动升级未知数据库。
+镜像基础 schema 为 2，当前开发包版本为 0.4.2；新增 `ci_*` 派生表，不改变上传协议
+或原始表格式，不自动升级未知数据库。派生表按解析版本启动回填，外键关联对应快照。
 增加工具优先复用 MirrorStore 的查询能力。加入索引时以 project_id + revision +
 content_hash 标记派生状态。变更测试通过后记录 CHANGELOG；自动清理只针对用户已确认的
 两份快照窗口，配置、密钥、数据库本体、依赖、测试和构建产物不属于这个清理范围。
+结构索引的功能、预算、增量边界及静态解析限制见 [CODE_INTELLIGENCE.md](CODE_INTELLIGENCE.md)。
 
 当前上传令牌与读取令牌是单用户、整服务范围，不能承诺租户或项目级权限隔离。
 公网 HTTPS ChatGPT 接入需要另行完成 OAuth，保持同步端点只接受上传设备的凭据。
@@ -139,7 +161,7 @@ content_hash 标记派生状态。变更测试通过后记录 CHANGELOG；自动
 
 ## 原生应用生命周期
 
-Colink 不是新增的 MCP 工具。用户在本机界面操作后，原生应用通过受控的
+CoLink 原生应用不是新增的 MCP 工具。用户在本机界面操作后，原生应用通过受控的
 `desktop-run` / `desktop-status` 本机 CLI 管理既有隧道，不允许网页启动命令、
 选择目录或操作本机文件。原生 UI 从不解析密钥；沿用原有安全 launcher。
 

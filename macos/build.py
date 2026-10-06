@@ -3,6 +3,7 @@
 import argparse
 import json
 import plistlib
+import re
 import shutil
 import subprocess
 import tomllib
@@ -20,9 +21,12 @@ def build(
     client: Path | None = None,
     chat_url: str = "https://chatgpt.com/plugins",
     bundle_id: str = "local.codeconnect.menubar",
+    source_mode: str = "mirror",
 ) -> Path:
     workspace = workspace.resolve()
     output = output.absolute()
+    if source_mode not in {"mirror", "live"}:
+        raise SystemExit("Source mode must be mirror or live.")
     if output.is_symlink() or (
         output.exists() and (not resume or any(p.is_file() for p in output.rglob("*")))
     ):
@@ -45,6 +49,9 @@ def build(
         if metadata_file.exists()
         else "0.4.0"
     )
+    release = re.match(r"^(\d+\.\d+\.\d+)(?:$|[a-z.+-])", version)
+    if release is None:
+        raise SystemExit("Project version must contain a three-part release number.")
     contents = output / "Contents"
     binary = contents / "MacOS"
     resources = contents / "Resources"
@@ -99,6 +106,8 @@ def build(
         "sampleRoot": str(workspace / "examples/sample_project"),
         "chatURL": chat_url,
     }
+    if source_mode == "live":
+        runtime["sourceMode"] = "live"
     (resources / "runtime.json").write_text(
         json.dumps(runtime, ensure_ascii=False, indent=2) + "\n"
     )
@@ -107,11 +116,12 @@ def build(
             {
                 "CFBundleExecutable": "CodeConnect",
                 "CFBundleIdentifier": bundle_id,
-                "CFBundleName": "Colink",
-                "CFBundleDisplayName": "Colink",
+                "CFBundleName": "CoLink",
+                "CFBundleDisplayName": "CoLink",
                 "CFBundlePackageType": "APPL",
-                "CFBundleShortVersionString": version,
-                "CFBundleVersion": "7",
+                "CFBundleShortVersionString": release[1],
+                "CoLinkVersion": version,
+                "CFBundleVersion": "8",
                 "CFBundleIconFile": "CodeConnect",
                 "LSApplicationCategoryType": "public.app-category.developer-tools",
                 # Declare the menu-bar agent at launch; the installed bundle
@@ -143,6 +153,7 @@ if __name__ == "__main__":
     parser.add_argument("--client", type=Path)
     parser.add_argument("--chat-url", default="https://chatgpt.com/plugins")
     parser.add_argument("--bundle-id", default="local.codeconnect.menubar")
+    parser.add_argument("--source-mode", choices=("mirror", "live"), default="mirror")
     parser.add_argument(
         "--resume", action="store_true", help="resume only an empty interrupted build"
     )
@@ -157,5 +168,6 @@ if __name__ == "__main__":
             client=arguments.client,
             chat_url=arguments.chat_url,
             bundle_id=arguments.bundle_id,
+            source_mode=arguments.source_mode,
         )
     )

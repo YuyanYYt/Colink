@@ -24,7 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             controller = ConnectionController(configuration: configuration)
         } catch {
             let alert = NSAlert()
-            alert.messageText = "Colink 无法读取运行配置"
+            alert.messageText = "CoLink 无法读取运行配置"
             alert.informativeText = "请从项目重新构建应用；不会启动任何连接。"
             alert.runModal()
             NSApplication.shared.terminate(nil)
@@ -40,10 +40,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             image.isTemplate = true
             statusItem.button?.image = image
         } else {
-            statusItem.button?.image = NSImage(systemSymbolName: "chevron.left.forwardslash.chevron.right", accessibilityDescription: "Colink")
+            statusItem.button?.image = NSImage(systemSymbolName: "chevron.left.forwardslash.chevron.right", accessibilityDescription: "CoLink")
         }
-        statusItem.button?.toolTip = "Colink · 代码私有连接"
-        statusItem.button?.setAccessibilityLabel("Colink 菜单栏")
+        statusItem.button?.toolTip = "CoLink · 代码私有连接"
+        statusItem.button?.setAccessibilityLabel("CoLink 菜单栏")
         statusItem.button?.target = self
         statusItem.button?.action = #selector(togglePanel)
         statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -66,7 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         ])
         popover = NSPopover()
         popover.contentViewController = container
-        popover.contentSize = NSSize(width: 360, height: 428)
+        popover.contentSize = NSSize(width: 360, height: controller.configuration.isLive ? 600 : 428)
         popover.behavior = .transient
         popover.delegate = self
         controller.showPanel = { [weak self] in self?.showPanel() }
@@ -81,8 +81,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func installApplicationMenu() {
         let mainMenu = NSMenu()
         let item = NSMenuItem()
-        let applicationMenu = NSMenu(title: "Colink")
-        let quit = NSMenuItem(title: "退出 Colink", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let applicationMenu = NSMenu(title: "CoLink")
+        let quit = NSMenuItem(title: "退出 CoLink", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         applicationMenu.addItem(quit)
         item.submenu = applicationMenu
         mainMenu.addItem(item)
@@ -92,7 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     @objc private func togglePanel() {
         if NSApplication.shared.currentEvent?.type == .rightMouseUp {
             let menu = NSMenu()
-            menu.addItem(withTitle: "打开 Colink", action: #selector(openPanel), keyEquivalent: "").target = self
+            menu.addItem(withTitle: "打开 CoLink", action: #selector(openPanel), keyEquivalent: "").target = self
             menu.addItem(.separator())
             menu.addItem(withTitle: "退出应用并关闭连接", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
             statusItem.menu = menu
@@ -118,10 +118,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard controller?.ownsConnection == true else { return .terminateNow }
-        quitting = true
-        controller.stop()
-        return .terminateLater
+        let owned = controller?.ownsConnection == true
+        quitting = owned
+        controller?.stop()
+        return owned ? .terminateLater : .terminateNow
     }
 }
 

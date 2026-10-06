@@ -4,10 +4,12 @@ import fnmatch
 import re
 from pathlib import PurePosixPath
 
-MAX_FILE_BYTES = 1024 * 1024
-MAX_TOTAL_BYTES = 8 * 1024 * 1024
-MAX_REQUEST_BYTES = 20 * 1024 * 1024
-MAX_FILES = 10_000
+MAX_FILE_BYTES = 4 * 1024 * 1024
+MAX_TOTAL_BYTES = 128 * 1024 * 1024
+# Keep one complete source state atomic; allow JSON escaping/metadata headroom.
+# This is a transport ceiling, not a second source-text quota.
+MAX_REQUEST_BYTES = 256 * 1024 * 1024
+MAX_FILES = 50_000
 
 EXCLUDED_DIRS = frozenset(
     {
@@ -48,6 +50,7 @@ EXCLUDED_NAMES = (
     "*.sqlite*",
     "*.pyc",
     ".DS_Store",
+    ".colink-write-*.tmp",
 )
 
 # Deliberately narrow: this is a useful guard, not a claim of complete secret detection.
@@ -90,7 +93,7 @@ def content_problem(content: str) -> str | None:
     except UnicodeEncodeError:
         return "invalid UTF-8 text"
     if len(raw) > MAX_FILE_BYTES:
-        return "file exceeds 1 MiB"
+        return f"file exceeds {MAX_FILE_BYTES} bytes"
     if "\x00" in content:
         return "binary content"
     if any(pattern.search(content) for pattern in SECRET_PATTERNS):

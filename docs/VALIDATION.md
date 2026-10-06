@@ -3,6 +3,199 @@
 公开副本已经去除私人会话链接、个人插件/Tunnel 标识和个人路径。原始验收记录
 只保留在维护者本机未提交的归档中；下述历史结果不是每个新账户的可用性保证。
 
+## 0.4.3 · 重构前恢复基线固定
+
+日期：2026-10-06（Asia/Shanghai）。用户要求保存当前版本，作为后续重大重构问题的
+恢复目标。当前修复源码、测试、依赖锁、重构方案与恢复说明一起保存；不开始重构。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| 源码与应用版本 | pyproject / Python 包为 0.4.3；安装版 plist 为 0.4.3 / build 7，LSUIElement=true |
+| 源码对应 | diff -qr 比较工作树 src/code_context 与应用 backend/src/code_context，逐文件一致，不包含字节码缓存 |
+| 全量回归 | 466 passed，33.67 秒；1 条原有上游 DeprecationWarning；新的独立项目测试目录，不复用旧 basetemp |
+| 静态检查 | Ruff check / format check 通过，覆盖 src/tests/scripts/macos 的 47 个 Python 文件；不生成 Ruff/Python 缓存 |
+| HTTP 演示 | passed；十五个只读工具、full/delta、幂等、崩溃恢复、状态隔离、搜索/差异与敏感文件排除 |
+| 持续 stdio 演示 | passed；十五工具、热更新、停机编辑恢复、两份状态保留、过期上下文拒绝；不声称本轮网页验收 |
+| 当前应用签名/扫描 | codesign deep/strict 通过；Publication guard 1838 files / 0 findings |
+| 应用恢复 ZIP | 当前已安装自包含应用的压缩副本，55322192 bytes（约 52.8 MiB）；unzip -tq 通过 |
+| 本机固定标识 | anchor/colink-0.4.3-before-live-workspace-refactor；不移动旧 anchor/colink-0.4.1-before-refactor 和发行标签 |
+
+应用恢复 ZIP、源码 bundle、SHA256SUMS 和最终提交信息只保存到本机
+`.artifacts/anchors/colink-0.4.3-before-live-workspace-refactor/`；未上传 GitHub。
+bundle 的离线还原及校验结果记录在该目录的 RECOVERY.md。恢复包不是用户数据备份，
+不包含个人配置、密钥或镜像数据库；当前安装版、连接、所选目录与持久化数据不修改。
+
+本轮只重新验证既有本地只读基线，没有重新安装应用、浏览器刷新或新的网页测试；
+0.4.3 的原缺陷定向网页结果继续以以下历史记录为准。固定版本不是零缺陷保证。
+源码/应用回退与未来用户代码修改的任务回退不同；数据库格式迁移前须另设可恢复
+路径，不能盲目降级读取新数据库。详见 [恢复流程](ROLLBACK_0.4.3.md)。
+
+## 0.4.3 · Python 源码根修复、本机更新与定向网页验收
+
+日期：2026-10-06（Asia/Shanghai）。先逐项核实用户提供的 Python 模块路径诊断，
+再按授权修复源码及测试；用户随后授权本机安装、刷新原网页工具和删除生成缓存。
+当轮分支为 `codex/colink-code-intelligence`，公开下载仍为 0.4.1，修复当轮未提交或
+发布 GitHub；随后按用户要求本地提交并固定恢复锚点，见上一节，仍未公开发布。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| 缺陷复现 | 网页可定位 MetadataClaim 定义，但 document_models.py 的 import 被误标为 external_or_unavailable；缺失本地依赖边 |
+| 修复前回归 | 项目根、src 布局通过；Code、backend、python、嵌套 services/foo/src 四种布局失败，合计 2 passed / 4 failed |
+| 修复策略 | 包边界＋已观察绝对导入识别源码根；镜像内 pyproject.toml 可显式配置；同名多根保留 ambiguous，不按任意路径后缀猜测 |
+| 全量回归 | 最终 0.4.3：466 passed，35.97 秒；初次修复后 466 passed，31.35 秒；1 条原有上游弃用警告 |
+| 验证环境纠正 | 首次在 /tmp 跑全量有九项桌面失败，因实际 /private/tmp 路径命中系统目录保护；改用独立项目临时目录通过，没有放宽保护 |
+| 静态检查与依赖 | Ruff check / format check 覆盖 src/tests/scripts/macos 47 个 Python 文件；uv sync --locked；uv.lock 只更新自身版本，不升级依赖 |
+| 关系与隔离 | 类、调用、引用、文件依赖、架构层级、影响、namespace 显式根、多根歧义、配置变化、旧索引回填与当前＋前一份状态通过 |
+| MCP 工具面 | 自定义 Code 根经 MCP SDK 实际调用九个结构工具；源码 HTTP / 持续 stdio 演示通过，十五个工具只读 |
+| 自包含包 | 原生编译、签名、搬移、ZIP/DMG 校验及包内 HTTP/持续 stdio 通过；Publication guard 1838 files / 0 findings |
+| 本机安装 | /Applications/Colink.app 后端及 plist 为 0.4.3，LSUIElement=true；安装的根映射/索引/绑定器文件哈希与工作区一致 |
+| 原连接恢复 | 同一已选来源和私有隧道，原密钥/profile 字节及 600 权限保留；running=true、ready=true、supervised=true、auto_start=false |
+| 网页工具刷新 | 用户原生 Chrome 的原连接管理页执行刷新，未新建连接、修改权限或导入新的 Skill |
+| 定向网页结果 | document_models.py → metadata_models.py 为 IMPORT / TYPE_REFERENCE 且 resolved；ParsedDocument.claims → MetadataClaim 为 resolved |
+| 本地调用网页结果 | normalize_admitted_document 的 normalize_line_endings、normalize_unicode_nfc、get_claim_value_kind、normalize_date_claim、normalize_claim_candidate_value、normalize_language_claim 目标 resolved |
+
+网页结果是刷新后的新对话实际可见输出，且显示了插件活动。仅证明上述原缺陷与
+读取范围已修复，不是十五工具全部在线验证、动态调用全覆盖、运行业务通过、自动
+Skill 每轮加载或新账号可用的证据。Pydantic 第三方定义/继承方法、动态接收器和内建
+函数仍可能保持 external_or_unavailable / unresolved，不伪造静态目标。
+
+应用普通文件正文合计 134862528 bytes（约 128.6 MiB），不包括用户镜像、配置，
+也不等于内存或 APFS 分配块。更新未启用写入，不增加目录、权限或开机自启。
+旧版关闭时界面曾提示未完全关闭，实际监督状态与进程列表确认已停止后才退出替换；
+本任务没有足够日志归因，也没有顺带修改关闭逻辑。
+
+### 用户授权的生成物清理
+
+本轮测试、演示、打包与换版暂存目录，以及核实为测试输出的历史目录按用户要求删除。
+保留本节验收摘要和可重跑的测试源码；以下历史章节中的临时测试/演示路径是当时的
+留存记录，不再承诺当前目录仍存在。
+
+已删除 55 个已核实的生成目录（清理前 du -sk 合计 1613088 KiB）以及开发依赖与
+旧冒烟环境中的 181 个纯 Python 字节码缓存目录（19148 KiB），合计约 1.56 GiB。
+这是目标目录清理前的分配量合计，不承诺 APFS 的可用空间立即增加相同数值。
+
+- 本轮四个临时源码根测试目录、source-roots-verification 和 source-roots-install
+  全部移除；新包、换版暂存的旧应用和包内演示副本不留本地。
+- 移除共享 swift-module-cache、pytest/Ruff/Python 缓存；下次编译或运行会按需重建。
+- 移除核实为 pytest、合成基准、样例协议演示和开发构建的旧输出，保留本页结果摘要。
+- 源码、回归测试代码、uv.lock、可复用依赖本体、旧发行包、私人原始资料/备份，
+  项目 .code-context 与应用的 Application Support 持久化数据不在清理范围。
+
+非强制删除后逐一确认目标不存在，清理后原连接仍 running / ready / supervised。
+不自动删除用途不明目录；本次删除不能从废纸篓恢复，但这些生成缓存可以重新构建。
+
+## 0.4.2 · 自包含打包与维护者本机安装
+
+日期：2026-10-05（Asia/Shanghai）。用户要求安装到本机，并明确选择安装后保持
+关闭。关闭旧应用后先完整备份用户数据、偏好与旧应用，再安装到原路径；不恢复
+连接、不更换来源、不动网页插件/Skill，不推送或发布 GitHub。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| 安装相关回归 | 最终 71 passed，3.70 秒；首轮 71 passed，3.40 秒；覆盖安装预检、身份大小写兼容、打包和原生资源 |
+| 安装脚本 | 接受 CoLink 与旧 Colink，核对 local.codeconnect.menubar；错误名称/身份拒绝，仍禁止覆盖、安全绕过和自动清理 |
+| 自包含运行环境 | Python/锁定依赖/官方 tunnel-client 齐全；搬移后显式加载 tree-sitter、Java grammar 并初始化 Parser，通过原生架构、链接、版本与签名检查 |
+| 包内 HTTP | passed，十五工具、完整/增量、幂等重试、恢复、隔离及敏感文件排除 |
+| 包内持续 stdio | passed，十五工具、热更新、停机编辑恢复、两份保留、过期拒绝，无数字 MCP 版本参数/结果 |
+| 包检查 | Publication guard 1837 files / 0 findings；ZIP、DMG 的 SHA-256 与清单一致，DMG 构建时镜像校验通过 |
+| 安装及签名 | 原路径 /Applications/Colink.app 为 0.4.2；新旧应用 deep/strict ad-hoc 签名均通过 |
+| 原生界面 | 实际打开新版，截图显示 CoLink、原 SVG 图形、原目录、“已关闭”，启动/选择可用、关闭禁用 |
+| 菜单栏模式 | LSUIElement=true，系统 lsappinfo 类型为 UIElement；Dock 自动化超时，没有额外宣称 Dock 截图验收 |
+| 数据保留 | 3 个既有镜像仍在；安装并打开后整个用户数据目录与停止后的备份逐字节一致，密钥/profile 内容和权限、目录偏好一致 |
+| 关闭状态 | running=false、ready=false、supervised=false、external_active=false、phase=stopped、auto_start=false；旧连接进程已退出，仅新版菜单栏进程运行 |
+| 网页/公开发布 | 未执行；不是十五工具已刷新到 ChatGPT 或在线关系查询通过的证据 |
+
+体积为普通文件原始字节合计：应用 134855998 bytes（约 128.6 MiB）、ZIP
+54492572 bytes（约 52.0 MiB）、DMG 69330461 bytes（约 66.1 MiB）。不等于
+APFS 分配块、用户数据或内存占用；不是此前引用项目环境的约 1.2 MiB 开发壳。
+
+本机留存：
+
+- 自包含包及报告：`.artifacts/releases/colink-0.4.2-local/`。
+- 旧应用、私有数据/偏好备份和不含明文凭据的原始安装证据：
+  `.artifacts/local-upgrades/colink-0.4.2.MNgnFp/`；该目录只保留本机，不提交。
+- 包内 HTTP：`.artifacts/validation/colink-0.4.2-bundled/http/20261005T151634Z-665bab30/`。
+- 包内 stdio：`.artifacts/validation/colink-0.4.2-bundled/stdio/20261005T151634Z-9161df16/`。
+- 首轮安装相关测试：`.artifacts/test-runs/colink-install-042.erDNYY/`；最终复核：
+  `.artifacts/test-runs/colink-install-042-final.kN2glW/`。
+- ZIP 安装的暂存副本仍保留；未自动删除任何构建、缓存、备份或数据库。
+
+关闭旧应用期间，辅助功能文本短暂显示关闭异常与旧连接状态；随后实际截图、
+监督状态和进程检查均确认停止。没有足够日志归因，未在本安装任务中更改关闭逻辑。
+本轮没有启动真实项目，因此尚未为它补建新结构索引；首次手动启动时由生产端处理。
+
+## 0.4.2 · 独立读取增强分支的本地验证
+
+日期：2026-10-05（Asia/Shanghai）。分支 `codex/colink-code-intelligence`，版本
+0.4.2。范围为 Python / Java 静态查询、大项目读取配额和 CoLink 品牌文字；不启用
+写入、不扩大来源、不移动锚点、不替换安装版、不更新个人账号的插件或 Skill。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| 全量回归 | 430 passed，29.54 秒；1 条原有 Starlette/AnyIO 弃用提示 |
+| 定向复核 | 最后补充的关系、分页及实际 stdio 子进程用例 34 passed，9.53 秒 |
+| Ruff | src/tests/scripts/macos 的 check 与 format check 均通过，45 个 Python 文件 |
+| 公开源码检查 | Publication guard 87 files / 0 findings；55 个本地 Markdown 链接均存在，不等于完整 DLP/安全认证 |
+| 锁定依赖 | `uv sync --locked`；新增 tree-sitter 0.26.0 与 tree-sitter-java 0.23.5，保留 uv.lock |
+| MCP 子进程 | Python 和 Java 分别实际调用全部九个新增结构工具，复用 snapshot 并读取原始源码 |
+| 四类关系 | 继承/实现/成员、调用/实例化、模块文件正反向依赖、外部依赖候选与证据行通过 |
+| 保守性 | 局部/参数遮蔽、self 重绑定、条件重导出、Java 同参数数重载不认作确定目标；嵌套类/静态导入通过 |
+| 图与层级 | 多文件与模块自身导入循环、依赖优先层级、反向影响链、有界响应通过 |
+| 查询隔离 | 禁用解析/索引构建后仍能查询，前后数据库逻辑导出一致；并发清理旧状态时读事务仍固定旧事实 |
+| 更新与恢复 | 单文件变更仅重新解析该文件；定义改名重绑未变导入者；删除/重命名/语法错、重启回填、幂等/冲突、失败整体回滚通过 |
+| 大项目配额 | 单文件 4 MiB、总文本 128 MiB、50000 文件、256 MiB JSON；旧上限以上的 10005 文件、总量及超过 20 MiB 请求回归通过 |
+| 源码续页 | 长单行、中文/emoji、引号/反斜杠逐字拼接一致；符号读取不越过定义，不跳过或重复内容 |
+| 有界索引 | 每状态解析/物化负载各最多 32 MiB、最多 100000 符号＋关系；超限显式 partial，源码仍可读 |
+| HTTP 演示 | passed，发现十五工具，完整/增量、幂等重试、崩溃恢复、源码隔离和敏感文件排除 |
+| 持续 stdio 演示 | passed，热更新、停机编辑重启恢复、两份保留、过期拒绝及无数字 MCP 版本参数/结果 |
+| Skill | 本地 SKILL.md 官方校验通过；按问题选工具，保留 allow_implicit_invocation=true，不代表账号内旧 Skill 已更新 |
+| 原生开发构建 | Swift 编译与 deep/strict ad-hoc 签名通过；CoLink / 0.4.2、LSUIElement=true，原 bundle ID 保持 |
+| 安装与网页 | 未覆盖安装版、未做新工具网页验收；开发 app 引用项目 uv/依赖，不是自包含 DMG/ZIP，不宣称已发布 |
+
+### 小改保留与合成性能测量
+
+约 100 KiB Python 文件连续小改 300 次后，源码状态、索引状态和解析缓存各 2 条；
+源码正文 204782 bytes，SQLite 本体 434176 bytes（424 KiB）。除正文外还包含结构
+索引、清单、元数据、页和空闲页等，不是 300 份副本，也不构成任意项目的固定体积。
+数据库行与 WAL 的实际占用随项目大小/读事务变化，测试的上限不等于物理目录硬上限。
+
+用本机数据库构造 102 / 1002 个很小的 Python＋Java 源文件，每类查询 30 次，
+每场景小改 10 次；不调用网页、模型或实际业务。以下为本轮合成测量，不推广为
+任意仓库的性能保证，源码样本远小于实际大型项目。
+
+| 测量 | 102 文件 | 1002 文件 |
+| --- | --- | --- |
+| 首次源码＋索引提交 | 41.917 ms | 328.114 ms |
+| 精确符号查询，中位数 | 0.393 ms | 0.356 ms |
+| 原文本搜索，中位数 | 0.369 ms | 0.966 ms |
+| 反向文件图查询，中位数 | 0.948 ms | 5.810 ms |
+| 单文件小改提交，中位数 | 21.201 ms | 235.651 ms |
+| 最后更新解析 / 复用文件 | 1 / 101 | 1 / 1001 |
+| 最后更新重解 / 复用关系文件 | 1 / 101 | 1 / 1001 |
+| 保留索引状态数 | 2 | 2 |
+| 最终 SQLite 本体 | 2985984 bytes | 28344320 bytes |
+
+小仓库符号查询没有比文本搜索更快；1002 文件场景的精确查询更快，但首次解析、
+索引空间和提交仍增加成本。SQLite 索引/行等开销可明显大于这些很短的合成源码；
+不将解析复用说成整次更新严格 O(变更文件)。测量进程峰值 RSS 为 70434816 bytes，
+不是已安装菜单栏应用的内存测试，也没有端到端模型响应/生产吞吐结论。
+
+### 留存与早期失败
+
+- 最终全量：`.artifacts/test-runs/colink-verified.N3riCn/`。
+- 定向补充：`.artifacts/test-runs/colink-extra.SR7B0K/`。
+- 先前回归：`.artifacts/test-runs/colink-final.KNWbAE/`、`colink-full.z5gp00/`、
+  `colink-intelligence.LNIFVu/`、`colink-intelligence-fix.PoAtjb/`。
+- HTTP：`.artifacts/validation/colink-0.4.2/http/20261005T150002Z-7960d79d/`。
+- stdio：`.artifacts/validation/colink-0.4.2/stdio/20261005T150002Z-3469e390/`。
+- 合成基准：`.artifacts/benchmarks/colink-intelligence-0nr3un_h/report.json`。
+- 原生开发 app：`.artifacts/builds/colink-0.4.2-read-development/Colink.app`。
+
+早期用例暴露相对导入匹配、符号/模块默认混选、SDK 结果类型和旧工具计数/测试字段
+问题，修正后重跑；最终保守性复核又补了 receiver 遮蔽、条件重导出、重载和自身导入
+循环回归。失败/中间目录全部保留，不改个人配置、凭据、数据库或真实项目源码。
+这些结果不是完整安全认证、动态类型/调用全覆盖或 ChatGPT 新工具在线验证。
+
 ## 0.4.1 · 网页验收与开源预览发布
 
 日期：2026-10-05（Asia/Shanghai）。早期本地锚点验证后，用户解锁并明确授权仅用

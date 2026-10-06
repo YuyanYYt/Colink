@@ -734,6 +734,122 @@ def test_native_builder_wrapper_uses_public_interface_and_generic_chat_url(tmp_p
     ]
 
 
+def test_live_runtime_configuration_is_generic_unless_explicitly_private(tmp_path):
+    generic = PACKAGER.runtime_configuration(tmp_path, "live", False)
+    assert generic == {**PACKAGER.RUNTIME, "sourceMode": "live"}
+    assert str(tmp_path) not in json.dumps(generic)
+    private = PACKAGER.runtime_configuration(tmp_path, "live", True)
+    assert private["runtimeWorkspace"] == str(tmp_path.resolve())
+    assert private["sampleRoot"] == str(tmp_path.resolve() / "examples/sample_project")
+    assert private["python"] == PACKAGER.RUNTIME["python"]
+    assert "sourceMode" not in PACKAGER.RUNTIME and "runtimeWorkspace" not in PACKAGER.RUNTIME
+
+
+def test_private_acceptance_runtime_can_isolate_state_without_changing_sample(tmp_path):
+    state = tmp_path / "private-state"
+    state.mkdir(mode=0o700)
+    private = PACKAGER.runtime_configuration(tmp_path, "live", True, state)
+    assert private["runtimeWorkspace"] == str(state)
+    assert private["sampleRoot"] == str(tmp_path / "examples/sample_project")
+    assert "runtimeWorkspace" not in PACKAGER.RUNTIME
+
+
+@pytest.mark.parametrize("kind", ["public", "outside", "symlink", "shared", "missing"])
+def test_acceptance_runtime_override_rejects_invalid_boundaries(tmp_path, kind):
+    workspace = tmp_path / "source"
+    workspace.mkdir()
+    state = workspace / "private-state"
+    if kind == "outside":
+        state = tmp_path / "outside"
+        state.mkdir(mode=0o700)
+    elif kind == "symlink":
+        real = workspace / "real"
+        real.mkdir(mode=0o700)
+        state.symlink_to(real, target_is_directory=True)
+    elif kind != "missing":
+        state.mkdir(mode=0o755 if kind == "shared" else 0o700)
+    with pytest.raises(PACKAGER.PackageError):
+        PACKAGER.runtime_configuration(workspace, "live", kind != "public", state)
+
+
+@pytest.mark.parametrize("mode,portable", [("unknown", False), ("mirror", True)])
+def test_invalid_runtime_mode_is_rejected_before_creating_resources(tmp_path, mode, portable):
+    resources = tmp_path / "not-created"
+    with pytest.raises(PACKAGER.PackageError):
+        PACKAGER.bundle_resources(
+            tmp_path,
+            resources,
+            tmp_path,
+            tmp_path,
+            tmp_path,
+            [],
+            source_mode=mode,
+            portable_runtime=portable,
+        )
+    assert not resources.exists()
+
+
+def test_private_package_rejects_output_outside_workspace_before_build(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    output = tmp_path / "outside"
+    monkeypatch.setattr(PACKAGER, "native_build", lambda *args: pytest.fail("must not build"))
+    with pytest.raises(PACKAGER.PackageError, match="within the workspace"):
+        PACKAGER.package(
+            workspace, output, "node", "sharp", source_mode="live", portable_runtime=True
+        )
+    assert not output.exists()
+
+
+def test_live_native_builder_propagates_mode_without_changing_bundle_identity(
+    tmp_path, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(
+        PACKAGER.runpy,
+        "run_path",
+        lambda _: {"build": lambda *args, **kwargs: calls.append(kwargs) or args[1]},
+    )
+    app = tmp_path / "Colink.app"
+    PACKAGER.native_build(
+        tmp_path,
+        app,
+        "node",
+        "sharp",
+        tmp_path / "client",
+        "local.codeconnect.menubar",
+        source_mode="live",
+    )
+    assert calls[0]["source_mode"] == "live"
+    assert calls[0]["bundle_id"] == "local.codeconnect.menubar"
+
+
+def test_relocation_compares_complete_prerelease_version(tmp_path, monkeypatch):
+    app = tmp_path / "image-root/Colink.app"
+    write(app / "Contents/Resources/python/bin/python3.11", MACHO)
+    write(
+        app / "Contents/Info.plist",
+        plistlib.dumps(
+            {
+                "CFBundleShortVersionString": "0.4.4",
+                "CoLinkVersion": "0.4.4a1",
+            }
+        ),
+    )
+    commands = fake_tools(monkeypatch)
+    original = PACKAGER.run_tool
+
+    def run(args, **kwargs):
+        if args[1:] == ["-m", "code_context", "--version"]:
+            commands.append((args, kwargs))
+            return "0.4.4a1"
+        return original(args, **kwargs)
+
+    monkeypatch.setattr(PACKAGER, "run_tool", run)
+    PACKAGER.verify_relocation(app, tmp_path)
+    assert app.exists()
+
+
 def test_tool_failure_does_not_echo_subprocess_output_or_secrets(monkeypatch):
     def fail(*args, **kwargs):
         raise subprocess.CalledProcessError(

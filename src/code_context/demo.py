@@ -199,7 +199,10 @@ def run_local_demo(output_dir: Path) -> dict:
             async with ClientSession(read, write, read_timeout_seconds=10) as session:
                 await session.initialize()
                 tools = (await session.list_tools()).tools
-                assert len(tools) == 6 and all(t.annotations.read_only_hint for t in tools)
+                from code_context.server import READ_TOOL_NAMES
+
+                assert {t.name for t in tools} == READ_TOOL_NAMES
+                assert all(t.annotations.read_only_hint for t in tools)
                 first = await read_version(session, 1)
                 overview = await session.call_tool("repo_overview", {"project_id": "sample"})
                 assert [f["path"] for f in overview.structured_content["files"]] == ["main.py"]

@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
-  <title id="title">Colink</title>
+  <title id="title">CoLink</title>
   <desc id="desc">A centrally symmetric connected link with evenly spaced code brackets.</desc>
   <defs>
     <radialGradient id="tile" cx="128" cy="128" r="174" gradientUnits="userSpaceOnUse">

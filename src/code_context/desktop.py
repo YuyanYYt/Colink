@@ -1,4 +1,4 @@
-"""Local lifecycle support for Colink. No model calls or remote write tools.
+"""Local lifecycle support for CoLink. No model calls or remote write tools.
 
 The native app owns a pipe to this supervisor. A stop request, pipe EOF, signal,
 or unexpected client exit shuts down the entire owned process group. Merely
@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -29,9 +30,12 @@ class DesktopBinding:
     data: Path
     profile: Path
     tunnel_id: str
+    mode: str = "mirror"
 
 
-def desktop_binding(workspace: Path, root: Path) -> DesktopBinding:
+def desktop_binding(workspace: Path, root: Path, mode="mirror") -> DesktopBinding:
+    if mode not in {"mirror", "live"}:
+        raise SyncError("unsupported desktop source mode")
     workspace = workspace.expanduser().resolve()
     baseline = workspace / ".code-context/tunnel/profile.yaml"
     config, original_root, project, data = load_profile(baseline, verify_source=False)
@@ -44,6 +48,17 @@ def desktop_binding(workspace: Path, root: Path) -> DesktopBinding:
     }:
         raise SyncError("select a specific code project, not a home or system directory")
     tunnel_id = config["control_plane"]["tunnel_id"]
+    if mode == "live":
+        identity = hashlib.sha256(str(selected).encode()).hexdigest()
+        directory = workspace / ".code-context/desktop/workspaces" / identity
+        return DesktopBinding(
+            selected,
+            "workspace-" + identity[:16],
+            directory / "live-v1",
+            directory / "tunnel/profile.yaml",
+            tunnel_id,
+            "live",
+        )
     if selected == original_root:
         return DesktopBinding(selected, project, data, baseline, tunnel_id)
     identity = hashlib.sha256(str(selected).encode()).hexdigest()
@@ -74,6 +89,9 @@ def _profiles(workspace: Path) -> list[Path]:
     directory = workspace / ".code-context/desktop/sources"
     if directory.exists():
         profiles.extend(directory.glob("*/tunnel/profile.yaml"))
+    live_directory = workspace / ".code-context/desktop/workspaces"
+    if live_directory.exists():
+        profiles.extend(live_directory.glob("*/tunnel/profile.yaml"))
     if len(profiles) > 128:
         raise SyncError("too many saved desktop sources; review them before creating more")
     return profiles
@@ -83,15 +101,18 @@ def _running_profile(workspace: Path) -> Path | None:
     from code_context.local import read_local_mirror_status
 
     for path in _profiles(workspace):
-        _, _, _, data = load_profile(path, verify_source=False)
-        if read_local_mirror_status(data)["running"]:
+        profile, _, _, data = load_profile(path, verify_source=False)
+        mode = shlex.split(profile["mcp"]["commands"][0]["command"])[3]
+        if (mode == "workspace" and _lock_is_held(data / "runtime.lock")) or (
+            mode == "local" and read_local_mirror_status(data)["running"]
+        ):
             return path
     return None
 
 
-def desktop_status(workspace: Path, root: Path) -> dict:
+def desktop_status(workspace: Path, root: Path, mode="mirror") -> dict:
     workspace = workspace.expanduser().resolve()
-    binding = desktop_binding(workspace, root)
+    binding = desktop_binding(workspace, root, mode)
     directory = workspace / ".code-context/desktop"
     supervised = _lock_is_held(directory / "connection.lock")
     runtime = {}
@@ -103,7 +124,12 @@ def desktop_status(workspace: Path, root: Path) -> dict:
             runtime = {}
     running_profile = _running_profile(workspace)
     selected_status = tunnel_status(binding.profile) if binding.profile.exists() else {}
-    selected_active = bool(selected_status.get("local_mirror", {}).get("running"))
+    local = (
+        selected_status.get("workspace_status") or {}
+        if mode == "live"
+        else selected_status.get("local_mirror", {})
+    )
+    selected_active = bool(local.get("running"))
     return {
         "selected_root": str(binding.root),
         "project_id": binding.project,
@@ -115,13 +141,13 @@ def desktop_status(workspace: Path, root: Path) -> dict:
         "active_elsewhere": running_profile is not None and running_profile != binding.profile,
         "running": selected_active,
         "ready": bool(
-            selected_status.get("ready")
-            and selected_active
-            and selected_status.get("local_mirror", {}).get("status") == "ready"
+            selected_status.get("ready") and selected_active and local.get("status") == "ready"
         ),
-        "revision": selected_status.get("local_mirror", {}).get("revision", 0),
-        "tracked_files": selected_status.get("local_mirror", {}).get("tracked_files", 0),
-        "mirror_status": selected_status.get("local_mirror", {}).get("status", "not_running"),
+        "revision": local.get("revision", 0),
+        "tracked_files": local.get("tracked_files", 0),
+        "mirror_status": local.get("status", "not_running"),
+        "source_mode": mode,
+        "workspace_status": local if mode == "live" else None,
         "phase": runtime.get("phase", "stopped") if supervised else "stopped",
         "auto_start": False,
         "chatgpt_web_verified": False,
@@ -149,6 +175,17 @@ def _group_alive(group: int) -> bool:
 
 
 def _stop_owned_group(child: subprocess.Popen) -> None:
+    try:
+        _stop_owned_group_checked(child)
+    except OSError:
+        # A permission/transient OS failure is not proof that the tree stopped.
+        # Preserve a stop_failed lifecycle record instead of leaving "stopping".
+        raise SyncError(
+            "owned connection shutdown could not be verified; do not start another"
+        ) from None
+
+
+def _stop_owned_group_checked(child: subprocess.Popen) -> None:
     # The group was created by this supervisor with start_new_session=True.
     # Never signal a PID found in a status file or an unrelated external client.
     group = child.pid
@@ -175,9 +212,9 @@ def _stop_owned_group(child: subprocess.Popen) -> None:
         raise SyncError("owned connection still has live descendants; do not start another")
 
 
-def run_desktop(workspace: Path, root: Path, client: str, app_pid: int = 0) -> int:
+def run_desktop(workspace: Path, root: Path, client: str, app_pid: int = 0, mode="mirror") -> int:
     workspace = workspace.expanduser().resolve()
-    binding = desktop_binding(workspace, root)
+    binding = desktop_binding(workspace, root, mode)
     directory = workspace / ".code-context/desktop"
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock = (directory / "connection.lock").open("a")
@@ -185,21 +222,35 @@ def run_desktop(workspace: Path, root: Path, client: str, app_pid: int = 0) -> i
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise SyncError("Colink already owns a connection") from exc
+            raise SyncError("CoLink already owns a connection") from exc
         if _running_profile(workspace) is not None:
             raise SyncError("an external connection is running; stop it in its owning application")
+        if mode == "live":
+            from code_context.workspace import initialize_workspace
+
+            if not (binding.data / "registry" / "projects.json").exists():
+                initialize_workspace(binding.root, binding.data, binding.root.name)
         if not binding.profile.exists():
             prepare_profile(
-                binding.root, binding.project, binding.data, binding.tunnel_id, binding.profile
+                binding.root,
+                binding.project,
+                binding.data,
+                binding.tunnel_id,
+                binding.profile,
+                mode="workspace" if mode == "live" else "local",
             )
         else:
-            _, saved_root, saved_project, saved_data = load_profile(binding.profile)
+            saved_profile, saved_root, saved_project, saved_data = load_profile(binding.profile)
             if (saved_root, saved_project, saved_data) != (
                 binding.root,
                 binding.project,
                 binding.data,
             ):
                 raise SyncError("saved connection does not match the selected folder")
+            if shlex.split(saved_profile["mcp"]["commands"][0]["command"])[3] != (
+                "workspace" if mode == "live" else "local"
+            ):
+                raise SyncError("saved connection has a different source mode")
         stopped = threading.Event()
 
         def on_signal(*_):
@@ -247,6 +298,14 @@ def run_desktop(workspace: Path, root: Path, client: str, app_pid: int = 0) -> i
                     break
         finally:
             _record_runtime(directory, **record, phase="stopping")
+            if mode == "live":
+                from code_context.local_control import control_request
+                from code_context.source_access import SourceError
+
+                try:
+                    control_request(binding.data, "disable_write", {})
+                except SourceError:
+                    pass  # Child shutdown also revokes per-connection authorization.
             try:
                 if child is not None:
                     _stop_owned_group(child)
@@ -261,3 +320,92 @@ def run_desktop(workspace: Path, root: Path, client: str, app_pid: int = 0) -> i
         return exit_code
     finally:
         lock.close()
+
+
+def desktop_control(workspace: Path, root: Path, action: str, parameters: dict):
+    """Forward only native-local actions; never infer or expand write projects.
+
+    Write authorization requires an explicit nonempty project list and an exact
+    backend acknowledgement. An uncertain enable is revoked best-effort, not
+    presented as success. Recovery/rollback remain workspace-owned local actions.
+    """
+    from code_context.local_control import control_request
+    from code_context.source_access import SourceError
+
+    keys = {
+        "discover": set(),
+        "set_enabled": {"project_id", "enabled"},
+        "register": {"relative_root", "display_name"},
+        "enable_write": {"project_ids"},
+        "disable_write": set(),
+        "recover_write": {"project_id"},
+        "rollback_write_task": {"project_id", "task_id", "request_id"},
+    }
+    if (
+        not isinstance(action, str)
+        or action not in keys
+        or not isinstance(parameters, dict)
+        or set(parameters) != keys[action]
+    ):
+        raise SyncError("unsupported desktop action or parameters")
+
+    def valid_id(value):
+        return isinstance(value, str) and 0 < len(value) <= 256 and "\x00" not in value
+
+    if action == "enable_write":
+        projects = parameters["project_ids"]
+        if (
+            not isinstance(projects, list)
+            or not 1 <= len(projects) <= 64
+            or not all(valid_id(project) for project in projects)
+            or len(set(projects)) != len(projects)
+        ):
+            raise SyncError("select explicit current project IDs before enabling writes")
+    if any(
+        key in parameters and not valid_id(parameters[key])
+        for key in ("project_id", "task_id", "request_id")
+    ):
+        raise SyncError("desktop action requires valid project and task IDs")
+    if action == "set_enabled" and not isinstance(parameters["enabled"], bool):
+        raise SyncError("desktop project selection requires a boolean")
+
+    binding = desktop_binding(workspace, root, "live")
+    try:
+        result = control_request(binding.data, action, parameters)
+        if action == "enable_write" and (
+            not isinstance(result, dict)
+            or result.get("write_enabled") is not True
+            or not isinstance(result.get("write_projects"), list)
+            or not all(valid_id(project) for project in result["write_projects"])
+            or len(result["write_projects"]) != len(projects)
+            or set(result["write_projects"]) != set(projects)
+        ):
+            raise SyncError("backend did not confirm the selected write projects")
+        if action == "disable_write" and (
+            not isinstance(result, dict)
+            or result.get("write_enabled") is not False
+            or result.get("write_projects") != []
+        ):
+            raise SyncError("backend did not confirm that writes are disabled")
+        return result
+    except (SourceError, SyncError):
+        if action == "enable_write":
+            try:
+                control_request(binding.data, "disable_write", {})
+            except SourceError:
+                pass
+        raise
+
+
+def desktop_select(workspace: Path, root: Path):
+    from code_context.local_control import private_directory, write_state
+
+    binding = desktop_binding(workspace, root, "live")
+    if (
+        _lock_is_held(workspace / ".code-context/desktop/connection.lock")
+        or _running_profile(workspace.expanduser().resolve()) is not None
+    ):
+        raise SyncError("disable writes and stop the connection before selecting another workspace")
+    directory = private_directory(workspace / ".code-context/desktop")
+    write_state(directory, "selection-live.json", {"selected_root": str(binding.root)})
+    return {"selected_root": str(binding.root), "connection_started": False}

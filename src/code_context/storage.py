@@ -8,8 +8,11 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from code_context.intelligence_index import SCHEMA, backfill_indexes, build_index, prune_index
+from code_context.intelligence_queries import QUERIES, bound_result, index_status
 from code_context.models import SyncBatch, validate_project
 from code_context.policy import MAX_FILES, MAX_TOTAL_BYTES, validate_path
+from code_context.source_page import source_page
 
 
 class MirrorError(ValueError):
@@ -65,6 +68,9 @@ class MirrorStore:
                 );
                 """
             )
+            # Optional derived tables leave the source schema/protocol at version 2/1.
+            # Cascades also allow the older read-only binary to prune retained states.
+            db.executescript(SCHEMA)
             db.execute("BEGIN IMMEDIATE")
             columns = {r["name"] for r in db.execute("PRAGMA table_info(snapshots)")}
             if "snapshot" not in columns:
@@ -84,6 +90,7 @@ class MirrorStore:
                 "SELECT 1 FROM maintenance WHERE key='compaction_pending'"
             ).fetchone()
             db.execute("PRAGMA user_version=2")
+            backfill_indexes(db)
         if compact_pending:
             # One-time migration: actually shrink old databases, not just their row count.
             self.compact()
@@ -146,6 +153,43 @@ class MirrorStore:
         """Resolve current/previous or an opaque handle; never fall back from an expired handle."""
         with self.read_connection() as db:
             return self._resolve_snapshot(db, project_id, snapshot)
+
+    def code_query(
+        self,
+        project_id: str,
+        snapshot: str | None,
+        operation: str,
+        *,
+        max_chars: int = 20_000,
+        **parameters,
+    ) -> dict:
+        """Only SELECTs; resolve context and all derived/source rows in one transaction."""
+        if operation not in QUERIES:
+            raise MirrorError("unknown code-intelligence query")
+        try:
+            with self.read_connection() as db:
+                revision, handle = self._resolve_snapshot(db, project_id, snapshot)
+                status = index_status(db, project_id, revision)
+                if operation == "read_symbol":
+                    parameters["text_budget"] = max(1000, max_chars - 2000)
+                    parameters["response_budget"] = max_chars - 500
+                result = QUERIES[operation](db, project_id, revision, **parameters)
+                return bound_result(
+                    {
+                        **result,
+                        "project_id": project_id,
+                        "snapshot": handle,
+                        "index_partial": status["partial"],
+                    },
+                    max_chars,
+                )
+        except ValueError as exc:
+            raise MirrorError(str(exc)) from None
+
+    def code_index_status(self, project_id: str, revision: int) -> dict:
+        with self.read_connection() as db:
+            self._revision(db, project_id, revision)
+            return index_status(db, project_id, revision)
 
     @staticmethod
     def _resolve_snapshot(
@@ -251,7 +295,7 @@ class MirrorStore:
                     )
                     files[change.path] = change.sha256
             if len(files) > MAX_FILES:
-                raise MirrorError("snapshot exceeds 10000 files")
+                raise MirrorError(f"snapshot exceeds {MAX_FILES} files")
             # Bound the stored view even when many individual deltas arrive.
             sizes = {
                 r["sha256"]: r["size"]
@@ -267,7 +311,7 @@ class MirrorStore:
                 if change.op == "upsert"
             )
             if sum(sizes[sha] for sha in files.values()) > MAX_TOTAL_BYTES:
-                raise MirrorError("snapshot exceeds 8 MiB of source text")
+                raise MirrorError(f"snapshot exceeds {MAX_TOTAL_BYTES} bytes of source text")
             revision = current + 1
             db.execute(
                 "INSERT INTO snapshots(project_id, revision, created_at, snapshot) "
@@ -287,7 +331,9 @@ class MirrorStore:
                 "INSERT INTO requests VALUES(?, ?, ?, ?)",
                 (project_id, batch.request_id, payload_hash, revision),
             )
+            build_index(db, project_id, revision)
             self._prune_history(db)
+            prune_index(db)
             # Small incremental reclamation plus page reuse bounds disk growth without
             # a full VACUUM on every edit. Long readers can defer WAL checkpointing.
             db.execute("PRAGMA incremental_vacuum(64)").fetchall()
@@ -329,11 +375,31 @@ class MirrorStore:
     ) -> dict:
         if offset < 0 or not 1 <= limit <= 1000:
             raise MirrorError("offset must be nonnegative and limit must be 1-1000")
-        result = self.manifest(project_id, revision)
-        total = result["file_count"]
-        result["files"] = result["files"][offset : offset + limit]
-        result.update(offset=offset, has_more=offset + limit < total)
-        return result
+        with self.read_connection() as db:
+            revision = self._revision(db, project_id, revision)
+            total = db.execute(
+                "SELECT COUNT(*) FROM files WHERE project_id=? AND revision=?",
+                (project_id, revision),
+            ).fetchone()[0]
+            rows = db.execute(
+                "SELECT f.path, f.sha256, b.size FROM files f JOIN blobs b USING(sha256) "
+                "WHERE f.project_id=? AND f.revision=? ORDER BY f.path LIMIT ? OFFSET ?",
+                (project_id, revision, limit, offset),
+            ).fetchall()
+            created = db.execute(
+                "SELECT created_at FROM snapshots WHERE project_id=? AND revision=?",
+                (project_id, revision),
+            ).fetchone()[0]
+            return {
+                "project_id": project_id,
+                "revision": revision,
+                "created_at": created,
+                "files": [dict(row) for row in rows],
+                "file_count": total,
+                "offset": offset,
+                "has_more": offset + len(rows) < total,
+                "code_intelligence": index_status(db, project_id, revision),
+            }
 
     def read_file(
         self,
@@ -342,8 +408,12 @@ class MirrorStore:
         revision: int | None = None,
         start_line: int = 1,
         end_line: int | None = None,
+        max_chars: int = 20_000,
+        char_offset: int = 0,
     ) -> dict:
         validate_path(path)
+        if not 1000 <= max_chars <= 50_000:
+            raise MirrorError("max_chars must be between 1000 and 50000")
         if start_line < 1 or (end_line is not None and end_line < start_line):
             raise MirrorError("invalid line range")
         if end_line is None:
@@ -359,19 +429,17 @@ class MirrorStore:
             ).fetchone()
             if row is None:
                 raise MirrorError("file not found in this snapshot")
-        lines = row["content"].splitlines(keepends=True)
+        try:
+            page = source_page(row["content"], start_line, end_line, max_chars, char_offset)
+        except ValueError as exc:
+            raise MirrorError(str(exc)) from None
         return {
             "project_id": project_id,
             "revision": revision,
             "path": path,
             "sha256": row["sha256"],
             "size": row["size"],
-            "start_line": start_line,
-            "end_line": min(end_line, len(lines)),
-            "total_lines": len(lines),
-            "has_more": end_line < len(lines),
-            "next_start_line": end_line + 1 if end_line < len(lines) else None,
-            "content": "".join(lines[start_line - 1 : end_line]),
+            **page,
         }
 
     def search_code(
