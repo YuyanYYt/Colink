@@ -130,6 +130,7 @@ struct WorkspaceWriteTask: Equatable {
         switch state {
         case "active": return "任务进行中"
         case "completed": return "最近任务已完成"
+        case "rolled_back": return "任务已回退"
         case "rolling_back": return "任务回退待恢复"
         case "recovery_required": return "任务需要恢复"
         default: return "任务待确认"

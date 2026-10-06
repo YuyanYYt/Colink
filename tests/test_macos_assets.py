@@ -121,6 +121,17 @@ def test_colink_branding_preserves_the_connection_and_preferences_identity():
     assert 'string(forKey: "SelectedFolder")' in runtime
 
 
+def test_rolled_back_task_has_a_final_native_status_without_another_undo_action():
+    runtime = (WORKSPACE / "macos/CodeConnect/Runtime.swift").read_text()
+    assert 'case "rolled_back": return "任务已回退"' in runtime
+    rollback = runtime.split("var rollbackTask: WorkspaceWriteTask? {")[1].split(
+        "var canRollbackWrite: Bool {"
+    )[0]
+    assert 'task.state == "active"' in rollback
+    assert 'task.state == "completed"' in rollback
+    assert '"rolled_back"' not in rollback
+
+
 def test_complete_mark_is_center_symmetric_about_the_canvas_center():
     for name in ("logo.svg", "menubar.svg"):
         root, link = connection_path(name)

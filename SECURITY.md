@@ -1,9 +1,10 @@
 # Security and privacy
 
-Colink is a single-user, read-only code mirror and MCP server. It is not a
-system sandbox, a complete secret scanner or a shared multi-tenant service.
+CoLink's published distribution is a single-user, read-only code mirror and MCP
+server. It is not a system sandbox, a complete secret scanner or a shared
+multi-tenant service.
 
-This describes the published mirror distribution. The unreleased 0.5.0-alpha.2
+This describes the published mirror distribution. The unreleased 0.5.0-beta.1
 development branch also has live source reads and task-scoped writes, subject to
 explicit local project grants (default off every connection). The fifteen read
 tools retain read-only annotations; write/rollback tools do not pretend to be
@@ -16,18 +17,21 @@ content/attribute checks and retention. Conflicts or uncertain partial states
 stop writes and require authenticated local recovery; they are not automatically
 discarded. Full arbitrary external-edit history and a multi-file atomic filesystem
 transaction are not promised. Unknown recovery objects are never auto-adopted.
-Native-local control integration is locally tested. Actual desktop interaction,
-web integration and a production security audit remain unverified.
+Native-local controls, the fifteen read tools, scoped web writes, task Diff,
+whole-task undo, stale hashes and external-file rollback protection have actual
+sample-only web/UI evidence in docs/WEB_WRITE_VALIDATION.md. Restart/quit UI,
+fresh-chat Skill routing and a production security audit remain unverified.
 
 - Only start sharing after selecting a specific project and confirming access.
-- MCP tools cannot execute commands or write to source directories.
+- Mirror MCP tools cannot write to sources. Live write tools can modify only
+  locally granted task paths; neither mode can execute commands.
 - Private tunnel traffic is initiated outbound. Do not expose local management
   endpoints or disable firewall/security controls to complete installation.
 - Query responses containing source code are sent to the selected OpenAI
   product. Read-only does not mean private data never leaves the Mac.
 - Mandatory filters exclude known credentials/files, binaries and symlinks;
   this is defense in depth, not a guarantee against every embedded secret.
-- Each project retains current and immediately previous code states. Changing
+- Each mirror project retains current and immediately previous code states. Changing
   ignore rules does not instantly remove the previous state or revoke data
   already returned to a client.
 - Runtime keys live in user-owned mode-600 files, not in source, Git, application

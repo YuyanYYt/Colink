@@ -1,5 +1,11 @@
 # Colink · macOS 菜单栏应用
 
+2026-10-06：下方为已公开镜像版的安装/运行说明。未发布 0.5.0-beta.1 新模式默认
+原文件直读，增加「项目管理」「允许修改代码」和整项回退；关闭/重启不继承写入授权。
+新用法见 [LIVE_USAGE.md](LIVE_USAGE.md)，实际与待验项见
+[WEB_WRITE_VALIDATION.md](WEB_WRITE_VALIDATION.md)。仅显式 `--source-mode live`
+构建的新包使用直读；默认旧构建参数仍兼容镜像。不要给旧版套新语义。
+
 ## 两种构建，不要混用
 
 - **发行安装包**：GitHub Releases 的 DMG/ZIP 是自包含 Apple Silicon 应用，内含
