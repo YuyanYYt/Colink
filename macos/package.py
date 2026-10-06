@@ -317,8 +317,9 @@ def bundle_resources(
     *,
     source_mode: str = "mirror",
     portable_runtime: bool = False,
+    runtime_workspace: Path | None = None,
 ) -> None:
-    runtime = runtime_configuration(workspace, source_mode, portable_runtime)
+    runtime = runtime_configuration(workspace, source_mode, portable_runtime, runtime_workspace)
     copy_python(python_home, resources / "python")
     copy_vendor(distributions, site_packages, resources / "vendor")
     copy_tree(
@@ -338,18 +339,37 @@ def bundle_resources(
     (resources / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n")
 
 
-def runtime_configuration(workspace: Path, source_mode: str, portable_runtime: bool) -> dict:
+def runtime_configuration(
+    workspace: Path, source_mode: str, portable_runtime: bool, runtime_workspace: Path | None = None
+) -> dict:
     if source_mode not in {"mirror", "live"}:
         raise PackageError("Source mode must be mirror or live.")
     if portable_runtime and source_mode != "live":
         raise PackageError("The private workspace-contained runtime requires live mode.")
+    if runtime_workspace is not None and not portable_runtime:
+        raise PackageError("An explicit runtime workspace requires private acceptance mode.")
     runtime = dict(RUNTIME)
     if source_mode == "live":
         runtime["sourceMode"] = "live"
     if portable_runtime:
         # Private acceptance builds only. Normal public packages never contain
         # this path or create runtime data in the developer's repository.
-        runtime["runtimeWorkspace"] = str(workspace.resolve())
+        state = workspace.resolve()
+        if runtime_workspace is not None:
+            from code_context.scanner import ScanError, Scanner
+
+            try:
+                state = Scanner(runtime_workspace).root
+            except (OSError, ValueError, ScanError):
+                raise PackageError(
+                    "Acceptance runtime must be an existing real directory."
+                ) from None
+            if not state.is_relative_to(workspace.resolve()):
+                raise PackageError("Acceptance runtime must stay within the workspace.")
+            info = state.stat()
+            if info.st_uid != os.getuid() or info.st_mode & 0o077:
+                raise PackageError("Acceptance runtime must be a private owned directory.")
+        runtime["runtimeWorkspace"] = str(state)
         runtime["sampleRoot"] = str(workspace.resolve() / "examples/sample_project")
     return runtime
 
@@ -554,12 +574,13 @@ def package(
     bundle_id: str = "local.codeconnect.menubar",
     source_mode: str = "mirror",
     portable_runtime: bool = False,
+    runtime_workspace: Path | None = None,
 ) -> dict:
     workspace = workspace.resolve()
     output_dir = output_dir.absolute()
     if output_dir.exists() or output_dir.is_symlink():
         raise PackageError("Output already exists; choose a new --output-dir.")
-    runtime_configuration(workspace, source_mode, portable_runtime)
+    runtime_configuration(workspace, source_mode, portable_runtime, runtime_workspace)
     if portable_runtime and not output_dir.resolve().is_relative_to(workspace):
         raise PackageError("Private acceptance output must stay within the workspace.")
     if sys.platform != "darwin" or platform.machine() != "arm64" or sys.version_info[:2] != (3, 11):
@@ -587,6 +608,7 @@ def package(
         distributions,
         source_mode=source_mode,
         portable_runtime=portable_runtime,
+        **({"runtime_workspace": runtime_workspace} if runtime_workspace is not None else {}),
     )
     with (app / "Contents/Info.plist").open("rb") as stream:
         info = plistlib.load(stream)
@@ -680,6 +702,11 @@ def main() -> None:
         action="store_true",
         help="private workspace-contained acceptance only",
     )
+    parser.add_argument(
+        "--runtime-workspace",
+        type=Path,
+        help="existing private directory within the workspace; acceptance mode only",
+    )
     arguments = parser.parse_args()
     try:
         package(
@@ -693,6 +720,11 @@ def main() -> None:
             bundle_id=arguments.bundle_id,
             source_mode=arguments.source_mode,
             portable_runtime=arguments.portable_runtime,
+            **(
+                {"runtime_workspace": arguments.runtime_workspace}
+                if arguments.runtime_workspace is not None
+                else {}
+            ),
         )
     except PackageError as exc:
         parser.exit(1, f"{exc}\n")

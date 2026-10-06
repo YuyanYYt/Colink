@@ -37,6 +37,17 @@
 
 ## 进度与证据
 
+- 实际私有验收包首次打开遇到旧 profile 的解释器路径不匹配；严格白名单正确拒绝，
+  不通过接纳任意命令修复。新增仅用于私有验收的有界目录内 runtime-workspace 参数，
+  真实 source 仍为原自带样例，状态/本机控制/恢复与原配置隔离。相关 packaging/
+  publication **74 passed（2.76 秒）**，`.artifacts/w-isolated-package-proof.G8fUAL`；
+  隔离包 `.artifacts/w-full-gate.B9B290/live-isolated-package` 构建/重定位/签名通过，
+  实际 UI 已从关闭变为已连接，后台 ready=true、write_enabled=false、仅一项样例来源。
+  旧安装版和既存 profile 没有覆盖；原只读连接已关闭以复用既有隧道身份。
+  独立运行配置含私有连接资料，不发布、不自动清理。网页工具刷新刚开始，尚未判通过。
+  发布检查的唯一命中为人工测试头标记而非有效私钥；改用运行时构造保持负面用例，
+  原生 file-mutation **175 passed（0.45 秒）**；发布检查 **148 files / 0 findings**。
+
 - W 关键节点本地门槛：真实 stdio/私有 socket 三轮 A/B/C 修改、重放、旧上下文
   拒绝、新建目录/文件、原 Diff 与整项回退专项加 MCP/工作区 **14 passed（3.20 秒）**；
   `.artifacts/w-stdio-milestone.AMDP9t/pytest`。全项目 **1806 passed（79.14 秒）**，

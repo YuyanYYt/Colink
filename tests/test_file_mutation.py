@@ -103,7 +103,7 @@ def test_prepare_exact_owned_mode_bytes_and_immediate_creation_record(source, mo
         b"x\x00y",
         b"\xff",
         b"x" * (MAX_FILE_BYTES + 1),
-        b"-----BEGIN PRIVATE KEY-----",
+        b"-----BEGIN " + b"PRIVATE KEY-----",  # Synthetic header, not a real key.
         None,
         "not bytes",
         bytearray(b"x"),

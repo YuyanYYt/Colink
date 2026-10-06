@@ -745,6 +745,33 @@ def test_live_runtime_configuration_is_generic_unless_explicitly_private(tmp_pat
     assert "sourceMode" not in PACKAGER.RUNTIME and "runtimeWorkspace" not in PACKAGER.RUNTIME
 
 
+def test_private_acceptance_runtime_can_isolate_state_without_changing_sample(tmp_path):
+    state = tmp_path / "private-state"
+    state.mkdir(mode=0o700)
+    private = PACKAGER.runtime_configuration(tmp_path, "live", True, state)
+    assert private["runtimeWorkspace"] == str(state)
+    assert private["sampleRoot"] == str(tmp_path / "examples/sample_project")
+    assert "runtimeWorkspace" not in PACKAGER.RUNTIME
+
+
+@pytest.mark.parametrize("kind", ["public", "outside", "symlink", "shared", "missing"])
+def test_acceptance_runtime_override_rejects_invalid_boundaries(tmp_path, kind):
+    workspace = tmp_path / "source"
+    workspace.mkdir()
+    state = workspace / "private-state"
+    if kind == "outside":
+        state = tmp_path / "outside"
+        state.mkdir(mode=0o700)
+    elif kind == "symlink":
+        real = workspace / "real"
+        real.mkdir(mode=0o700)
+        state.symlink_to(real, target_is_directory=True)
+    elif kind != "missing":
+        state.mkdir(mode=0o755 if kind == "shared" else 0o700)
+    with pytest.raises(PACKAGER.PackageError):
+        PACKAGER.runtime_configuration(workspace, "live", kind != "public", state)
+
+
 @pytest.mark.parametrize("mode,portable", [("unknown", False), ("mirror", True)])
 def test_invalid_runtime_mode_is_rejected_before_creating_resources(tmp_path, mode, portable):
     resources = tmp_path / "not-created"
