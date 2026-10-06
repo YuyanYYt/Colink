@@ -62,7 +62,8 @@ def register_write_tools(mcp, coordinator, authorize):
     ) -> dict[str, Any]:
         """Precisely modify one declared UTF-8 source file after reading its current SHA256.
         edit is exactly one of: {kind:insert_lines,line:int,position:before|after,text:str,
-        expected_context:str}, {kind:replace_lines,start_line:int,end_line:int,old_text:str,new_text:str},
+        expected_context:str}, {kind:replace_lines,start_line:int,end_line:int,
+        old_text:str,new_text:str},
         {kind:replace_fragment,old_text:str,new_text:str}. Ranges are 1-based inclusive;
         fragments must match uniquely. The server verifies actual current content, durably
         saves the task origin before writing, and returns verified new SHA256. Reuse the same

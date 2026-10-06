@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "colink-mcp"
-version = "0.4.4a1"
-description = "CoLink: a small code mirror, local sync client, and read-only MCP server."
+version = "0.5.0a1"
+description = "CoLink: live code context, bounded task edits, and a compatible read-only mirror."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

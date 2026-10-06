@@ -1,5 +1,15 @@
 # CoLink · 架构与协议 v1
 
+2026-10-06 实施补充：下文主体保留**旧 mirror 兼容架构与协议**，不是新 live 的读取
+语义。开发分支 0.5.0-alpha.1 已引入 SourceAccess / LiveQueries / ProjectRegistry / 有界
+ReadContexts、单生产线程按需 LiveIndexService 和 WatchCoordinator。本机私有控制
+与网页 MCP 分离，WriteCoordinator / RecoveryStore 负责默认关闭项目授权、任务起点、
+先保存后提交、持久幂等、整项回退和冲突恢复；未完成操作时停止该项目正常查询发布。
+live 索引只存当前结构事实，读取直接核验原文件；`get_diff` 的 previous 参数表示
+保留任务起点，而非不可变旧源码快照，返回 task_origin 或 NO_TASK_BASELINE。
+旧 mirror 工具的历史语义不改，旧数据库不删除。当前本地/网页证据分别见
+[实施记录](IMPLEMENTATION_LOG.md)和[网页 SOP](WEB_ACCEPTANCE_SOP.md)，未完成真实网页验收。
+
 本文描述当前已实现的镜像架构。2026-10-06 记录的下一次重构为“先解耦，再原文件
 按需直读、多项目工作区与按需索引”，详见
 [LIVE_WORKSPACE_REFACTOR.md](LIVE_WORKSPACE_REFACTOR.md)；尚未实施，不能把目标图或

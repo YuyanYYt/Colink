@@ -3,6 +3,21 @@
 Colink is a single-user, read-only code mirror and MCP server. It is not a
 system sandbox, a complete secret scanner or a shared multi-tenant service.
 
+This describes the published mirror distribution. The unreleased 0.5.0-alpha.1
+development branch also has live source reads and task-scoped writes, subject to
+explicit local project grants (default off every connection). The fifteen read
+tools retain read-only annotations; write/rollback tools do not pretend to be
+read-only. The web client cannot enable permission, register a source, execute
+commands or force recovery. Client approvals are separate from local grants.
+
+Live mode retains no full-project source mirror. Recovery materials cover only
+edited task members and are separately protected by bounded quotas, provenance,
+content/attribute checks and retention. Conflicts or uncertain partial states
+stop writes and require authenticated local recovery; they are not automatically
+discarded. Full arbitrary external-edit history and a multi-file atomic filesystem
+transaction are not promised. Unknown recovery objects are never auto-adopted.
+Desktop/web integration and production security audit remain unverified.
+
 - Only start sharing after selecting a specific project and confirming access.
 - MCP tools cannot execute commands or write to source directories.
 - Private tunnel traffic is initiated outbound. Do not expose local management
