@@ -37,6 +37,19 @@
 
 ## 进度与证据
 
+- W 关键节点本地门槛：真实 stdio/私有 socket 三轮 A/B/C 修改、重放、旧上下文
+  拒绝、新建目录/文件、原 Diff 与整项回退专项加 MCP/工作区 **14 passed（3.20 秒）**；
+  `.artifacts/w-stdio-milestone.AMDP9t/pytest`。全项目 **1806 passed（79.14 秒）**，
+  保留一条既有上游弃用警告；Ruff check/format check 100 文件与旧 HTTP mirror
+  端到端 demo 通过，`.artifacts/w-full-gate.B9B290`。没有将本地协议称为网页通过。
+  最后一次 5000 定义文件组件基准 `.artifacts/live-benchmark.e3cd14` 检查通过，
+  warm 三次中位 837.921 ms、cold 2866.318 ms、修改后 1675.765 ms；约 3 MiB
+  文件两页各约 45～47 ms。测量不含完整 Runtime/桌面/隧道/模型，不保证任意企业项目。
+  0.5.0a2 私有自包含验收包/ZIP/DMG 已构建并通过签名、重定位与归档验证；
+  `.artifacts/w-full-gate.B9B290/live-package`。私有 runtime 明确绑定本工作目录，
+  不是可公开分发包。应用文件逻辑大小 135645026 字节，ZIP 54687893、DMG 70570004。
+  旧应用/锚点不覆盖；实际 GUI 和网页 gates 接着执行。
+
 - W 本机接入源码推进至 **0.5.0a2**：私有控制通道连接真实直读来源/有界恢复区，
   显式选择项目后授权、默认关闭、先撤销后切项目/退出、令牌/端点失效及重启不继承
   授权、持久恢复和整项回退按钮链路已接入。控制/Runtime/桌面转发与静态资产相关
