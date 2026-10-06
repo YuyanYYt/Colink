@@ -323,18 +323,89 @@ def run_desktop(workspace: Path, root: Path, client: str, app_pid: int = 0, mode
 
 
 def desktop_control(workspace: Path, root: Path, action: str, parameters: dict):
+    """Forward only native-local actions; never infer or expand write projects.
+
+    Write authorization requires an explicit nonempty project list and an exact
+    backend acknowledgement. An uncertain enable is revoked best-effort, not
+    presented as success. Recovery/rollback remain workspace-owned local actions.
+    """
     from code_context.local_control import control_request
+    from code_context.source_access import SourceError
+
+    keys = {
+        "discover": set(),
+        "set_enabled": {"project_id", "enabled"},
+        "register": {"relative_root", "display_name"},
+        "enable_write": {"project_ids"},
+        "disable_write": set(),
+        "recover_write": {"project_id"},
+        "rollback_write_task": {"project_id", "task_id", "request_id"},
+    }
+    if (
+        not isinstance(action, str)
+        or action not in keys
+        or not isinstance(parameters, dict)
+        or set(parameters) != keys[action]
+    ):
+        raise SyncError("unsupported desktop action or parameters")
+
+    def valid_id(value):
+        return isinstance(value, str) and 0 < len(value) <= 256 and "\x00" not in value
+
+    if action == "enable_write":
+        projects = parameters["project_ids"]
+        if (
+            not isinstance(projects, list)
+            or not 1 <= len(projects) <= 64
+            or not all(valid_id(project) for project in projects)
+            or len(set(projects)) != len(projects)
+        ):
+            raise SyncError("select explicit current project IDs before enabling writes")
+    if any(
+        key in parameters and not valid_id(parameters[key])
+        for key in ("project_id", "task_id", "request_id")
+    ):
+        raise SyncError("desktop action requires valid project and task IDs")
+    if action == "set_enabled" and not isinstance(parameters["enabled"], bool):
+        raise SyncError("desktop project selection requires a boolean")
 
     binding = desktop_binding(workspace, root, "live")
-    return control_request(binding.data, action, parameters)
+    try:
+        result = control_request(binding.data, action, parameters)
+        if action == "enable_write" and (
+            not isinstance(result, dict)
+            or result.get("write_enabled") is not True
+            or not isinstance(result.get("write_projects"), list)
+            or not all(valid_id(project) for project in result["write_projects"])
+            or len(result["write_projects"]) != len(projects)
+            or set(result["write_projects"]) != set(projects)
+        ):
+            raise SyncError("backend did not confirm the selected write projects")
+        if action == "disable_write" and (
+            not isinstance(result, dict)
+            or result.get("write_enabled") is not False
+            or result.get("write_projects") != []
+        ):
+            raise SyncError("backend did not confirm that writes are disabled")
+        return result
+    except (SourceError, SyncError):
+        if action == "enable_write":
+            try:
+                control_request(binding.data, "disable_write", {})
+            except SourceError:
+                pass
+        raise
 
 
 def desktop_select(workspace: Path, root: Path):
     from code_context.local_control import private_directory, write_state
 
     binding = desktop_binding(workspace, root, "live")
-    if _lock_is_held(workspace / ".code-context/desktop/connection.lock"):
-        raise SyncError("stop the owned connection before selecting a different workspace")
+    if (
+        _lock_is_held(workspace / ".code-context/desktop/connection.lock")
+        or _running_profile(workspace.expanduser().resolve()) is not None
+    ):
+        raise SyncError("disable writes and stop the connection before selecting another workspace")
     directory = private_directory(workspace / ".code-context/desktop")
     write_state(directory, "selection-live.json", {"selected_root": str(binding.root)})
     return {"selected_root": str(binding.root), "connection_started": False}

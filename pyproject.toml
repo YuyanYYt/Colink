@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "colink-mcp"
-version = "0.5.0a1"
+version = "0.5.0a2"
 description = "CoLink: live code context, bounded task edits, and a compatible read-only mirror."
 readme = "README.md"
 requires-python = ">=3.11"

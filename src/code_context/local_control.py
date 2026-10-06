@@ -1,14 +1,17 @@
 """Private local UI control plane, deliberately not registered as MCP tools."""
 
+import errno
 import json
 import os
 import secrets
 import socket
 import stat
+import sys
 import threading
+import time
 from pathlib import Path
 
-from code_context.scanner import Scanner, _identity
+from code_context.scanner import Scanner, _identity, _version
 from code_context.source_access import SourceAccess, SourceError
 
 MAX_CONTROL_BYTES = 65536
@@ -79,7 +82,7 @@ def write_state(directory: SourceAccess, name: str, payload: dict):
             raise SourceError("CONTROL_STATE_FAILED: private state was not committed") from None
 
 
-def read_state(directory: SourceAccess, name: str):
+def _read_state(directory: SourceAccess, name: str):
     if "/" in name or not name or name in {".", ".."}:
         raise SourceError("INVALID_CONTROL_STATE: invalid state name")
     try:
@@ -98,20 +101,36 @@ def read_state(directory: SourceAccess, name: str):
                 raw = stream.read(MAX_CONTROL_BYTES + 1)
                 if len(raw) > MAX_CONTROL_BYTES:
                     raise ValueError
+                after = os.fstat(stream.fileno())
+                named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                if _version(info) != _version(after) or _version(info) != _version(named):
+                    raise SourceError("CONTROL_STATE_CHANGED: restart local control")
                 result = json.loads(raw)
                 if not isinstance(result, dict):
                     raise ValueError
-                return result
+                return result, _version(info)
     except SourceError:
         raise
     except (OSError, ValueError, UnicodeError, RecursionError):
         raise SourceError("CONTROL_UNAVAILABLE: local control is not ready") from None
 
 
-def _receive(connection):
+def read_state(directory: SourceAccess, name: str):
+    return _read_state(directory, name)[0]
+
+
+def _receive(connection, *, stop=None, timeout=5):
     raw = bytearray()
+    deadline = time.monotonic() + timeout if stop is not None else None
     while len(raw) <= MAX_CONTROL_BYTES:
-        chunk = connection.recv(min(4096, MAX_CONTROL_BYTES + 1 - len(raw)))
+        if stop is not None and (stop.is_set() or time.monotonic() >= deadline):
+            raise ValueError("local receiver stopped or timed out")
+        try:
+            chunk = connection.recv(min(4096, MAX_CONTROL_BYTES + 1 - len(raw)))
+        except TimeoutError:
+            if stop is None:
+                raise
+            continue
         if not chunk:
             break
         raw.extend(chunk)
@@ -132,8 +151,24 @@ def _send(connection, value):
     connection.sendall(raw)
 
 
+def _accepts_connections(connection):
+    try:
+        return bool(connection.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN))
+    except OSError as exc:
+        # Darwin exposes SO_ACCEPTCONN but its AF_UNIX sockets reject it with
+        # ENOPROTOOPT. listen() has already succeeded; the pinned FD/path and
+        # accepting thread are checked separately. Do not mask other failures.
+        if (
+            sys.platform != "darwin"
+            or connection.family != socket.AF_UNIX
+            or exc.errno != errno.ENOPROTOOPT
+        ):
+            raise
+        return connection.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) == socket.SOCK_STREAM
+
+
 class LocalControl:
-    def __init__(self, state_dir: Path, socket_dir: Path, handler):
+    def __init__(self, state_dir: Path, socket_dir: Path, handler, *, on_disconnect=None):
         self.state = private_directory(state_dir)
         self.socket_directory = private_directory(socket_dir)
         self.path = self.socket_directory.root / ("c-" + secrets.token_hex(8) + ".sock")
@@ -145,8 +180,91 @@ class LocalControl:
         self.socket = None
         self.thread = None
         self.socket_identity = None
+        self.fd_identity = None
+        self.state_version = None
+        self._on_disconnect = on_disconnect or (lambda: None)
+        self._loss_lock = threading.Lock()
+        self._loss_notified = False
+        self._started = False
+        self._ready = threading.Event()
+        self._connection_lock = threading.Lock()
+        self._connection = None
+
+    def _lost(self):
+        # This may run inside Source/coordinator validation. Notify outside the
+        # tiny bookkeeping lock; callbacks must only latch revocation, not wait
+        # for coordinator locks or call this server over its own socket.
+        self.stop.set()
+        with self._loss_lock:
+            notify = not self._loss_notified
+            self._loss_notified = True
+        if notify:
+            try:
+                self._on_disconnect()
+            except Exception:
+                pass  # The stop latch still rejects all future control requests.
+
+    def is_alive(self):
+        """Pinned local endpoint only, not evidence of remote tunnel health.
+
+        A started endpoint's loss is sticky. A new instance/token and explicit
+        local enable are required; restoring a path or saved token cannot revive
+        its old grants. No self-RPC or coordinator lock is acquired here.
+        """
+        if not self._started:
+            return False
+        if not self._ready.is_set() and not self.stop.is_set():
+            return False
+        try:
+            if (
+                self.stop.is_set()
+                or not self.token
+                or self.socket is None
+                or self.thread is None
+                or not self.thread.is_alive()
+            ):
+                raise ValueError
+            if _identity(
+                os.fstat(self.socket.fileno())
+            ) != self.fd_identity or not _accepts_connections(self.socket):
+                raise ValueError
+            with self.socket_directory.root_fd() as parent:
+                info = os.stat(self.path.name, dir_fd=parent, follow_symlinks=False)
+                if (
+                    _identity(info) != self.socket_identity
+                    or not stat.S_ISSOCK(info.st_mode)
+                    or info.st_uid != os.getuid()
+                    or info.st_mode & 0o077
+                ):
+                    raise ValueError
+                saved, version = _read_state(self.state, "control.json")
+                if (
+                    version != self.state_version
+                    or set(saved) != {"socket", "token", "pid"}
+                    or saved["socket"] != str(self.path)
+                    or type(saved["pid"]) is not int
+                    or saved["pid"] != os.getpid()
+                    or not isinstance(saved["token"], str)
+                    or not secrets.compare_digest(saved["token"], self.token)
+                ):
+                    raise ValueError
+                final = os.stat(self.path.name, dir_fd=parent, follow_symlinks=False)
+                if _identity(final) != self.socket_identity:
+                    raise ValueError
+            if (
+                self.stop.is_set()
+                or not self.thread.is_alive()
+                or _identity(os.fstat(self.socket.fileno())) != self.fd_identity
+            ):
+                raise ValueError
+            return True
+        except (SourceError, OSError, ValueError, TypeError, KeyError, AttributeError):
+            self._lost()
+            return False
 
     def start(self):
+        if self.stop.is_set():
+            raise SourceError("CONTROL_STOPPED: create a new local control connection")
         if self.socket is not None:
             return
         with self.socket_directory.root_fd():
@@ -158,54 +276,100 @@ class LocalControl:
                 connection.listen(4)
                 connection.settimeout(0.25)
                 self.socket = connection
+                self.fd_identity = _identity(os.fstat(connection.fileno()))
                 write_state(
                     self.state,
                     "control.json",
                     {"socket": str(self.path), "token": self.token, "pid": os.getpid()},
                 )
+                _, self.state_version = _read_state(self.state, "control.json")
             except (OSError, SourceError):
+                self._lost()
                 connection.close()
                 raise SourceError("CONTROL_START_FAILED: local control could not start") from None
         self.thread = threading.Thread(target=self._run, name="colink-local-control", daemon=True)
+        self._started = True
         self.thread.start()
+        if not self._ready.wait(1) or not self.is_alive():
+            self._lost()
+            raise SourceError("CONTROL_START_FAILED: local control did not become ready")
 
     def _run(self):
-        while not self.stop.is_set():
-            try:
-                connection, _ = self.socket.accept()
-            except TimeoutError:
-                continue
-            except OSError:
-                break
-            with connection:
-                connection.settimeout(5)
+        self._ready.set()
+        try:
+            while self.is_alive():
                 try:
-                    request = _receive(connection)
-                    token = request.get("token")
-                    if not isinstance(token, str) or not secrets.compare_digest(token, self.token):
-                        _send(connection, {"ok": False, "error": "CONTROL_NOT_AUTHORIZED"})
-                        continue
-                    if (
-                        set(request) != {"token", "action", "parameters"}
-                        or not isinstance(request["action"], str)
-                        or not isinstance(request["parameters"], dict)
-                    ):
-                        raise ValueError
-                    result = self.handler(request["action"], request["parameters"])
-                    _send(connection, {"ok": True, "result": result})
-                except SourceError as exc:
-                    _send(connection, {"ok": False, "error": str(exc)})
-                except (OSError, ValueError, TypeError, RecursionError):
+                    connection, _ = self.socket.accept()
+                except TimeoutError:
+                    continue
+                except OSError:
+                    break
+                with self._connection_lock:
+                    # accept() can finish concurrently with close(). Never
+                    # adopt a new receiver after close has snapshotted the old
+                    # one; otherwise a partial message can outlive shutdown.
+                    if self.stop.is_set():
+                        connection.close()
+                        break
+                    self._connection = connection
+                with connection:
                     try:
-                        _send(connection, {"ok": False, "error": "INVALID_CONTROL_REQUEST"})
-                    except OSError:
-                        pass
+                        # Some native select()/close races do not wake a
+                        # timeout-mode recv promptly. Poll the stop latch with
+                        # a bounded interval and an absolute request deadline.
+                        connection.settimeout(0.25)
+                        request = _receive(connection, stop=self.stop)
+                        if not self.is_alive():
+                            raise SourceError("CONTROL_UNAVAILABLE: local control has stopped")
+                        token = request.get("token")
+                        if not isinstance(token, str) or not secrets.compare_digest(
+                            token, self.token
+                        ):
+                            self._reply(
+                                connection, {"ok": False, "error": "CONTROL_NOT_AUTHORIZED"}
+                            )
+                            continue
+                        if (
+                            set(request) != {"token", "action", "parameters"}
+                            or not isinstance(request["action"], str)
+                            or not isinstance(request["parameters"], dict)
+                        ):
+                            raise ValueError
+                        result = self.handler(request["action"], request["parameters"])
+                        self._reply(connection, {"ok": True, "result": result})
+                    except SourceError as exc:
+                        self._reply(connection, {"ok": False, "error": str(exc)})
+                    except (OSError, ValueError, TypeError, RecursionError):
+                        self._reply(connection, {"ok": False, "error": "INVALID_CONTROL_REQUEST"})
+                    finally:
+                        with self._connection_lock:
+                            if self._connection is connection:
+                                self._connection = None
+        except Exception:
+            pass  # Unexpected handler/listener failure is sticky, without input traceback.
+        finally:
+            self._lost()
+
+    @staticmethod
+    def _reply(connection, value):
+        try:
+            _send(connection, value)
+        except OSError:
+            pass
 
     def close(self):
-        self.stop.set()
+        self._lost()
+        with self._connection_lock:
+            connection = self._connection
+        if connection is not None:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            connection.close()
         if self.socket is not None:
             self.socket.close()
-        if self.thread is not None:
+        if self.thread is not None and self.thread is not threading.current_thread():
             self.thread.join(1)
         # Remove only this endpoint, pinned by identity. Never delete an unrelated
         # path or the recovery/state directory. Stale state has an expired token.

@@ -109,7 +109,7 @@ struct ConnectPanel: View {
 
             if controller.configuration.isLive {
                 VStack(alignment: .leading, spacing: 6) {
-                    Toggle("允许修改已启用项目", isOn: Binding(
+                    Toggle("允许修改代码", isOn: Binding(
                         get: { controller.writeEnabled },
                         set: { controller.setWriteEnabled($0) }
                     ))
@@ -117,13 +117,27 @@ struct ConnectPanel: View {
                     .disabled(!controller.canChangeWrite)
                     Text(controller.projectBusy ? "正在更新本机状态…"
                          : controller.recoveryRequired ? "需要先完成任务恢复。"
-                         : !controller.writeAvailable ? "写入功能尚未开放。"
-                         : controller.hasActiveTask ? "已有任务进行中，关闭连接会关闭写入。"
-                         : "每次启动默认关闭，授权仅限本机已启用的项目。")
+                         : !controller.writeAvailable ? "连接就绪后可开启。"
+                         : controller.writeEnabled ? "仅允许修改你刚刚选择的项目。"
+                         : "默认关闭，开启时选择允许修改的项目。")
                         .font(.system(size: 10)).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     if let error = controller.projectError {
                         Text(error).font(.system(size: 10)).foregroundStyle(.orange)
+                    }
+                    if let task = controller.taskDetail {
+                        Text(task).font(.system(size: 11)).lineLimit(2)
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            if controller.recoveryRequired {
+                                Button("恢复未完成任务") { controller.recoverWrite() }
+                                    .disabled(!controller.canRecoverWrite)
+                            } else {
+                                Button("回退这项任务") { controller.rollbackWriteTask() }
+                                    .disabled(!controller.canRollbackWrite)
+                            }
+                        }
+                        .font(.system(size: 11)).buttonStyle(.bordered)
                     }
                 }
             }
@@ -166,8 +180,51 @@ struct ConnectPanel: View {
         .sheet(isPresented: $controller.showingProjects) {
             ProjectManagementView(controller: controller, input: controller.registrationInput)
         }
+        .sheet(isPresented: $controller.showingWriteAuthorization) {
+            WriteAuthorizationView(controller: controller)
+        }
     }
 
+}
+
+private struct WriteAuthorizationView: View {
+    @ObservedObject var controller: ConnectionController
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("允许修改哪些项目？")
+                .font(.system(size: 21, weight: .semibold, design: .rounded))
+            Text("只授权本次连接。关闭或重启后需要重新开启。")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(controller.writableProjects) { project in
+                        Toggle(project.displayName, isOn: Binding(
+                            get: { controller.selectedWriteProjectIDs.contains(project.id) },
+                            set: { selected in
+                                if selected { controller.selectedWriteProjectIDs.insert(project.id) }
+                                else { controller.selectedWriteProjectIDs.remove(project.id) }
+                            }
+                        ))
+                        .toggleStyle(.checkbox)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(minHeight: 50, maxHeight: 200)
+            HStack {
+                Button("取消") {
+                    controller.selectedWriteProjectIDs = []
+                    controller.showingWriteAuthorization = false
+                }
+                Spacer()
+                Button("允许所选项目") { controller.confirmWriteAuthorization() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!controller.canConfirmWrite)
+            }
+        }
+        .padding(24).frame(width: 400).tint(accent)
+    }
 }
 
 private struct ProjectManagementView: View {

@@ -8,9 +8,10 @@ from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
 from code_context.local_control import control_request
-from code_context.server import build_mcp
+from code_context.server import READ_TOOL_NAMES, build_mcp
 from code_context.source_access import SourceError
 from code_context.workspace import WorkspaceRuntime, initialize_workspace
+from code_context.write_tools import WRITE_TOOL_NAMES
 
 
 @pytest.fixture
@@ -65,11 +66,11 @@ def test_private_control_enables_a_only_and_old_handle_revoked(workspace):
         with pytest.raises(SourceError):
             backend.read_file(project["project_id"], "module.py", handle)
         assert not control_request(state, "status")["write_enabled"]
-        with pytest.raises(SourceError, match="WRITE_NOT_IMPLEMENTED"):
+        with pytest.raises(SourceError, match="UNKNOWN_CONTROL_ACTION"):
             control_request(state, "enable_write", {})
 
 
-def test_mcp_cannot_grant_permissions_and_nine_structural_tools_available(workspace):
+def test_mcp_cannot_grant_permissions_and_original_structural_tools_available(workspace):
     root, state = workspace
     initial = initialize_workspace(root / "a", state, "Project A")
     runtime = WorkspaceRuntime(root / "a", state, socket_directory())
@@ -77,8 +78,13 @@ def test_mcp_cannot_grant_permissions_and_nine_structural_tools_available(worksp
     async def inspect():
         mcp = build_mcp(runtime.backend, status_provider=runtime.backend.mcp_status)
         tools = await mcp.list_tools()
-        assert len(tools) == 15
-        assert all(t.annotations.read_only_hint for t in tools)
+        assert len(tools) == 22
+        assert all(t.annotations.read_only_hint for t in tools if t.name in READ_TOOL_NAMES)
+        assert all(
+            not t.annotations.read_only_hint
+            for t in tools
+            if t.name in WRITE_TOOL_NAMES and t.name != "write_task_status"
+        )
         names = {t.name for t in tools}
         assert "enable_write" not in names and "set_enabled" not in names
         pid = initial["project_id"]

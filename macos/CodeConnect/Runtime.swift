@@ -112,6 +112,31 @@ struct WorkspaceProject: Identifiable {
     }
 }
 
+struct WorkspaceWriteTask: Equatable {
+    let id: String
+    let projectID: String
+    let state: String
+
+    init?(_ value: [String: Any]) {
+        guard let id = value["task_id"] as? String, !id.isEmpty, id.count <= 256,
+              let projectID = value["project_id"] as? String, !projectID.isEmpty,
+              projectID.count <= 256, let state = value["state"] as? String else { return nil }
+        self.id = id
+        self.projectID = projectID
+        self.state = state
+    }
+
+    var title: String {
+        switch state {
+        case "active": return "任务进行中"
+        case "completed": return "最近任务已完成"
+        case "rolling_back": return "任务回退待恢复"
+        case "recovery_required": return "任务需要恢复"
+        default: return "任务待确认"
+        }
+    }
+}
+
 enum ConnectionPhase: String {
     case unconfigured, stopped, preparing, starting, running, stopping, failed, external
 
@@ -175,11 +200,16 @@ final class ConnectionController: ObservableObject {
     @Published var setupError: String?
     @Published var showingSetup = false
     @Published var showingProjects = false
+    @Published var showingWriteAuthorization = false
+    @Published var selectedWriteProjectIDs: Set<String> = []
     @Published var projects: [WorkspaceProject] = []
     @Published var writeEnabled = false
     @Published var writeAvailable = false
     @Published var recoveryRequired = false
     @Published var hasActiveTask = false
+    @Published var activeTask: WorkspaceWriteTask?
+    @Published var recentTask: WorkspaceWriteTask?
+    @Published var localActions: Set<String> = []
     @Published var projectBusy = false
     @Published var projectError: String?
     let setupInput = ConnectionSetupInput()
@@ -193,6 +223,8 @@ final class ConnectionController: ObservableObject {
     private var requestedStop = false
     private var stateEpoch = 0
     private var localOperation: LocalControlOperation?
+    private var acknowledgedWriteProjectIDs: Set<String> = []
+    private var rollbackRequest: (taskID: String, requestID: String)?
     private var timer: Timer?
     private let queue = DispatchQueue(label: "Colink.status", qos: .utility)
 
@@ -209,12 +241,41 @@ final class ConnectionController: ObservableObject {
     }
     var canManageProjects: Bool {
         configuration.isLive && ownsConnection && isReady && phase == .running
-        && !projectBusy && !configuring
+        && !projectBusy && !configuring && !hasActiveTask && !recoveryRequired && !writeEnabled
+    }
+    var writableProjects: [WorkspaceProject] {
+        projects.filter { $0.enabled && $0.status != "unavailable" }
     }
     var canChangeWrite: Bool {
         configuration.isLive && ownsConnection && isReady && phase == .running
-        && writeAvailable && !recoveryRequired && !projectBusy
-        && projects.contains(where: { $0.enabled })
+        && !projectBusy && (writeEnabled || (writeAvailable && !recoveryRequired
+                                            && !writableProjects.isEmpty))
+    }
+    var canConfirmWrite: Bool {
+        canChangeWrite && !writeEnabled && !selectedWriteProjectIDs.isEmpty
+        && selectedWriteProjectIDs.isSubset(of: Set(writableProjects.map(\.id)))
+    }
+    var canRecoverWrite: Bool {
+        configuration.isLive && ownsConnection && isReady && phase == .running
+        && !projectBusy && recoveryRequired && activeTask != nil
+        && localActions.contains("recover_write")
+    }
+    var rollbackTask: WorkspaceWriteTask? {
+        if let task = activeTask, task.state == "active" { return task }
+        if let task = recentTask, task.state == "completed" { return task }
+        return nil
+    }
+    var canRollbackWrite: Bool {
+        guard let task = rollbackTask else { return false }
+        return configuration.isLive && ownsConnection && isReady && phase == .running
+            && !projectBusy && !recoveryRequired && writeEnabled
+            && acknowledgedWriteProjectIDs.contains(task.projectID)
+            && localActions.contains("rollback_write_task")
+    }
+    var taskDetail: String? {
+        guard let task = activeTask ?? recentTask else { return nil }
+        let name = projects.first(where: { $0.id == task.projectID })?.displayName ?? task.projectID
+        return "\(task.title) · \(name)"
     }
     private var modeArguments: [String] { configuration.isLive ? ["--mode", "live"] : [] }
     var detail: String {
@@ -299,9 +360,14 @@ final class ConnectionController: ObservableObject {
                 self.checking = false
                 guard self.root == selected, self.stateEpoch == epoch else { self.refresh(); return }
                 guard let result else {
+                    let hadWriteAuthorization = !self.acknowledgedWriteProjectIDs.isEmpty
                     self.isReady = false
-                    self.writeEnabled = false
+                    self.clearWriteAuthorization()
                     self.writeAvailable = false
+                    if self.ownsConnection && hadWriteAuthorization {
+                        self.stop()
+                        return
+                    }
                     if self.ownsConnection && self.phase != .stopping {
                         self.phase = .failed
                         self.errorText = "文件夹暂时不可用。请关闭后重新选择。"
@@ -315,6 +381,10 @@ final class ConnectionController: ObservableObject {
                 self.revision = result["revision"] as? Int ?? 0
                 self.fileCount = result["tracked_files"] as? Int ?? 0
                 self.isReady = result["ready"] as? Bool ?? false
+                if !self.isReady && self.ownsConnection && !self.acknowledgedWriteProjectIDs.isEmpty {
+                    self.stop()
+                    return
+                }
                 self.applyWorkspaceStatus(result)
                 if self.ownsConnection {
                     if self.phase != .stopping { self.phase = self.isReady ? .running : .starting }
@@ -336,12 +406,25 @@ final class ConnectionController: ObservableObject {
         writeAvailable = workspace["write_available"] as? Bool ?? false
         recoveryRequired = workspace["recovery_required"] as? Bool ?? false
         hasActiveTask = workspace["active_task"] != nil && !(workspace["active_task"] is NSNull)
-        writeEnabled = workspace["write_enabled"] as? Bool == true
-            && !requestedStop && phase != .stopping
+        activeTask = (workspace["active_task"] as? [String: Any]).flatMap(WorkspaceWriteTask.init)
+        recentTask = (workspace["recent_task"] as? [String: Any]).flatMap(WorkspaceWriteTask.init)
+        localActions = Set(workspace["local_actions"] as? [String] ?? [])
+        selectedWriteProjectIDs.formIntersection(Set(writableProjects.map(\.id)))
+        let grants = Set(workspace["write_projects"] as? [String] ?? [])
+        let enabled = workspace["write_enabled"] as? Bool == true
+        writeEnabled = enabled && writeAvailable && isReady && ownsConnection
+            && !acknowledgedWriteProjectIDs.isEmpty && grants == acknowledgedWriteProjectIDs
+            && grants.isSubset(of: Set(writableProjects.map(\.id)))
+            && !requestedStop && phase != .stopping && !recoveryRequired
+        if !enabled { acknowledgedWriteProjectIDs = [] }
+        if enabled && !writeEnabled && ownsConnection {
+            // Never show a disabled switch while an unacknowledged grant remains live.
+            stop()
+        }
     }
 
     private func runLocal(_ arguments: [String], payload: Data? = nil,
-                          completion: @escaping () -> Void = {}) {
+                          completion: @escaping ([String: Any]?) -> Void = { _ in }) {
         guard configuration.isLive, !projectBusy else { return }
         projectBusy = true
         projectError = nil
@@ -351,12 +434,13 @@ final class ConnectionController: ObservableObject {
         let input = payload == nil ? nil : Pipe()
         if let input { process.standardInput = input }
         else { process.standardInput = FileHandle.nullDevice }
-        process.standardOutput = FileHandle.nullDevice
+        let output = Pipe()
+        process.standardOutput = output
         process.standardError = FileHandle.nullDevice
         let operation = LocalControlOperation(process)
         localOperation = operation
         queue.async { [weak self] in
-            var success = false
+            var result: [String: Any]?
             do {
                 guard try operation.run() else { return }
                 DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 15) {
@@ -366,25 +450,29 @@ final class ConnectionController: ObservableObject {
                     try input.fileHandleForWriting.write(contentsOf: payload)
                     try input.fileHandleForWriting.close()
                 }
+                let data = output.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
-                success = process.terminationStatus == 0
+                if process.terminationStatus == 0, data.count <= 65536 {
+                    result = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                }
             } catch { try? input?.fileHandleForWriting.close() }
             DispatchQueue.main.async {
                 guard let self, self.localOperation === operation else { return }
                 self.localOperation = nil
                 self.projectBusy = false
                 guard self.stateEpoch == epoch else { self.refresh(); return }
-                if success { completion() }
-                else { self.projectError = "操作未完成，请刷新状态后重试。" }
+                if result == nil { self.projectError = "操作未完成，请刷新状态后重试。" }
+                completion(result)
                 self.refresh()
             }
         }
     }
 
-    private func control(_ action: String, parameters: [String: Any] = [:]) {
+    private func control(_ action: String, parameters: [String: Any] = [:],
+                         completion: @escaping ([String: Any]?) -> Void = { _ in }) {
         guard let payload = try? JSONSerialization.data(withJSONObject: parameters) else { return }
         runLocal(["desktop-control", "--workspace", configuration.workspace, "--root", root,
-                  "--action", action], payload: payload)
+                  "--action", action], payload: payload, completion: completion)
     }
 
     func discoverProjects() {
@@ -404,9 +492,73 @@ final class ConnectionController: ObservableObject {
 
     func setWriteEnabled(_ enabled: Bool) {
         guard canChangeWrite, enabled != writeEnabled else { return }
-        control(enabled ? "enable_write" : "disable_write", parameters: enabled
-            ? ["project_ids": projects.filter(\.enabled).map(\.id)] : [:])
-        // Enabling is visible only after a fresh desktop-status reports success.
+        if enabled {
+            selectedWriteProjectIDs = []
+            showingWriteAuthorization = true
+        } else {
+            clearWriteAuthorization()
+            control("disable_write") { [weak self] result in
+                if result == nil { self?.stop() }
+            }
+        }
+    }
+
+    func confirmWriteAuthorization() {
+        guard canConfirmWrite else { return }
+        let projectIDs = selectedWriteProjectIDs.sorted()
+        showingWriteAuthorization = false
+        control("enable_write", parameters: ["project_ids": projectIDs]) { [weak self] result in
+            guard let self else { return }
+            guard result?["write_enabled"] as? Bool == true,
+                  Set(result?["write_projects"] as? [String] ?? []) == Set(projectIDs) else {
+                self.stop()
+                return
+            }
+            self.acknowledgedWriteProjectIDs = Set(projectIDs)
+            // A subsequent current-root desktop-status must also confirm these grants.
+        }
+    }
+
+    private func clearWriteAuthorization() {
+        writeEnabled = false
+        acknowledgedWriteProjectIDs = []
+        selectedWriteProjectIDs = []
+        showingWriteAuthorization = false
+    }
+
+    func recoverWrite() {
+        guard canRecoverWrite, let task = activeTask else { return }
+        clearWriteAuthorization()
+        control("disable_write") { [weak self] result in
+            guard let self else { return }
+            guard result != nil else { self.stop(); return }
+            self.control("recover_write", parameters: ["project_id": task.projectID])
+        }
+    }
+
+    func rollbackWriteTask() {
+        guard canRollbackWrite, let task = rollbackTask else { return }
+        let alert = NSAlert()
+        alert.messageText = "回退这项任务的全部修改？"
+        alert.informativeText = "\(task.title)\n\n恢复本任务修改的文件，撤销本任务新建且未被外部改动的文件与空目录。检测到冲突时会保留现场，不强制覆盖。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "回退整项任务")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn,
+              canRollbackWrite, rollbackTask == task else { return }
+        if rollbackRequest?.taskID != task.id {
+            rollbackRequest = (task.id, "desktop_rollback_" + UUID().uuidString.replacingOccurrences(of: "-", with: ""))
+        }
+        guard let request = rollbackRequest else { return }
+        control("rollback_write_task", parameters: [
+            "project_id": task.projectID, "task_id": task.id, "request_id": request.requestID
+        ]) { [weak self] result in
+            guard let self, result == nil else { return }
+            self.clearWriteAuthorization()
+            self.control("disable_write") { [weak self] disabled in
+                if disabled == nil { self?.stop() }
+            }
+        }
     }
 
     func configure(tunnelID: String, apiKey: String, completion: @escaping () -> Void) {
@@ -450,6 +602,9 @@ final class ConnectionController: ObservableObject {
 
     func chooseFolder() {
         guard canChooseFolder else { return }
+        // Folder selection requires a stopped backend; its grants were revoked
+        // before shutdown. Never carry a local authorization into another root.
+        clearWriteAuthorization()
         hidePanel?()
         NSApplication.shared.activate(ignoringOtherApps: true)
         let chooser = NSOpenPanel()
@@ -465,8 +620,8 @@ final class ConnectionController: ObservableObject {
             let selectedRoot = selected.standardizedFileURL.path
             if configuration.isLive {
                 runLocal(["desktop-select", "--workspace", configuration.workspace,
-                          "--root", selectedRoot]) { [weak self] in
-                    self?.applySelection(selectedRoot)
+                          "--root", selectedRoot]) { [weak self] result in
+                    if result != nil { self?.applySelection(selectedRoot) }
                 }
             } else {
                 UserDefaults.standard.set(selectedRoot, forKey: "SelectedFolder")
@@ -478,11 +633,18 @@ final class ConnectionController: ObservableObject {
     }
 
     private func applySelection(_ selectedRoot: String) {
+        stateEpoch += 1
         root = selectedRoot
         revision = 0
         fileCount = 0
-        writeEnabled = false
+        clearWriteAuthorization()
         writeAvailable = false
+        activeTask = nil
+        recentTask = nil
+        hasActiveTask = false
+        recoveryRequired = false
+        localActions = []
+        rollbackRequest = nil
         projects = []
         errorText = nil
         phase = isConfigured ? .stopped : .unconfigured
@@ -504,7 +666,8 @@ final class ConnectionController: ObservableObject {
         }
         requestedStop = false
         stateEpoch += 1
-        writeEnabled = false
+        clearWriteAuthorization()
+        writeAvailable = false
         errorText = nil
         phase = .preparing
         let process = command([
@@ -523,7 +686,7 @@ final class ConnectionController: ObservableObject {
                 self.controlPipe = nil
                 self.connection = nil
                 self.isReady = false
-                self.writeEnabled = false
+                self.clearWriteAuthorization()
                 self.writeAvailable = false
                 self.phase = finished.terminationStatus == 0 ? .stopped : .failed
                 if self.phase == .failed {
@@ -552,7 +715,7 @@ final class ConnectionController: ObservableObject {
     func stop() {
         requestedStop = true
         stateEpoch += 1
-        writeEnabled = false
+        clearWriteAuthorization()
         writeAvailable = false
         localOperation?.cancel()
         localOperation = nil
@@ -561,6 +724,16 @@ final class ConnectionController: ObservableObject {
         guard ownsConnection else { return }
         phase = .stopping
         isReady = false
+        if configuration.isLive {
+            control("disable_write") { [weak self] _ in self?.finishOwnedStop() }
+        } else {
+            finishOwnedStop()
+        }
+    }
+
+    private func finishOwnedStop() {
+        // Even a failed local acknowledgement must close the owned connection.
+        // Its supervisor independently revokes writes before stopping children.
         if let handle = controlPipe?.fileHandleForWriting {
             try? handle.write(contentsOf: Data("stop\n".utf8))
             try? handle.close()
