@@ -37,10 +37,11 @@ def test_original_fifteen_and_seven_task_tools_without_undo_or_local_grant(parts
     async def inspect():
         tools = {t.name: t for t in await mcp.list_tools()}
         assert set(tools) == READ_TOOL_NAMES | WRITE_TOOL_NAMES
-        assert len(READ_TOOL_NAMES) == 15 and len(tools) == 22
+        assert len(READ_TOOL_NAMES) == 15 and len(tools) == 24
         assert all(tools[n].annotations.read_only_hint for n in READ_TOOL_NAMES)
         assert tools["write_task_status"].annotations.read_only_hint
-        for name in WRITE_TOOL_NAMES - {"write_task_status"}:
+        assert tools["move_path_status"].annotations.read_only_hint
+        for name in WRITE_TOOL_NAMES - {"write_task_status", "move_path_status"}:
             assert not tools[name].annotations.read_only_hint
             assert tools[name].annotations.idempotent_hint
         assert "rollback_write_task" not in tools

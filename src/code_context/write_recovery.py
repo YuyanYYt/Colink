@@ -453,7 +453,15 @@ class WriteRecovery:
                             )
                         metadata = json.loads(operation["metadata"])
                         scope = json.loads(task["metadata"])["scope"]
-                        if scope is not None and metadata["path"] not in scope:
+                        if (
+                            metadata["kind"] != "move_path"
+                            and scope is not None
+                            and metadata["path"] not in scope
+                            and not self.store.query(
+                                "SELECT path FROM move_mappings WHERE task_id=? AND path=?",
+                                (task["task_id"], metadata["path"]),
+                            )
+                        ):
                             raise WriteError(
                                 "WRITE_RECOVERY_SCOPE: operation exceeds its task scope"
                             )
@@ -464,6 +472,8 @@ class WriteRecovery:
                             outcome = self._recover_directory(source, task, operation, metadata)
                         elif metadata["kind"] == "delete_file":
                             outcome = self.c.deletion.recover(source, task, operation, metadata)
+                        elif metadata["kind"] == "move_path":
+                            outcome = self.c.movement.recover(source, task, operation, metadata)
                         else:
                             raise WriteError(
                                 "WRITE_RECOVERY_METADATA: unsupported pending operation"
