@@ -83,6 +83,34 @@ def inputs(tmp_path):
     write(workspace / "src/code_context/cli.py", "def main(): pass\n")
     write(workspace / "src/code_context/__pycache__/cli.pyc", b"excluded")
     write(workspace / "src/code_context/.env.fixture", "excluded fixture")
+    sandbox = workspace / "src/code_context/resources/sandbox"
+    write(
+        sandbox / "package.json",
+        json.dumps({"dependencies": {"@anthropic-ai/sandbox-runtime": "0.0.78"}}),
+    )
+    write(
+        sandbox / "package-lock.json",
+        json.dumps(
+            {
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {},
+                    "node_modules/@anthropic-ai/sandbox-runtime": {
+                        "version": "0.0.78",
+                        "integrity": "sha512-test-only",
+                    },
+                },
+            }
+        ),
+    )
+    for name in ("helper.mjs", "database-probe.mjs", "node-service.cjs"):
+        write(sandbox / name, "// Synthetic packaging fixture only\n")
+    write(
+        sandbox / "node_modules/@anthropic-ai/sandbox-runtime/package.json", '{"version":"0.0.78"}'
+    )
+    write(sandbox / "node_modules/@anthropic-ai/sandbox-runtime/LICENSE", "Apache fixture")
+    write(sandbox / "licenses/codex/LICENSE", "Apache fixture")
+    write(sandbox / "licenses/codex/NOTICE", "Attribution fixture")
     write(workspace / ".code-context/server/mirror.sqlite3", "excluded fixture")
     write(workspace / "examples/sample_project/main.py", "print('sample')\n")
     write(workspace / "examples/sample_project/models.py", "class Model: pass\n")

@@ -22,6 +22,7 @@ from starlette.routing import Mount, Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from code_context import __version__
+from code_context.execution_tools import EXECUTION_TOOL_NAMES, register_execution_tools
 from code_context.intelligence_tools import CODE_TOOL_NAMES, register_code_tools
 from code_context.models import FileChange, SyncBatch, validate_project
 from code_context.policy import (
@@ -55,7 +56,7 @@ class CodeMCPServer(MCPServer):
                 "CoLink tool definitions changed; refresh this connection's tools "
                 "and start a fresh analysis with repo_overview"
             )
-        if name in WRITE_TOOL_NAMES:
+        if name in WRITE_TOOL_NAMES | EXECUTION_TOOL_NAMES:
             tool = self._tool_manager.get_tool(name)
             if tool is not None:
                 allowed = tool.parameters.get("properties", {})
@@ -117,8 +118,16 @@ def build_mcp(
             "No user code rollback tool. Use user-saved Git checkpoints for code history; "
             "conflicts require local inspection. "
             "Delete only explicitly requested individual source files through delete_file; "
-            "read the current SHA first. No recursive directory deletion or renaming tool. "
-            "No command execution. Platform approvals remain controlled by the client."
+            "read the current SHA first. Moves use move_path_status and a bounded two-end task. "
+            "Execution is a separate default-off local grant and native safety gate. Read actual "
+            "execution_environment, port_status and database_status first. Create a private venv "
+            "before Python development using the returned venv_creation argv; reuse that "
+            "environment for installation/tests/services. Then plan/rehearse/start and query jobs. "
+            "Prefer registered high ports 43117-43121; inspect conflicts before every launch. "
+            "Never guess installed tools or treat a running process as application health. "
+            "Database projects require a locally scoped profile, real migrations and CRUD; "
+            "follow the Chinese setup guidance. Reuse jobs after web refresh; identical retries "
+            "do not spawn again. Platform approvals remain controlled by the client."
         )
         if live_mode
         else (
@@ -199,6 +208,11 @@ def build_mcp(
             "write_enabled": bool(status.get("write_enabled", False)) and bool(write_projects),
             "write_available": bool(status.get("write_available", False)),
             "write_projects": write_projects,
+            "execution_available": bool(status.get("execution_available", False)),
+            "execution_enabled": bool(status.get("execution_enabled", False)),
+            "execution_projects": [p for p in status.get("execution_projects", []) if p in visible],
+            "execution_gate": status.get("execution_gate", "closed"),
+            "execution_limits": status.get("execution_limits", {}),
             "recovery_required": bool(status.get("recovery_required", False)),
             "filters": {
                 "excluded_directories": sorted(EXCLUDED_DIRS),
@@ -375,6 +389,8 @@ def build_mcp(
     register_code_tools(mcp, store, authorize, display_name, annotations)
     if live_mode and getattr(store, "write_coordinator", None) is not None:
         register_write_tools(mcp, store.write_coordinator, authorize)
+    if live_mode and getattr(store, "workspace_runtime", None) is not None:
+        register_execution_tools(mcp, store.workspace_runtime, authorize)
     return mcp
 
 

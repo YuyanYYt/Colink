@@ -7,6 +7,7 @@ import pytest
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
+from code_context.execution_tools import EXECUTION_TOOL_NAMES
 from code_context.local_control import control_request
 from code_context.server import READ_TOOL_NAMES, build_mcp
 from code_context.source_access import SourceError
@@ -78,12 +79,13 @@ def test_mcp_cannot_grant_permissions_and_original_structural_tools_available(wo
     async def inspect():
         mcp = build_mcp(runtime.backend, status_provider=runtime.backend.mcp_status)
         tools = await mcp.list_tools()
-        assert len(tools) == len(READ_TOOL_NAMES | WRITE_TOOL_NAMES) == 22
+        assert {t.name for t in tools} == READ_TOOL_NAMES | WRITE_TOOL_NAMES | EXECUTION_TOOL_NAMES
         assert all(t.annotations.read_only_hint for t in tools if t.name in READ_TOOL_NAMES)
         assert all(
             not t.annotations.read_only_hint
             for t in tools
-            if t.name in WRITE_TOOL_NAMES and t.name != "write_task_status"
+            if t.name in WRITE_TOOL_NAMES
+            and t.name not in {"write_task_status", "move_path_status"}
         )
         names = {t.name for t in tools}
         assert "enable_write" not in names and "set_enabled" not in names

@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import SwiftUI
+import Security
 
 struct RuntimeConfiguration {
     let workspace: String
@@ -232,6 +233,23 @@ final class ConnectionController: ObservableObject {
     @Published var projects: [WorkspaceProject] = []
     @Published var writeEnabled = false
     @Published var writeAvailable = false
+    @Published var executionEnabled = false
+    @Published var executionAvailable = false
+    @Published var showingExecutionAuthorization = false
+    @Published var selectedExecutionProjectIDs: Set<String> = []
+    @Published var executionPortsText = "43117,43118,43119,43120,43121"
+    @Published var executionDetail = "运行权限默认关闭。"
+    @Published var showingDevelopmentSetup = false
+    @Published var developmentStatus: [String: Any] = [:]
+    @Published var setupProjectID = ""
+    @Published var setupKind = "pgvector"
+    @Published var setupPort = "43122"
+    @Published var setupDatabase = "colink_app"
+    @Published var setupUser = "colink_app"
+    @Published var setupPassword = ""
+    @Published var setupTLS = false
+    @Published var pendingPortReleases: [[String: Any]] = []
+    private var acknowledgedExecutionProjectIDs: Set<String> = []
     @Published var recoveryRequired = false
     @Published var hasActiveTask = false
     @Published var activeTask: WorkspaceWriteTask?
@@ -285,6 +303,72 @@ final class ConnectionController: ObservableObject {
         configuration.isLive && ownsConnection && isReady && phase == .running
         && !projectBusy && recoveryRequired && activeTask != nil
         && localActions.contains("recover_write")
+    }
+
+    var canChangeExecution: Bool {
+        configuration.isLive && ownsConnection && isReady && !projectBusy
+        && (executionEnabled || executionAvailable) && !writableProjects.isEmpty
+    }
+
+    func setExecutionEnabled(_ enabled: Bool) {
+        guard canChangeExecution else { return }
+        if enabled {
+            selectedExecutionProjectIDs = []
+            showingExecutionAuthorization = true
+        } else {
+            acknowledgedExecutionProjectIDs = []
+            executionEnabled = false
+            control("disable_execution") { [weak self] result in
+                if result == nil { self?.stop() }
+            }
+        }
+    }
+
+    func confirmExecutionAuthorization() {
+        let ports = executionPortsText.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+        guard canChangeExecution, !selectedExecutionProjectIDs.isEmpty,
+              ports.count <= 16, ports.allSatisfy({ (1024...65535).contains($0) }),
+              selectedExecutionProjectIDs.isSubset(of: Set(writableProjects.map(\.id))) else { return }
+        let selected = selectedExecutionProjectIDs.sorted()
+        showingExecutionAuthorization = false
+        control("enable_execution", parameters: ["project_ids": selected, "ports": ports]) { [weak self] result in
+            guard let self else { return }
+            guard result?["execution_enabled"] as? Bool == true,
+                  Set(result?["execution_projects"] as? [String] ?? []) == Set(selected) else { return }
+            self.acknowledgedExecutionProjectIDs = Set(selected)
+        }
+    }
+
+    func loadDevelopmentSetup(projectID: String) {
+        guard ownsConnection, isReady else { return }
+        control("development_status", parameters: ["project_id": projectID]) { [weak self] result in
+            self?.developmentStatus = result ?? [:]
+        }
+    }
+
+    func confirmPortRelease(_ plan: [String: Any], allowForce: Bool = false) {
+        guard let id = plan["port_plan_id"] as? String else { return }
+        control("confirm_port_release", parameters: ["plan_id": id, "allow_force": allowForce])
+    }
+
+    func configureDatabase(projectID: String, kind: String, port: Int, database: String,
+                           user: String, password: String, tls: Bool) {
+        guard ownsConnection, isReady, !projectBusy, !password.isEmpty else { return }
+        let reference = "colink-db-" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        let item: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                  kSecAttrService as String: "local.colink.database",
+                                  kSecAttrAccount as String: reference,
+                                  kSecValueData as String: Data(password.utf8),
+                                  kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
+        guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else {
+            projectError = "密码未能保存在本机钥匙串。连接尚未配置。"
+            return
+        }
+        control("configure_database", parameters: ["project_id": projectID, "kind": kind,
+                "host": "127.0.0.1", "port": port, "database": database, "user": user,
+                "credential_ref": reference, "tls": tls]) { [weak self] result in
+            if result != nil { self?.developmentStatus["database"] = result }
+        }
     }
     var taskDetail: String? {
         guard let task = activeTask ?? recentTask else { return nil }
@@ -417,6 +501,18 @@ final class ConnectionController: ObservableObject {
         guard configuration.isLive else { return }
         let workspace = result["workspace_status"] as? [String: Any] ?? [:]
         projects = (workspace["projects"] as? [[String: Any]] ?? []).compactMap(WorkspaceProject.init)
+        executionAvailable = workspace["execution_available"] as? Bool == true
+        let executionGrants = Set(workspace["execution_projects"] as? [String] ?? [])
+        let executionAcknowledged = workspace["execution_enabled"] as? Bool == true
+        executionEnabled = executionAcknowledged && executionAvailable && ownsConnection && isReady
+            && executionGrants == acknowledgedExecutionProjectIDs && !executionGrants.isEmpty
+        if !executionAcknowledged { acknowledgedExecutionProjectIDs = [] }
+        if executionAcknowledged && !executionEnabled && ownsConnection { stop() }
+        let jobs = workspace["execution_jobs"] as? [[String: Any]] ?? []
+        executionDetail = !executionAvailable ? "运行保护尚未通过检查，入口保持关闭。"
+            : executionEnabled ? "允许所选项目运行。当前作业 \(jobs.count) 项。"
+            : "开启时选择项目、端口和开发范围。"
+        pendingPortReleases = workspace["pending_port_releases"] as? [[String: Any]] ?? []
         writeAvailable = workspace["write_available"] as? Bool ?? false
         recoveryRequired = workspace["recovery_required"] as? Bool ?? false
         hasActiveTask = workspace["active_task"] != nil && !(workspace["active_task"] is NSNull)
@@ -534,6 +630,10 @@ final class ConnectionController: ObservableObject {
     }
 
     private func clearWriteAuthorization() {
+        executionEnabled = false
+        acknowledgedExecutionProjectIDs = []
+        selectedExecutionProjectIDs = []
+        showingExecutionAuthorization = false
         writeEnabled = false
         acknowledgedWriteProjectIDs = []
         selectedWriteProjectIDs = []

@@ -109,6 +109,31 @@ struct ConnectPanel: View {
 
             if controller.configuration.isLive {
                 VStack(alignment: .leading, spacing: 6) {
+                    Toggle("允许运行项目", isOn: Binding(
+                        get: { controller.executionEnabled },
+                        set: { controller.setExecutionEnabled($0) }
+                    ))
+                    .toggleStyle(.switch).font(.system(size: 12, weight: .medium))
+                    .disabled(!controller.canChangeExecution)
+                    Text(controller.executionDetail).font(.system(size: 10)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("开发环境与数据库引导") { controller.showingDevelopmentSetup = true }
+                        .font(.system(size: 11)).buttonStyle(.bordered)
+                        .disabled(!controller.ownsConnection || !controller.isReady || controller.projectBusy)
+                    ForEach(Array(controller.pendingPortReleases.enumerated()), id: \.offset) { _, plan in
+                        VStack(alignment: .leading, spacing: 4) {
+                            let numbers = (plan["ports"] as? [Int] ?? []).map(String.init).joined(separator: ", ")
+                            Text("旧服务：\(plan["process"] as? String ?? "项目服务")（进程 \(plan["pid"] as? Int ?? 0)，端口 \(numbers)）")
+                                .font(.system(size: 10)).textSelection(.enabled)
+                            let force = plan["force_requested"] as? Bool == true
+                            Text(force ? "先请求退出；仍未退出时允许强制终止。" : "仅请求正常退出；未确认停止会如实显示。")
+                                .font(.system(size: 10)).foregroundStyle(.secondary)
+                            Button(force ? "确认停止（包括强制）" : "确认停止") {
+                                controller.confirmPortRelease(plan, allowForce: force)
+                            }.font(.system(size: 10))
+                        }
+                    }
+                    Divider()
                     Toggle("允许修改代码", isOn: Binding(
                         get: { controller.writeEnabled },
                         set: { controller.setWriteEnabled($0) }
@@ -181,8 +206,130 @@ struct ConnectPanel: View {
         .sheet(isPresented: $controller.showingWriteAuthorization) {
             WriteAuthorizationView(controller: controller)
         }
+        .sheet(isPresented: $controller.showingExecutionAuthorization) {
+            ExecutionAuthorizationView(controller: controller)
+        }
+        .sheet(isPresented: $controller.showingDevelopmentSetup) {
+            DevelopmentSetupView(controller: controller)
+        }
     }
 
+}
+
+private struct ExecutionAuthorizationView: View {
+    @ObservedObject var controller: ConnectionController
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("允许哪些项目运行？").font(.system(size: 21, weight: .semibold))
+            Text("允许依赖安装、测试、构建和开发服务。仅本次连接有效；关闭、切换或重启后撤销。")
+                .font(.system(size: 12)).foregroundStyle(.secondary)
+            ForEach(controller.writableProjects) { project in
+                Toggle(project.selectionTitle, isOn: Binding(
+                    get: { controller.selectedExecutionProjectIDs.contains(project.id) },
+                    set: { if $0 { controller.selectedExecutionProjectIDs.insert(project.id) }
+                           else { controller.selectedExecutionProjectIDs.remove(project.id) } }
+                )).toggleStyle(.checkbox)
+            }
+            TextField("开发端口，用逗号分隔", text: $controller.executionPortsText)
+            Text("2 个服务和 1 个有限任务；服务闲置 20 分钟停止。数据库连接另行配置。")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            HStack {
+                Button("取消") { controller.showingExecutionAuthorization = false }
+                Spacer()
+                Button("允许所选项目") { controller.confirmExecutionAuthorization() }
+                    .buttonStyle(.borderedProminent).disabled(controller.selectedExecutionProjectIDs.isEmpty)
+            }
+        }.padding(24).frame(width: 430).tint(accent)
+    }
+}
+
+private struct DevelopmentSetupView: View {
+    @ObservedObject var controller: ConnectionController
+    private var projectID: String {
+        get { controller.setupProjectID }
+        nonmutating set { controller.setupProjectID = newValue }
+    }
+    private var kind: String {
+        get { controller.setupKind }
+        nonmutating set { controller.setupKind = newValue }
+    }
+    private var port: String {
+        get { controller.setupPort }
+        nonmutating set { controller.setupPort = newValue }
+    }
+    private var database: String {
+        get { controller.setupDatabase }
+        nonmutating set { controller.setupDatabase = newValue }
+    }
+    private var user: String {
+        get { controller.setupUser }
+        nonmutating set { controller.setupUser = newValue }
+    }
+    private var password: String {
+        get { controller.setupPassword }
+        nonmutating set { controller.setupPassword = newValue }
+    }
+    private var tls: Bool {
+        get { controller.setupTLS }
+        nonmutating set { controller.setupTLS = newValue }
+    }
+
+    private var tools: [String: [String: Any]] {
+        let environment = controller.developmentStatus["environment"] as? [String: Any] ?? [:]
+        return environment["tools"] as? [String: [String: Any]] ?? [:]
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("准备真实的项目环境").font(.system(size: 21, weight: .semibold))
+                Picker("项目", selection: $controller.setupProjectID) {
+                    ForEach(controller.writableProjects) { Text($0.selectionTitle).tag($0.id) }
+                }.onChange(of: projectID) { _, value in controller.loadDevelopmentSetup(projectID: value) }
+                Text("1. 查看实际工具，再选择运行方式").font(.headline)
+                ForEach(tools.keys.sorted(), id: \.self) { name in
+                    let tool = tools[name] ?? [:]
+                    Text("\(name)：\(tool["available"] as? Bool == true ? (tool["version"] as? String ?? "已检测") : "未找到")")
+                        .font(.system(size: 11)).textSelection(.enabled)
+                }
+                Text("Python 项目使用独立虚拟环境。同一任务的安装、测试和修改重跑复用环境，网页会先查询本机工具。")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                Text("2. 为项目准备数据库和专用账号").font(.headline)
+                Text("优先复用已有 MySQL 或 PostgreSQL。向量项目推荐 PostgreSQL + pgvector。请在数据库中建立本项目的库和有限权限账号，再填下面的连接。数据库资料会保留。")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                Picker("数据库", selection: $controller.setupKind) {
+                    Text("PostgreSQL + pgvector").tag("pgvector")
+                    Text("PostgreSQL").tag("postgresql")
+                    Text("MySQL").tag("mysql")
+                    Text("Qdrant（连接配置，执行待支持）").tag("qdrant")
+                }.onChange(of: kind) { _, value in port = value == "mysql" ? "43123" : value == "qdrant" ? "43124" : "43122" }
+                Text("本机地址：127.0.0.1").font(.system(size: 12))
+                TextField("端口", text: $controller.setupPort)
+                Text("新建实例优先使用上方高位端口；连接已有数据库时，填写它实际监听的端口。")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                TextField("项目库名（colink_ 开头）", text: $controller.setupDatabase)
+                TextField("项目专用账号", text: $controller.setupUser)
+                SecureField("密码或项目 API 密钥", text: $controller.setupPassword)
+                Toggle("验证数据库 TLS", isOn: $controller.setupTLS)
+                Text("密码只保存在本机钥匙串，网页只收到连接状态。请使用项目专用账号。")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                Button("保存项目连接") {
+                    if let number = Int(port) {
+                        controller.configureDatabase(projectID: projectID, kind: kind, port: number,
+                            database: database, user: user, password: password, tls: tls)
+                        password = ""
+                    }
+                }.buttonStyle(.borderedProminent).disabled(projectID.isEmpty || password.isEmpty || controller.projectBusy)
+                Text("3. 迁移、启动、验证读写").font(.headline)
+                Text("连接保存后，让网页运行本项目的迁移，再启动后端。用接口实际写入和读取测试数据；重启后再次读取。向量项目还需确认扩展已安装并完成检索。工具存在或端口开放都不代表验证完成。")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                if let error = controller.projectError { Text(error).foregroundStyle(.orange).font(.system(size: 11)) }
+                HStack { Spacer(); Button("完成") { password = ""; controller.showingDevelopmentSetup = false } }
+            }.padding(24)
+        }.frame(width: 490, height: 650).tint(accent)
+        .onDisappear { password = "" }
+        .onAppear { projectID = controller.writableProjects.first?.id ?? ""; if !projectID.isEmpty { controller.loadDevelopmentSetup(projectID: projectID) } }
+    }
 }
 
 private struct WriteAuthorizationView: View {

@@ -1,55 +1,101 @@
 # Security and privacy
 
-2026-10-06 maintenance source removes intentional code undo from the native UI,
-MCP and local control plane. Diff origins, crash recovery and compatibility with
-old interrupted journals remain protected; no existing database is deleted.
-The terminal sandbox is design-only, not an implemented command execution feature.
-See docs/PROJECT_MANAGEMENT_AND_UNDO_REMOVAL.md and docs/TERMINAL_SANDBOX_DESIGN.md.
+The public download remains 0.5.0b2. Maintenance source 0.5.0b4 adds default-off,
+project-scoped native development jobs. Actual source, native, webpage and installed
+application evidence are recorded separately; no production security audit is claimed.
+The legacy mirror protocol and existing databases retain their historical semantics.
 
-CoLink's published distribution is a single-user, read-only code mirror and MCP
-server. It is not a system sandbox, a complete secret scanner or a shared
-multi-tenant service.
+Live reads verify original files without keeping a permanent whole-project mirror.
+Task-scoped writes, moves and generated-result writeback go through WriteCoordinator,
+with source hashes, path/identity checks and durable recovery records. Unknown recovery
+objects and unresolved partial operations are preserved. Intentional code undo is not
+exposed; use independently saved Git history. A task Diff is not a permanent backup or
+a multi-file atomic filesystem transaction.
 
-This describes the published mirror distribution. The unreleased 0.5.0-beta.1
-development branch also has live source reads and task-scoped writes, subject to
-explicit local project grants (default off every connection). The fifteen read
-tools retain read-only annotations; write tools do not pretend to be
-read-only. The web client cannot enable permission, register a source, execute
-commands or force recovery. Client approvals are separate from local grants.
+The webpage cannot register a source, enable local read/write/execute grants, expand
+ports or network scope, or force recovery. Every tool uses an explicit project ID.
+Local authorization and ChatGPT's action approval policy are separate. Original mirror
+read tools remain read-only. Development status/output/list operations that renew a
+service lease or acknowledge log cleanup are annotated as effects, not read-only.
 
-Live mode retains no full-project source mirror. Recovery materials cover only
-edited task members and are separately protected by bounded quotas, provenance,
-content/attribute checks and retention. Conflicts or uncertain partial states
-stop writes and require authenticated local recovery; they are not automatically
-discarded. Full arbitrary external-edit history and a multi-file atomic filesystem
-transaction are not promised. Unknown recovery objects are never auto-adopted.
-The previous beta.1 native-local controls, fifteen read tools, scoped web writes,
-task Diff and now-removed whole-task undo have sample-only web/UI evidence in
-docs/WEB_WRITE_VALIDATION.md. Those historical results do not verify the current
-maintenance changes, a future terminal sandbox or a production security audit.
+## Native development boundary
 
-- Only start sharing after selecting a specific project and confirming access.
-- Mirror MCP tools cannot write to sources. Live write tools can modify only
-  locally granted task paths; neither mode can execute commands.
-- Private tunnel traffic is initiated outbound. Do not expose local management
-  endpoints or disable firewall/security controls to complete installation.
-- Query responses containing source code are sent to the selected OpenAI
-  product. Read-only does not mean private data never leaves the Mac.
-- Mandatory filters exclude known credentials/files, binaries and symlinks;
-  this is defense in depth, not a guarantee against every embedded secret.
-- Each mirror project retains current and immediately previous code states. Changing
-  ignore rules does not instantly remove the previous state or revoke data
-  already returned to a client.
-- Runtime keys live in user-owned mode-600 files, not in source, Git, application
-  bundles, command-line arguments or diagnostic output. Keychain is not yet
-  implemented. Do not grant this preview production-wide credentials.
-- Official tunnel client versions and application archives are checksum-checked.
-  Checksums and ad-hoc signatures are integrity checks, not Apple notarization.
+- Only the currently validated Darwin 27 implementation is enabled. Other systems
+  keep terminal execution unavailable. A private libproc ABI mismatch fails closed;
+  there is no fallback to parent PID tracking or an unconfined command.
+- Each job uses validated temporary input and a capacity-limited APFS disk. Original
+  project writes are performed only through the existing write coordinator.
+- Fixed SRT 0.0.78 generates Seatbelt profiles with narrower project policy. Controller
+  directories, protected ancestors, inherited descriptors and system-fcntl 80/110 are
+  guarded. Tool paths and precise dynamic-library/symlink identities are bound to plans.
+  Controller credentials and user shell profiles are not inherited.
+- launchd creates a dedicated kernel resource coalition for each job. Fork, exec,
+  double-fork and setsid descendants remain supervised. Signals bind process birth
+  identities through audit tokens. Cancellation is reported complete only after native
+  exit/cleanup verification. Missing or changed recovery evidence blocks new execution.
+- Project TCP binds are denied. The trusted controller binds explicit 127.0.0.1
+  registered ports and forwards only to its exact Unix socket after checking the peer's
+  kernel audit identity and coalition. Node has a service adapter; Python/JVM services
+  need Unix socket support. Existing Tomcat/Spring TCP services are not directly supported.
+- Package network access is limited to locally approved public registries through an
+  authenticated proxy; other local ports and external endpoints are not opened wholesale.
+- CPU, RSS and process-count controls are sampled supervision and stopping thresholds,
+  not VM isolation or hard resource reservations. Short exited processes can be missed
+  by CPU sampling. A successful exit and absent denial text do not prove containment.
+- Pipe execution is noninteractive; stdin is closed except the private controller's
+  bounded database capability transport. There is no project terminal input or PTY API.
+
+Output, request metadata, helper input, temporary disks and dependency caches have
+separate bounded budgets. Active or unverified work is not evicted to make room.
+Completed logs are reclaimed after final acknowledgement or the unread retention limit;
+failed summaries are separately bounded. Runtime-owned retired job resources may be
+reclaimed by their exact recorded identities; evidence artifacts and user materials
+are not general cache-cleanup targets. See docs/WEB_SESSION_DEVELOPMENT_PLAN.md.
+
+## Ports, databases and Git
+
+The port inventory reports listener/process ownership without returning executable
+arguments. A manually started current-project service needs confirmation of the exact
+process in the local app. PID birth, listener, executable and project identity are
+rechecked before signalling; unknown/system/other-project processes cannot be released.
+CoLink-owned current-project jobs use the job cancellation path.
+
+Database profiles bind a project-specific endpoint, database and limited role.
+Passwords are stored in the macOS Keychain and passed to jobs through bounded private
+stdin, not command arguments, source files or ordinary metadata. Client presence, TCP
+readiness, authenticated role checks, migrations, CRUD and vector operations remain
+separate facts. PostgreSQL preflight checks inherited privileges and verifies that an
+incorrect password is rejected. MySQL checks the server's actual `partial_revokes`
+mode and parses database-level wildcard escapes before accepting project grants.
+Global/cross-database privileges, grant options and inherited roles are refused.
+Client connection parameters are bound to the profile and cannot be overridden or
+abbreviated by project arguments. The final successful authentication is checked again
+for privilege changes. First SHA2 authentication on an explicitly non-TLS local test
+endpoint uses RSA public-key retrieval; this does not provide full-connection encryption.
+Database server grants remain authoritative; these checks do not turn a SQL server into
+a native sandbox. Qdrant execution is withheld until project-scoped authentication or a
+dedicated instance can be enforced. Never configure production-wide administrative roles.
+
+Local Git commits use a private index and only selected task files, with HEAD/index/
+source conflict checks. User staging is preserved. Hooks, filters and external helpers
+are disabled; push/reset/clean are not offered.
+
+## Connection and distribution
+
+Private tunnel traffic is initiated outbound. Do not expose local management endpoints
+or disable firewall/security controls. Queried source and requested command output are
+sent to the selected AI provider; a private connection does not mean data never leaves
+the Mac. Mandatory credential/file/link filters are defense in depth, not a complete
+secret scanner. Previously returned data cannot be revoked by changing ignore rules.
+
+Tunnel runtime keys remain in private mode-600 files, separate from database Keychain
+items. Do not distribute user .env.local, .code-context, private runtime settings,
+connection manifests or selected source. Public packaging contains fixed runtime
+resources and applicable third-party notices, with no maintainer connection data.
+Checksums and ad-hoc signatures are integrity checks, not Apple notarization.
 
 The GitHub distribution is independent of the ChatGPT public plugin directory.
-Every user must configure their own tunnel and workspace permissions. Do not
-copy or distribute an existing user's `.env.local`, `.code-context`, app runtime
-settings, personal connection manifest or code mirror.
+Each user configures their own connection and local project permissions.
 
 ## Reporting a vulnerability
 

@@ -87,7 +87,7 @@ read -rs 'CODE_CONTEXT_READ_TOKEN?输入读取令牌：'
 export CODE_CONTEXT_READ_TOKEN
 read -rs 'CODE_CONTEXT_SYNC_TOKEN?输入同步令牌：'
 export CODE_CONTEXT_SYNC_TOKEN
-uv run colink serve --host 127.0.0.1 --port 8765
+uv run colink serve --host 127.0.0.1 --port 43116
 ```
 
 上传终端设置同一个同步令牌，先预览再启动监听：
@@ -95,20 +95,20 @@ uv run colink serve --host 127.0.0.1 --port 8765
 ```sh
 uv run colink scan --root examples/sample_project
 uv run colink watch --root examples/sample_project --project live-sample \
-  --server http://127.0.0.1:8765
+  --server http://127.0.0.1:43116
 ```
 
 单次上传和本地队列检查分别为：
 
 ```sh
 uv run colink sync --root examples/sample_project --project live-sample \
-  --server http://127.0.0.1:8765
+  --server http://127.0.0.1:43116
 uv run colink status --root examples/sample_project --project live-sample \
-  --server http://127.0.0.1:8765
+  --server http://127.0.0.1:43116
 ```
 
-`status` 不需要令牌、不占上传锁。健康检查为 `http://127.0.0.1:8765/health`，
-MCP 端点为 `http://127.0.0.1:8765/mcp`；客户端发送
+`status` 不需要令牌、不占上传锁。健康检查为 `http://127.0.0.1:43116/health`，
+MCP 端点为 `http://127.0.0.1:43116/mcp`；客户端发送
 `Authorization: Bearer <读取令牌>`。本示例只监听回环地址，不作为公网部署方案。
 HTTP 同步接口和 MCP 查询分开，旧入口始终只读。每个远程项目只能有一个上传来源。
 
