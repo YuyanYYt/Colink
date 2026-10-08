@@ -19,9 +19,11 @@ import pytest
 from code_context import execution_scope as native_scope
 from code_context.execution_process import TERMINAL_STATES, ProcessManager
 from code_context.execution_scope import (
+    CoalitionMember,
     CoalitionScope,
     LaunchdSupervisor,
     MacKernel,
+    ProcessIdentity,
     ScopeError,
     expire_verified_job_scope,
     index_retired_job_scopes,
@@ -165,6 +167,35 @@ def test_fast_doublefork_setsid_close_stdio_clear_env_exec_is_owned_until_timeou
         assert not done["isolation_complete"]
         assert kernel.members(done["resource_id"]) == {}
         assert kernel.identity(pid) is None
+
+
+def test_two_execing_service_children_stay_observed_until_cancel(tmp_path):
+    child = (
+        "import os,sys; "
+        "os.execv(sys.executable,[sys.executable,'-c','import time;time.sleep(100)'])"
+    )
+    code = (
+        "import subprocess,sys,time\n"
+        f"child={child!r}\n"
+        "subprocess.Popen([sys.executable,'-c',child])\n"
+        "subprocess.Popen([sys.executable,'-c',child])\n"
+        "print('children started',flush=True)\n"
+        "time.sleep(100)\n"
+    )
+    with _manager(tmp_path) as manager:
+        _submit(manager, tmp_path, code, service=True)
+        running = _wait(manager, {"running"})
+        deadline = time.monotonic() + 0.4
+        while time.monotonic() < deadline:
+            assert manager.snapshot("native")["state"] == "running"
+            time.sleep(0.01)
+        manager.cancel("native")
+        done = _wait(manager)
+        _record(tmp_path, done)
+        assert done["state"] == "cancelled"
+        assert done["resource_peak_processes"] >= 3
+        assert done["cleanup_verified"] and done["observed_tree_stopped"]
+        assert MacKernel().members(running["resource_id"]) == {}
 
 
 def test_leader_exit_with_unannounced_daemon_is_a_failure_after_full_cleanup(tmp_path):
@@ -311,12 +342,13 @@ def test_sleeping_process_cpu_remains_under_threshold_until_its_real_timeout(tmp
 def test_native_task_cpu_uses_actual_mach_timebase_instead_of_assuming_nanoseconds(tmp_path):
     kernel = MacKernel()
     member = kernel.members(kernel.resource_id(os.getpid()))[os.getpid()]
-    initial = kernel.metrics({os.getpid(): member})["cpu_nanoseconds"][member.identity]
+    birth = (member.identity.pid, member.identity.unique)
+    initial = kernel.metrics({os.getpid(): member})["cpu_nanoseconds"][birth]
     started = time.process_time_ns()
     while time.process_time_ns() - started < 50_000_000:
         pass
     elapsed = time.process_time_ns() - started
-    final = kernel.metrics({os.getpid(): member})["cpu_nanoseconds"][member.identity]
+    final = kernel.metrics({os.getpid(): member})["cpu_nanoseconds"][birth]
     observed = final - initial
     result = {
         "process_cpu_ns": elapsed,
@@ -336,6 +368,53 @@ def test_process_exiting_after_task_measurement_is_skipped_without_adopting_a_ne
     monkeypatch.setattr(kernel, "identity", lambda pid: None)
     metrics = kernel.metrics({os.getpid(): member})
     assert metrics == {"rss_bytes": 0, "processes": 0, "cpu_nanoseconds": {}}
+
+
+def test_exec_during_member_scan_rechecks_same_birth_and_rejects_pid_reuse(monkeypatch):
+    kernel = MacKernel()
+    pid = os.getpid()
+    resource = kernel.resource_id(pid)
+    first = kernel.identity(pid)
+    after_exec = ProcessIdentity(pid, first.unique, first.version + 1)
+    monkeypatch.setattr(kernel, "pids", lambda: {pid})
+    monkeypatch.setattr(kernel, "identity", lambda _pid: next(identities))
+    identities = iter((first, after_exec, after_exec, after_exec))
+    assert kernel.members(resource)[pid].identity == after_exec
+    reused = ProcessIdentity(pid, first.unique + 1, first.version + 1)
+    identities = iter((first, reused))
+    with pytest.raises(ScopeError, match="EXECUTION_SCOPE_IDENTITY_CHANGED"):
+        kernel.members(resource)
+
+
+def test_metrics_and_signal_tolerate_exec_but_refuse_a_new_birth(monkeypatch):
+    kernel = MacKernel()
+    pid = os.getpid()
+    resource = kernel.resource_id(pid)
+    current = kernel.identity(pid)
+    old = ProcessIdentity(pid, current.unique, current.version - 1)
+    member = CoalitionMember(old, resource, 2)
+    metrics = kernel.metrics({pid: member})
+    assert metrics["rss_bytes"] == 0 and metrics["processes"] == 0
+    assert list(metrics["cpu_nanoseconds"]) == [(pid, current.unique)]
+    sent = []
+    monkeypatch.setattr(
+        kernel, "_audit_signal", lambda identity, sig: sent.append((identity, sig)) or 0
+    )
+    assert kernel.signal_member(member, signal.SIGCONT)
+    assert sent == [(current, signal.SIGCONT)]
+    changed_again = ProcessIdentity(pid, current.unique, current.version + 1)
+    identities = iter((current, changed_again))
+    monkeypatch.setattr(kernel, "identity", lambda _pid: next(identities))
+    assert not kernel.signal_member(member, signal.SIGCONT)
+    assert sent == [(current, signal.SIGCONT)]
+    monkeypatch.setattr(
+        kernel, "identity", lambda _pid: ProcessIdentity(pid, current.unique + 1, current.version)
+    )
+    with pytest.raises(ScopeError, match="EXECUTION_SCOPE_IDENTITY_CHANGED"):
+        kernel.signal_member(member, signal.SIGCONT)
+    assert sent == [(current, signal.SIGCONT)]
+    with pytest.raises(ScopeError, match="EXECUTION_SCOPE_IDENTITY_FAILED"):
+        kernel.signal_member(member, True)
 
 
 def test_private_input_payload_uses_only_pipe_and_never_persistent_scope_state(tmp_path):

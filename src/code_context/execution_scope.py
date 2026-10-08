@@ -147,6 +147,13 @@ class ProcessIdentity:
     def as_dict(self):
         return {"pid": self.pid, "unique": self.unique, "version": self.version}
 
+    def same_birth(self, other):
+        # XNU changes pidversion on exec, but keeps the unique process ID.
+        return isinstance(other, ProcessIdentity) and (self.pid, self.unique) == (
+            other.pid,
+            other.unique,
+        )
+
 
 @dataclass(frozen=True)
 class CoalitionMember:
@@ -265,17 +272,26 @@ class MacKernel:
             before = self.identity(pid)
             if before is None:
                 continue
-            short = self._info(pid, 13, _ShortInfo())
-            coalition = self.resource_id(pid)
-            after = self.identity(pid)
-            if short is None or after is None:
-                continue
-            if before != after or coalition != resource_id:
+            for _ in range(3):
+                short = self._info(pid, 13, _ShortInfo())
+                coalition = self.resource_id(pid)
+                after = self.identity(pid)
+                if short is None or after is None:
+                    break
+                if not before.same_birth(after) or coalition != resource_id:
+                    raise ScopeError("EXECUTION_SCOPE_IDENTITY_CHANGED")
+                if before.version != after.version:
+                    # Recheck UID and status after an exec; the old short info
+                    # may describe the previous executable image.
+                    before = after
+                    continue
+                if short.pid != pid or short.uid != os.getuid():
+                    raise ScopeError("EXECUTION_SCOPE_IDENTITY_FAILED")
+                if not any(after.same_birth(item) for item in excluded):
+                    result[pid] = CoalitionMember(after, resource_id, int(short.status))
+                break
+            else:
                 raise ScopeError("EXECUTION_SCOPE_IDENTITY_CHANGED")
-            if short.pid != pid or short.uid != os.getuid():
-                raise ScopeError("EXECUTION_SCOPE_IDENTITY_FAILED")
-            if before not in excluded:
-                result[pid] = CoalitionMember(before, resource_id, int(short.status))
         return result
 
     def metrics(self, members):
@@ -291,22 +307,28 @@ class MacKernel:
             current_identity = self.identity(member.identity.pid)
             if current_identity is None:
                 continue
-            if current_identity != member.identity:
-                raise ScopeError("EXECUTION_SCOPE_IDENTITY_CHANGED")
             current_resource = self.resource_id(member.identity.pid)
             if current_resource is None:
                 continue
-            if current_resource != member.resource_id:
+            if (
+                not member.identity.same_birth(current_identity)
+                or current_resource != member.resource_id
+            ):
                 raise ScopeError("EXECUTION_SCOPE_IDENTITY_CHANGED")
-            resident += int(task.resident_bytes)
-            live += 1
-            # XNU fill_taskprocinfo exports recount_times_mach, not nanoseconds.
-            # Convert with this kernel's actual Mach timebase (125/3 here).
-            cpu[member.identity] = (
+            # XNU task CPU totals survive exec. Use the immutable process ID
+            # so an image change never charges the same work a second time.
+            cpu[(member.identity.pid, member.identity.unique)] = (
                 int(task.total_user + task.total_system)
                 * self.timebase_numer
                 // self.timebase_denom
             )
+            if current_identity.version != member.identity.version:
+                # The CPU counter is cumulative across exec; resident bytes
+                # and status may belong to the old executable image.
+                continue
+            resident += int(task.resident_bytes)
+            live += 1
+            # XNU recount_times_mach was converted with the kernel timebase.
         # Shared resident pages are counted conservatively per process. CPU
         # sees sampled live tasks; descendants exiting between scans can evade
         # accounting. These are monitoring thresholds, not hard OS quotas.
@@ -318,14 +340,37 @@ class MacKernel:
         return int(self.lib.proc_signal_with_audittoken(token, requested_signal))
 
     def signal_member(self, member, requested_signal):
+        if (
+            not isinstance(member, CoalitionMember)
+            or not isinstance(requested_signal, int)
+            or type(requested_signal) is bool
+            or requested_signal not in signal.valid_signals()
+        ):
+            raise ScopeError("EXECUTION_SCOPE_IDENTITY_FAILED")
         before = self.identity(member.identity.pid)
         if before is None:
-            return
-        if before != member.identity or self.resource_id(before.pid) != member.resource_id:
+            return False
+        short = self._info(before.pid, 13, _ShortInfo())
+        resource = self.resource_id(before.pid)
+        after = self.identity(before.pid)
+        if short is None or after is None:
+            return False
+        if (
+            not member.identity.same_birth(before)
+            or not before.same_birth(after)
+            or resource != member.resource_id
+        ):
             raise ScopeError("EXECUTION_SCOPE_IDENTITY_CHANGED")
-        # This kernel API pins pid+pidversion while holding a process reference.
-        # A numeric os.kill following a userspace check would still have a race.
-        self.signal_identity(before, requested_signal)
+        if before.version != after.version:
+            return False  # Recheck UID and image in the next coalition scan.
+        if short.pid != before.pid or short.uid != os.getuid():
+            raise ScopeError("EXECUTION_SCOPE_IDENTITY_FAILED")
+        # The kernel checks the fresh pidversion atomically before signalling.
+        # ESRCH means this image exited or execed; a later scan can retry.
+        result = self._audit_signal(after, requested_signal)
+        if result not in (0, errno.ESRCH):
+            raise ScopeError("EXECUTION_SCOPE_SIGNAL_FAILED")
+        return result == 0
 
     def signal_identity(self, identity, requested_signal):
         """Signal a caller-verified owned process using its kernel birth token.

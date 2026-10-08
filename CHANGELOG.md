@@ -1,5 +1,16 @@
 # 更新记录
 
+## 未发布 · 0.5.0b5 build 22 · 2026-10-09 · macOS 终端进程监控修复
+
+- 修复服务启动时子进程 `exec` 导致 `EXECUTION_SCOPE_IDENTITY_CHANGED`、
+  `process_observation_failed` 并被终止的问题。macOS 在同一进程执行 `exec` 后会增加
+  pidversion，进程唯一 ID 不变；扫描时重新读取进程状态，旧版本的内存样本跳过，
+  发信号前用当前版本的审计令牌再次校验。CPU 累计值按不变的进程唯一 ID 记账，
+  避免 `exec` 后重复计费。
+- 继续拒绝 PID 被复用、资源组改变、UID 不符和不可用的身份信息；退出与取消仍需
+  核对整个资源组清空。加入双服务子进程及身份变化的原生回归测试。
+- 首选恢复锚点仍为 `anchor/colink-0.5.0b5-build19-verified`，不移动该标签。
+
 ## 未发布 · 0.5.0b5 build 21 · 2026-10-08 · MCP 开发权限状态修复
 
 - 复现本地面板/运行时开发授权已开启，网页 `connection_status` 却返回执行关闭。
