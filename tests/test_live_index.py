@@ -679,6 +679,39 @@ def test_restart_reuses_cache_without_scanning_unqueried_projects_and_detects_of
     assert backend.sources["b"].metrics["body_reads"] == 0
 
 
+def test_compact_live_relations_and_safe_reuse_after_edits(tmp_path, service_factory):
+    backend = backend_for(tmp_path, {"a": python_files()})
+    service = service_factory(backend)
+    original = handle(backend)
+    symbol = find(backend, original, "normalize")
+    reference_result = query(backend, original, "find_references", symbol_id=symbol["symbol_id"])
+    assert reference_result["references"]
+    payload = rows(service, "SELECT data FROM ci_relations ORDER BY rowid LIMIT 1")[0][0]
+    assert isinstance(payload, bytes) and payload.startswith(b"CL1:")
+    parsed_payload = rows(
+        service, "SELECT data FROM li_parse_cache WHERE path='Code/pkg/models.py'"
+    )[0][0]
+    assert isinstance(parsed_payload, bytes) and parsed_payload.startswith(b"CP1:")
+
+    helper = backend.sources["a"].root / "Code/pkg/helper.py"
+    helper.write_text(helper.read_text().replace("return doc.value", "return doc.value + 1"))
+    changed = handle(backend)
+    symbol = find(backend, changed, "normalize")
+    stats = service.status("a")["stats"]
+    assert stats["parsed_files"] == 1
+    assert stats["reused_parse_files"] == 3
+    assert stats["reused_relation_files"] == 3
+    assert not stats["partial"]
+    assert query(backend, changed, "find_references", symbol_id=symbol["symbol_id"])["references"]
+
+    helper.write_text(helper.read_text() + "\ndef extra():\n    pass\n")
+    topology_changed = handle(backend)
+    assert find(backend, topology_changed, "extra")
+    stats = service.status("a")["stats"]
+    assert stats["reused_relation_files"] == 0
+    assert not stats["partial"]
+
+
 def test_repeated_edits_replace_current_parse_without_accumulating_versions(
     tmp_path, service_factory
 ):

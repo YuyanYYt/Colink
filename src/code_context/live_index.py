@@ -21,6 +21,7 @@ import math
 import os
 import sqlite3
 import time
+import zlib
 from collections import OrderedDict
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, TimeoutError
 from dataclasses import asdict, dataclass
@@ -52,7 +53,7 @@ if TYPE_CHECKING:
 _APPLICATION_ID = 0x434C4958
 _SCHEMA_VERSION = 1
 _PAGE_SIZE = 4096
-_INDEX_VERSION = f"live-facts-v1-{INDEX_VERSION}"
+_INDEX_VERSION = f"live-facts-v2-{INDEX_VERSION}"
 _CONFIG_PATHS = frozenset({"pyproject.toml", ".gitignore", ".codecontextignore"})
 _TABLES = ("files", "li_parse_cache", "ci_files", "ci_symbols", "ci_relations")
 _SCHEMA = (
@@ -102,6 +103,44 @@ _SCHEMA = (
     "CREATE INDEX ci_relation_target ON ci_relations(project_id, revision, target_symbol_id)",
     "CREATE INDEX ci_relation_file ON ci_relations(project_id, revision, source_path)",
 )
+
+
+_COMPRESSED_RELATION_PREFIX = b"CL1:"
+_COMPRESSED_PARSE_PREFIX = b"CP1:"
+
+
+def _parse_cache_payload(data: str) -> str | bytes:
+    """Persist large parsed facts compactly; retain small legacy JSON unchanged."""
+    raw = data.encode("utf-8")
+    compact = _COMPRESSED_PARSE_PREFIX + zlib.compress(raw, level=1)
+    return compact if len(compact) < len(raw) else data
+
+
+def _parse_cached_file(payload: str | bytes) -> ParsedFile:
+    if isinstance(payload, bytes):
+        if not payload.startswith(_COMPRESSED_PARSE_PREFIX):
+            raise ValueError("invalid parse cache encoding")
+        inflater = zlib.decompressobj()
+        raw = inflater.decompress(payload[4:], MAX_SNAPSHOT_PARSE_BYTES + 1)
+        if len(raw) > MAX_SNAPSHOT_PARSE_BYTES or not inflater.eof or inflater.unused_data:
+            raise ValueError("invalid parse cache size")
+        return ParsedFile.from_dict(json.loads(raw))
+    return ParsedFile.from_dict(json.loads(payload))
+
+
+def _relation_payload(value: dict) -> str | bytes:
+    """Compact live relations without changing the legacy mirror schema."""
+    raw = encode(value).encode("utf-8")
+    if len(raw) > 65_536:
+        return raw.decode("utf-8")
+    return _COMPRESSED_RELATION_PREFIX + zlib.compress(raw, level=1)
+
+
+def _row_budget(row: tuple) -> int:
+    """Bound compressed SQLite fact rows without treating bytes as JSON text."""
+    if isinstance(row[-1], bytes):
+        return len(encode(row[:-1]).encode("utf-8")) + len(row[-1]) + 5
+    return len(encode(row).encode("utf-8"))
 
 
 def _language(path: str) -> str:
@@ -721,7 +760,18 @@ class LiveIndexService:
                     )
                 }
             )
+            old_stats = (
+                json.loads(old["stats"])
+                if old is not None
+                and old["source_id"] == source.source_id
+                and old["index_version"] == self._index_version
+                else {}
+            )
+            old_topology_hash = (
+                old_stats.get("topology_hash") if not old_stats.get("partial", True) else None
+            )
         files, parsed_files, parses = [], {}, []
+        reused_paths = set()
         # Batch the reusable parse hashes before the extraction loop acquires any
         # index lock. The usual manifest/context guards still run before publish;
         # no Source -> Index / Index -> Source inverse lock is introduced.
@@ -801,8 +851,9 @@ class LiveIndexService:
                             configuration = read_root_configuration(document.content)
                         if supported:
                             if unchanged:
-                                parsed = ParsedFile.from_dict(json.loads(cached[1]))
+                                parsed = _parse_cached_file(cached[1])
                                 reused_count += 1
+                                reused_paths.add(path)
                             else:
                                 try:
                                     parsed = parse_file(path, document.content)
@@ -843,12 +894,26 @@ class LiveIndexService:
                         d.get("code", "").startswith("PROJECT_") for d in parsed.diagnostics
                     ):
                         parses.append(
-                            (project_id, source.source_id, path, sha, PARSER_VERSION, data)
+                            (
+                                project_id,
+                                source.source_id,
+                                path,
+                                sha,
+                                PARSER_VERSION,
+                                _parse_cache_payload(data),
+                            )
                         )
                 parsed_files[path] = parsed
                 partial |= parsed.status != "ready"
         del prior
         resolver = Resolver(parsed_files, configuration)
+        topology_hash = hashlib.sha256(repr(resolver.topology()).encode("utf-8")).hexdigest()
+        reuse_relations = (
+            old_topology_hash == topology_hash
+            and not partial
+            and not resolver.python_roots.diagnostic
+        )
+        reused_relation_files = 0
         indexed, symbols, relations = [], [], []
         index_bytes, fact_count = file_bytes, 0
         languages, statuses = {}, {}
@@ -870,22 +935,37 @@ class LiveIndexService:
                 for symbol in parsed.symbols
             ]
             relation_rows = []
-            for relation in resolver.resolve_file(path):
-                relation_rows.append(
-                    (
-                        project_id,
-                        source.source_id,
-                        1,
-                        path,
-                        relation.source_symbol_id,
-                        relation.target_path,
-                        relation.target_symbol_id,
-                        relation.kind,
-                        relation.resolution,
-                        relation.line,
-                        encode(relation.to_dict()),
+            if reuse_relations and path in reused_paths:
+                # Immutable file and unchanged project topology retain valid bindings.
+                # Load a single file at a time; never hold a second project-wide graph.
+                with self._lock:
+                    old_rows = self._db.execute(
+                        "SELECT source_symbol_id, target_path, target_symbol_id, "
+                        "kind, resolution, line, data FROM ci_relations "
+                        "WHERE project_id=? AND source_path=? ORDER BY rowid",
+                        (project_id, path),
+                    ).fetchall()
+                relation_rows = [
+                    (project_id, source.source_id, 1, path, *tuple(row)) for row in old_rows
+                ]
+                reused_relation_files += 1
+            else:
+                for relation in resolver.resolve_file(path):
+                    relation_rows.append(
+                        (
+                            project_id,
+                            source.source_id,
+                            1,
+                            path,
+                            relation.source_symbol_id,
+                            relation.target_path,
+                            relation.target_symbol_id,
+                            relation.kind,
+                            relation.resolution,
+                            relation.line,
+                            _relation_payload(relation.to_dict()),
+                        )
                     )
-                )
             indexed_row = (
                 project_id,
                 source.source_id,
@@ -897,7 +977,7 @@ class LiveIndexService:
                 encode({"items": parsed.diagnostics[:20]}),
             )
             cost = len(encode(indexed_row).encode("utf-8")) + sum(
-                len(encode(row).encode("utf-8")) for row in [*symbol_rows, *relation_rows]
+                _row_budget(row) for row in [*symbol_rows, *relation_rows]
             )
             count = len(symbol_rows) + len(relation_rows)
             status, diagnostics = parsed.status, parsed.diagnostics
@@ -946,7 +1026,8 @@ class LiveIndexService:
             "parsed_files": parsed_count,
             "reused_parse_files": reused_count,
             "resolved_files": len(parsed_files),
-            "reused_relation_files": 0,
+            "reused_relation_files": reused_relation_files,
+            "topology_hash": topology_hash,
             "source_bytes": source_bytes,
             "parse_payload_bytes": parse_bytes,
             "index_payload_bytes": index_bytes,
