@@ -40,5 +40,28 @@ execution_available 表示当前平台与运行时可用，execution_enabled 和
 
 ## 安装验收
 
-安装版验收完成后补入实际版本、签名、MCP 与配置保护结果。重新启动仍默认只读；
-本机开发授权不会因修复或安装而自动开启。用户项目、配置、凭据及当前数据库保留。
+自包含 0.5.0b5 / build 21 已覆盖 `/Applications/Colink.app`；严格签名、搬移后导入验证
+与 77 个后端 Python 文件哈希核对通过。原生应用、桌面监督器、隧道和后端均从新版
+安装路径运行。26 份配置、凭据、项目登记和偏好文件哈希一致，用户选择的 A 保留。
+
+安装启动流程保持默认只读，代理没有对用户工作区发送开启写入或开发授权请求。
+随后实际面板已连接并显示开发档，本机运行时与实际 MCP 均为：
+
+| 状态 | 本机运行时 | 实际 MCP |
+| --- | --- | --- |
+| execution_available | true | true |
+| execution_enabled | true | true |
+| execution_gate | passed | passed |
+| execution_projects | 当前项目 | 当前项目 |
+
+新版再次通过实际 MCP 启动 `/bin/echo COLINK_BUILD21_TERMINAL_OK`，读取预期输出，
+终态 exited、exit_code=0、cleanup_verified=true。未写入用户项目源码；MCP 输出
+没有返回私有控制令牌或目录。此验收是实际工具调用，不声称已修改用户网页的旧回答。
+
+验收后被替换的 build 20 应用副本移入
+`/Users/yuyan/.Trash/Colink.previous-build20-20261008-mcp-status.app`，可恢复；旧副本
+签名仅有运行时新增 Python 字节码，未修改副本内容。build 19 首选恢复锚点/归档、
+用户项目、当前数据库、配置、凭据和本轮全部生成物保留。
+
+证据目录：`.artifacts/validation/mcp-status-build21-20261008/`，包括修复前后真实状态、
+新版终端输出/终态、包构建日志、安装身份与 26 份保护文件核对结果。
