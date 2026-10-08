@@ -61,6 +61,7 @@ MirrorStore（SQLite 原子提交 / 不可变快照 / 内容去重 / Python-Java
 | `intelligence_models.py` / `intelligence_python.py` / `intelligence_java.py` | 有界语法事实与两种语言解析，不执行项目代码 |
 | `intelligence_roots.py` / `intelligence_resolver.py` / `intelligence_index.py` | 镜像内源码根配置/发现、保守静态绑定、哈希复用、生产端原子索引与两份状态清理 |
 | `intelligence_queries.py` / `intelligence_tools.py` | 只读符号、引用、关系、层级、循环和影响查询 |
+| `live_index.py` / `binding_dependencies.py` | live 项目当前索引、包含缺失名称的绑定输入摘要、受影响文件重绑与单库局部事务发布 |
 | `server.py` | MCP 工具注册、生命周期、HTTP 认证和独立同步接口 |
 | `execution_coordinator.py` / `execution_store.py` | 本机默认关闭授权、绑定计划、异步准备、幂等作业、生成结果受控写回与重连回执 |
 | `execution_process.py` / `execution_scope.py` / `execution_output.py` | 内核生命周期监督、取消/截止时间、软资源阈值、增量 UTF-8 滚动输出 |

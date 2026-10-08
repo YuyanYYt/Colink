@@ -2,6 +2,7 @@
 
 from collections import defaultdict
 
+from code_context.binding_dependencies import BindingReads, binding_shape
 from code_context.intelligence_models import (
     CALLABLE_KINDS,
     CLASS_KINDS,
@@ -15,7 +16,13 @@ from code_context.intelligence_roots import PythonSourceRoots, python_modules, s
 
 
 class Resolver:
-    def __init__(self, files: dict[str, ParsedFile], roots: PythonSourceRoots | None = None):
+    def __init__(
+        self,
+        files: dict[str, ParsedFile],
+        roots: PythonSourceRoots | None = None,
+        *,
+        track_dependencies: bool = False,
+    ):
         self.files = files
         self.python_roots = select_source_roots(files, roots or PythonSourceRoots())
         self.python_source_roots = self.python_roots.roots or ()
@@ -50,34 +57,12 @@ class Resolver:
                     full_name = ".".join(filter(None, [parsed.module, symbol.qualname]))
                     self.modules["java", full_name].append(path)
                     self.roots.add(("java", full_name.split(".")[0]))
+        self.binding_reads = BindingReads(self) if track_dependencies else None
 
     def topology(self) -> tuple:
         """An export/import change invalidates bindings, not unchanged parse trees."""
         return self.python_source_roots, tuple(
-            (
-                path,
-                parsed.module,
-                parsed.status,
-                tuple(
-                    (s.name, s.qualname, s.scope, s.kind, s.start_line, tuple(s.parameters))
-                    for s in parsed.symbols
-                ),
-                tuple(
-                    (
-                        i.module,
-                        i.imported_name,
-                        i.local_name,
-                        i.level,
-                        i.scope,
-                        i.type_only,
-                        i.conditional,
-                        i.is_static,
-                    )
-                    for i in parsed.imports
-                ),
-                tuple((b.name, b.scope, b.kind, b.annotation, b.value) for b in parsed.bindings),
-            )
-            for path, parsed in sorted(self.files.items())
+            binding_shape(parsed) for _, parsed in sorted(self.files.items())
         )
 
     def _module_paths(self, language: str, name: str) -> list[str]:
@@ -348,6 +333,18 @@ class Resolver:
         return self._unknown(ref.name, "dynamic_receiver" if suffix else "no_static_binding")
 
     def resolve_file(self, path: str) -> list[Relation]:
+        reads = self.binding_reads
+        if reads is None:
+            return self._resolve_file(path)
+        reads.active = {}
+        try:
+            result = self._resolve_file(path)
+            reads.files[path] = reads.active
+            return result
+        finally:
+            reads.active = None
+
+    def _resolve_file(self, path: str) -> list[Relation]:
         parsed = self.files[path]
         result: list[Relation] = []
         for symbol in parsed.symbols:

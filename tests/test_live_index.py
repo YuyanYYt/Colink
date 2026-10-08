@@ -235,6 +235,7 @@ def test_only_facts_on_disk_no_blobs_no_mirror_no_literal_bodies(
         "li_projects",
         "files",
         "li_parse_cache",
+        "li_binding_cache",
         "ci_files",
         "ci_symbols",
         "ci_relations",
@@ -288,7 +289,8 @@ def test_edit_reuses_other_parses_rebinds_and_rejects_stale_context(tmp_path, se
     assert any(e["resolution"] != "resolved" for e in graph["edges"])
     stats = service.status("a")["stats"]
     assert stats["parsed_files"] == 1 and stats["reused_parse_files"] == 3
-    assert stats["resolved_files"] == 4 and stats["reused_relation_files"] == 0
+    assert stats["resolved_files"] == 4 and stats["reused_relation_files"] == 2
+    assert stats["publication_mode"] == "local"
     assert rows(service, "SELECT COUNT(*) FROM li_projects") == [(1,)]
     assert rows(service, "SELECT COUNT(*) FROM li_parse_cache") == [(4,)]
     with pytest.raises(SourceError):
@@ -715,7 +717,8 @@ def test_compact_live_relations_and_safe_reuse_after_edits(tmp_path, service_fac
     topology_changed = handle(backend)
     assert find(backend, topology_changed, "extra")
     stats = service.status("a")["stats"]
-    assert stats["reused_relation_files"] == 0
+    assert stats["reused_relation_files"] == 3
+    assert stats["publication_mode"] == "local"
     assert not stats["partial"]
 
 
@@ -781,12 +784,261 @@ def test_changed_calls_rebind_only_changed_file_and_match_full_rebuild(tmp_path,
     incremental = query(backend, updated, "get_call_graph", symbol_id=run["symbol_id"])
     assert any(e["target_symbol_id"] == second["symbol_id"] for e in incremental["edges"])
     assert all(e["target_symbol_id"] != first["symbol_id"] for e in incremental["edges"])
-    old_facts = rows(service, "SELECT data FROM ci_relations ORDER BY rowid")
+    old_facts = rows(service, "SELECT data FROM ci_relations ORDER BY source_path,rowid")
     fresh = service_factory(backend)
     find(backend, handle(backend), "run")
     assert [decode_relation(r[0]) for r in old_facts] == [
-        decode_relation(r[0]) for r in rows(fresh, "SELECT data FROM ci_relations ORDER BY rowid")
+        decode_relation(r[0])
+        for r in rows(fresh, "SELECT data FROM ci_relations ORDER BY source_path,rowid")
     ]
+
+
+def _canonical_core(service):
+    return {
+        table: sorted(repr(row) for row in rows(service, f"SELECT * FROM {table}"))
+        for table in ("ci_files", "ci_symbols", "ci_relations")
+    }
+
+
+def _assert_full_equivalent(backend, service, service_factory, name="run"):
+    snapshot = handle(backend)
+    symbol = find(backend, snapshot, name)
+    incremental = {
+        operation: query(backend, snapshot, operation, **parameters)
+        for operation, parameters in (
+            ("get_call_graph", {"symbol_id": symbol["symbol_id"]}),
+            ("get_file_dependencies", {"path": symbol["path"], "depth": 3}),
+        )
+    }
+    expected = _canonical_core(service)
+    try:
+        fresh = service_factory(backend)
+        fresh_snapshot = handle(backend)
+        assert find(backend, fresh_snapshot, name) == symbol
+        assert _canonical_core(fresh) == expected
+        for operation, result in incremental.items():
+            parameters = (
+                {"symbol_id": symbol["symbol_id"]}
+                if operation == "get_call_graph"
+                else {"path": symbol["path"], "depth": 3}
+            )
+            actual = query(backend, fresh_snapshot, operation, **parameters)
+            assert {k: v for k, v in actual.items() if k != "snapshot"} == {
+                k: v for k, v in result.items() if k != "snapshot"
+            }
+    finally:
+        backend.index_service = service
+
+
+def test_local_body_edit_preserves_parent_and_unrelated_rows(tmp_path, service_factory):
+    backend = backend_for(
+        tmp_path,
+        {
+            "a": {
+                "provider.py": "def first(): return 1\ndef second(): return 2\n",
+                "caller.py": "from provider import first, second\ndef run(): return first()\n",
+                "unrelated.py": "def independent(): return 3\n",
+            }
+        },
+    )
+    service = service_factory(backend)
+    find(backend, handle(backend), "run")
+    columns = {
+        "files": "path",
+        "li_parse_cache": "path",
+        "ci_files": "path",
+        "ci_symbols": "path",
+        "ci_relations": "source_path",
+        "li_binding_cache": "path",
+    }
+    untouched = {
+        table: rows(service, f"SELECT rowid,* FROM {table} WHERE {column}='unrelated.py'")
+        for table, column in columns.items()
+    }
+    with sqlite3.connect(service.path) as db:
+        db.executescript("""
+            CREATE TRIGGER no_project_delete BEFORE DELETE ON li_projects
+            BEGIN SELECT RAISE(ABORT, 'parent must survive local publication'); END;
+            CREATE TRIGGER no_unrelated_delete BEFORE DELETE ON ci_relations
+            WHEN OLD.source_path='unrelated.py'
+            BEGIN SELECT RAISE(ABORT, 'unrelated rows must survive'); END;
+        """)
+    caller = backend.sources["a"].root / "caller.py"
+    caller.write_text(caller.read_text().replace("return first()", "return second()"))
+    find(backend, handle(backend), "run")
+    stats = service.status("a")["stats"]
+    assert stats["publication_mode"] == "local"
+    assert stats["rebound_files"] == stats["published_fact_files"] == 1
+    assert service.status("a")["storage"]["last_publication"]["inserted_rows"]["ci_symbols"] == 2
+    assert untouched == {
+        table: rows(service, f"SELECT rowid,* FROM {table} WHERE {column}='unrelated.py'")
+        for table, column in columns.items()
+    }
+    _assert_full_equivalent(backend, service, service_factory)
+
+
+@pytest.mark.parametrize("change", ["add_export", "rename", "shift", "new_module", "delete"])
+def test_local_namespace_changes_match_fresh_build(tmp_path, service_factory, change):
+    files = {
+        "caller.py": "from provider import wanted\ndef run(): return wanted()\n",
+        "unrelated.py": "def independent(): return 3\n",
+    }
+    if change != "new_module":
+        files["provider.py"] = (
+            "def other(): return 2\n" if change == "add_export" else "def wanted(): return 1\n"
+        )
+    backend = backend_for(tmp_path, {"a": files})
+    service = service_factory(backend)
+    find(backend, handle(backend), "run")
+    provider = backend.sources["a"].root / "provider.py"
+    if change in {"add_export", "new_module"}:
+        provider.write_text(
+            (provider.read_text() if provider.exists() else "") + "def wanted(): return 1\n"
+        )
+    elif change == "rename":
+        provider.write_text(provider.read_text().replace("wanted", "replacement"))
+    elif change == "shift":
+        provider.write_text("# shifted declaration\n" + provider.read_text())
+    else:
+        provider.unlink()
+    symbol = find(backend, handle(backend), "run")
+    stats = service.status("a")["stats"]
+    assert stats["publication_mode"] == "local"
+    assert stats["reused_relation_files"] >= 1
+    graph = query(backend, handle(backend), "get_call_graph", symbol_id=symbol["symbol_id"])
+    resolved = any(e["kind"] == "CALL" and e["resolution"] == "resolved" for e in graph["edges"])
+    assert resolved == (change not in {"delete", "rename"})
+    _assert_full_equivalent(backend, service, service_factory)
+
+
+def test_local_reexport_chain_and_cycles_match_full_build(tmp_path, service_factory):
+    backend = backend_for(
+        tmp_path,
+        {
+            "a": {
+                "provider.py": "def wanted(): return 1\n",
+                "facade.py": "from provider import wanted\n",
+                "caller.py": "from facade import wanted\ndef run(): return wanted()\n",
+                "cycle_a.py": "from cycle_b import missing\ndef a(): return missing()\n",
+                "cycle_b.py": "from cycle_a import missing\ndef b(): return missing()\n",
+                "unrelated.py": "def independent(): return 3\n",
+            }
+        },
+    )
+    service = service_factory(backend)
+    find(backend, handle(backend), "run")
+    provider = backend.sources["a"].root / "provider.py"
+    provider.write_text("# shifted\n" + provider.read_text())
+    find(backend, handle(backend), "run")
+    stats = service.status("a")["stats"]
+    assert stats["publication_mode"] == "local"
+    assert stats["reused_relation_files"] == 3
+    _assert_full_equivalent(backend, service, service_factory)
+
+
+@pytest.mark.parametrize("change", ["overload", "new_type", "inheritance"])
+def test_local_java_target_changes_match_full_build(tmp_path, service_factory, change):
+    files = {
+        "demo/Tools.java": "package demo; public class Tools { "
+        "public static int clean(int x) { return x; } }\n",
+        "api/Service.java": "package api; import demo.Tools; import demo.*; "
+        "public class Service { public Object run() { "
+        + ("return new Later();" if change == "new_type" else "return Tools.clean(1);")
+        + " } }\n",
+        "demo/Base.java": "package demo; public class Base {}\n",
+        "demo/Child.java": "package demo; public class Child extends Base {}\n",
+        "demo/Unrelated.java": "package demo; public class Unrelated {}\n",
+    }
+    backend = backend_for(tmp_path, {"a": files})
+    service = service_factory(backend)
+    find(backend, handle(backend), "run")
+    root = backend.sources["a"].root
+    if change == "overload":
+        target = root / "demo/Tools.java"
+        target.write_text(target.read_text().replace("int x)", "int x, int y)"))
+    elif change == "new_type":
+        (root / "demo/Later.java").write_text("package demo; public class Later {}\n")
+    else:
+        target = root / "demo/Base.java"
+        target.write_text("\n" + target.read_text())
+    find(backend, handle(backend), "run")
+    assert service.status("a")["stats"]["publication_mode"] == "local"
+    assert service.status("a")["stats"]["reused_relation_files"] >= 1
+    _assert_full_equivalent(backend, service, service_factory)
+
+
+def test_local_publication_failure_rolls_back_all_tables(tmp_path, service_factory):
+    backend = backend_for(
+        tmp_path,
+        {
+            "a": {
+                "provider.py": "def wanted(): return 1\n",
+                "caller.py": "from provider import wanted\ndef run(): return wanted()\n",
+            }
+        },
+    )
+    service = service_factory(backend)
+    find(backend, handle(backend), "run")
+    before = {
+        table: rows(service, f"SELECT * FROM {table} ORDER BY rowid")
+        for table in ("li_projects", *module._TABLES)
+    }
+    with sqlite3.connect(service.path) as db:
+        db.executescript("""
+            CREATE TRIGGER fail_relation_insert BEFORE INSERT ON ci_relations
+            BEGIN SELECT RAISE(ABORT, 'injected publication failure'); END;
+        """)
+    caller = backend.sources["a"].root / "caller.py"
+    caller.write_text(caller.read_text().replace("return wanted()", "return wanted() + 1"))
+    failed = query(backend, handle(backend), "symbol_search", query="run")
+    assert failed["index_not_ready"] and failed["reason"] == "INDEX_BUILD_FAILED"
+    assert before == {
+        table: rows(service, f"SELECT * FROM {table} ORDER BY rowid") for table in before
+    }
+    with sqlite3.connect(service.path) as db:
+        db.execute("DROP TRIGGER fail_relation_insert")
+    find(backend, handle(backend), "run")
+    _assert_full_equivalent(backend, service, service_factory)
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt", "wrong_type", "budget"])
+def test_local_evidence_unavailable_falls_back_to_full(
+    tmp_path, service_factory, monkeypatch, damage
+):
+    backend = backend_for(tmp_path, {"a": python_files("")})
+    service = service_factory(backend)
+    find(backend, handle(backend), "ingest")
+    if damage == "budget":
+        monkeypatch.setattr(module, "_MAX_BINDING_BYTES", 1)
+    else:
+        with sqlite3.connect(service.path) as db:
+            if damage == "missing":
+                db.execute("DELETE FROM li_binding_cache WHERE path='pkg/service.py'")
+            else:
+                db.execute(
+                    "UPDATE li_binding_cache SET data=? WHERE path='pkg/service.py'",
+                    (17 if damage == "wrong_type" else b"BC1:broken",),
+                )
+    helper = backend.sources["a"].root / "pkg/helper.py"
+    helper.write_text(helper.read_text().replace("return doc.value", "return doc.value + 1"))
+    find(backend, handle(backend), "ingest")
+    assert service.status("a")["stats"]["publication_mode"] == "full"
+    _assert_full_equivalent(backend, service, service_factory, "ingest")
+
+
+def test_local_binding_evidence_survives_restart(tmp_path, service_factory):
+    backend = backend_for(tmp_path, {"a": python_files("")})
+    directory = tmp_path / "restart-local"
+    service = service_factory(backend, data_dir=directory)
+    find(backend, handle(backend), "ingest")
+    service.close()
+    service = service_factory(backend, data_dir=directory)
+    helper = backend.sources["a"].root / "pkg/helper.py"
+    helper.write_text(helper.read_text().replace("return doc.value", "return doc.value + 1"))
+    find(backend, handle(backend), "ingest")
+    assert service.status("a")["stats"]["publication_mode"] == "local"
+    assert service.status("a")["stats"]["rebound_files"] == 1
+    _assert_full_equivalent(backend, service, service_factory, "ingest")
 
 
 def test_legacy_endpoint_indexes_migrate_without_losing_unresolved_facts(tmp_path, service_factory):
@@ -931,7 +1183,9 @@ def test_legacy_json_parses_and_relations_remain_readable_and_reusable(tmp_path,
     reopened.invalidate("a")
     after = query(backend, snapshot, "get_call_graph", symbol_id=ingest["symbol_id"])
     assert after["edges"] == before["edges"]
-    assert reopened.status("a")["stats"]["reused_relation_files"] == 4
+    # Rewritten legacy payloads invalidate the declaration cache's parse digest.
+    # Rebuild its read evidence once; subsequent edits can use local publication.
+    assert reopened.status("a")["stats"]["reused_relation_files"] == 0
     # JSON-only builds select PARSER_VERSION. They must skip packed CP1 rows
     # on rollback and regenerate their own facts from the original source.
     assert rows(

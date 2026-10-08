@@ -24,11 +24,12 @@ import time
 import zlib
 from collections import OrderedDict
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, TimeoutError
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from threading import RLock
 from typing import TYPE_CHECKING
 
+from code_context.binding_dependencies import declaration_summary, summary_file
 from code_context.fact_payloads import FactCacheError, decode_fact
 from code_context.intelligence_index import (
     INDEX_VERSION,
@@ -52,15 +53,22 @@ if TYPE_CHECKING:
 _APPLICATION_ID = 0x434C4958
 _SCHEMA_VERSION = 1
 _PAGE_SIZE = 4096
-_INDEX_VERSION = f"live-facts-v4-{INDEX_VERSION}"
+_INDEX_VERSION = f"live-facts-v5-local-{INDEX_VERSION}"
 _PARSE_CACHE_VERSION = f"live-packed-v1-{PARSER_VERSION}"
+_BINDING_CACHE_VERSION = "binding-reads-v1"
+_MAX_BINDING_BYTES = 16 * 1024 * 1024
 _CONFIG_PATHS = frozenset({"pyproject.toml", ".gitignore", ".codecontextignore"})
 # Disk space is allocated on demand; this is not a process memory ceiling.
 MAX_LIVE_DATABASE_BYTES = 500 * 1024 * 1024
 # Compressed payload budgets remain separate from physical pages.
 MAX_LIVE_INDEX_BYTES = 48 * 1024 * 1024
 MAX_LIVE_FACTS = 200_000
-_TABLES = ("files", "li_parse_cache", "ci_files", "ci_symbols", "ci_relations")
+_TABLES = ("files", "li_parse_cache", "ci_files", "ci_symbols", "ci_relations", "li_binding_cache")
+_BINDING_SCHEMA = """CREATE TABLE IF NOT EXISTS li_binding_cache (
+    project_id TEXT NOT NULL, source_id TEXT NOT NULL, path TEXT NOT NULL,
+    data BLOB NOT NULL, PRIMARY KEY(project_id, path),
+    FOREIGN KEY(project_id, source_id) REFERENCES li_projects(project_id, source_id)
+    ON DELETE CASCADE)"""
 _SCHEMA = (
     """CREATE TABLE li_projects (
         project_id TEXT PRIMARY KEY, source_id TEXT NOT NULL,
@@ -109,6 +117,7 @@ _SCHEMA = (
     "CREATE INDEX ci_relation_target ON ci_relations(project_id, revision, target_symbol_id) "
     "WHERE target_symbol_id IS NOT NULL",
     "CREATE INDEX ci_relation_file ON ci_relations(project_id, revision, source_path)",
+    _BINDING_SCHEMA,
 )
 
 
@@ -148,6 +157,50 @@ def _row_budget(row: tuple) -> int:
     return len(encode(row).encode("utf-8"))
 
 
+def _payload_digest(payload):
+    if payload is None:
+        return None
+    if not isinstance(payload, (str, bytes)):
+        raise FactCacheError("invalid derived payload type")
+    raw = payload if isinstance(payload, bytes) else payload.encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _binding_payload(value):
+    return b"BC1:" + zlib.compress(encode(value).encode("utf-8"), level=1)
+
+
+def _bindings_digest(rows):
+    digest = hashlib.sha256()
+    for path, payload in sorted(rows):
+        digest.update(encode(path).encode("utf-8"))
+        digest.update(_payload_digest(payload).encode("ascii"))
+    return digest.hexdigest()
+
+
+def _binding_cached(payload, path, language, cached):
+    value = decode_fact(payload, prefix=b"BC1:", max_bytes=MAX_SNAPSHOT_PARSE_BYTES)
+    if (
+        value.get("version") != _BINDING_CACHE_VERSION
+        or value.get("sha256") != cached[0]
+        or value.get("parse_digest") != _payload_digest(cached[1])
+        or not isinstance(value.get("reads"), dict)
+        or any(
+            not isinstance(key, str) or not isinstance(digest, str) or len(digest) != 64
+            for key, digest in value["reads"].items()
+        )
+        or any(
+            type(value.get(key)) is not int or not 0 <= value[key] <= MAX_LIVE_DATABASE_BYTES
+            for key in ("parse_bytes", "parse_facts", "index_bytes", "index_facts")
+        )
+    ):
+        raise FactCacheError("invalid binding cache")
+    try:
+        return value, summary_file(value["summary"], path, language)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise FactCacheError("invalid binding summary") from None
+
+
 def _language(path: str) -> str:
     suffix = PurePosixPath(path).suffix.lower()
     return "python" if suffix in {".py", ".pyi"} else "java" if suffix == ".java" else "unsupported"
@@ -182,6 +235,13 @@ class _Build:
     symbols: list[tuple]
     relations: list[tuple]
     stats: dict
+    bindings: list[tuple] = field(default_factory=list)
+    base_manifest: str | None = None
+    local: bool = False
+    file_updates: set[str] = field(default_factory=set)
+    parse_updates: set[str] = field(default_factory=set)
+    fact_updates: set[str] = field(default_factory=set)
+    removed: set[str] = field(default_factory=set)
 
 
 class LiveIndexService:
@@ -332,6 +392,10 @@ class LiveIndexService:
         if not db.execute("SELECT 1 FROM sqlite_master WHERE name='li_projects'").fetchone():
             self._storage_error = "GLOBAL_STORAGE_BUDGET_EXCEEDED"
             return
+        # Additive metadata only. Build 19 can still open this cache and safely
+        # rebuild its own facts; its parent deletion also removes these rows.
+        db.execute(_BINDING_SCHEMA)
+        db.commit()
         # NULL endpoints cannot match the symbol equality queries. Keep their
         # evidence rows, but omit those keys from the search indexes. This also
         # upgrades existing derived caches without changing the table schema.
@@ -512,6 +576,7 @@ class LiveIndexService:
             "facts_per_project": self.max_facts,
             "files_per_project": self.max_files,
             "retained_states": 1,
+            "binding_metadata_bytes_per_project": _MAX_BINDING_BYTES,
         }
 
     def _request(self, backend, source, project_id, handle, metadata, manifest):
@@ -844,7 +909,38 @@ class LiveIndexService:
                 if old_stats.get("relation_reuse_safe", False)
                 else None
             )
+            prior_bindings = (
+                {
+                    row["path"]: row["data"]
+                    for row in self._db.execute(
+                        "SELECT path, data FROM li_binding_cache WHERE project_id=?",
+                        (project_id,),
+                    )
+                }
+                if old_stats.get("local_bindings_complete")
+                else {}
+            )
+            try:
+                valid_bindings = _bindings_digest(prior_bindings.items()) == old_stats.get(
+                    "binding_metadata_digest"
+                )
+            except FactCacheError:
+                valid_bindings = False
+            if not valid_bindings:
+                prior_bindings = {}
+            old_files = (
+                {
+                    row["path"]: tuple(row)
+                    for row in self._db.execute(
+                        "SELECT * FROM files WHERE project_id=?", (project_id,)
+                    )
+                }
+                if old_stats
+                else {}
+            )
         files, parsed_files, parses = [], {}, []
+        billing, parse_rows, binding_data = {}, {}, {}
+        full_parses = {}
         reused_paths = set()
         # Batch the reusable parse hashes before the extraction loop acquires any
         # index lock. The usual manifest/context guards still run before publish;
@@ -865,6 +961,7 @@ class LiveIndexService:
                 if self._closed:
                     raise SourceError("INDEX_CLOSED: build cancelled")
             path, sha, parsed = item["path"], None, None
+            cached = cached_binding = None
             # Metadata consumes the index budget as well. Omitted paths have no facts.
             file_cost = len(
                 encode(
@@ -899,9 +996,22 @@ class LiveIndexService:
                         )
                 else:
                     cached = prior.pop(path, None) if supported else None
+                    cached_binding = None
                     if cached is not None:
                         try:
-                            parsed = _parse_cached_file(cached[1], max_bytes=self.max_parse_bytes)
+                            if path in prior_bindings:
+                                try:
+                                    cached_binding, parsed = _binding_cached(
+                                        prior_bindings[path], path, _language(path), cached
+                                    )
+                                except FactCacheError:
+                                    parsed = _parse_cached_file(
+                                        cached[1], max_bytes=self.max_parse_bytes
+                                    )
+                            else:
+                                parsed = _parse_cached_file(
+                                    cached[1], max_bytes=self.max_parse_bytes
+                                )
                             if parsed.path != path or parsed.language != _language(path):
                                 raise FactCacheError("invalid derived parse identity")
                         except FactCacheError:
@@ -942,6 +1052,7 @@ class LiveIndexService:
                                 except Exception:
                                     parsed = _limited(path, "PARSER_FAILED")
                                 parsed_count += 1
+                                full_parses[path] = parsed
                         del document
             files.append(
                 (
@@ -955,12 +1066,18 @@ class LiveIndexService:
                 )
             )
             if parsed is not None:
-                data = encode(parsed.to_dict())
-                cost = len(data.encode("utf-8"))
-                facts = sum(
-                    len(getattr(parsed, name))
-                    for name in ("symbols", "scopes", "bindings", "imports", "references")
-                )
+                if supported and cached_binding is not None:
+                    cost, facts = cached_binding["parse_bytes"], cached_binding["parse_facts"]
+                    data = None
+                    binding_data[path] = cached_binding
+                else:
+                    data = encode(parsed.to_dict())
+                    cost = len(data.encode("utf-8"))
+                    facts = sum(
+                        len(getattr(parsed, name))
+                        for name in ("symbols", "scopes", "bindings", "imports", "references")
+                    )
+                    full_parses[path] = parsed
                 if (
                     parse_bytes + cost > self.max_parse_bytes
                     or parse_facts + facts > self.max_facts
@@ -969,29 +1086,32 @@ class LiveIndexService:
                     data = encode(parsed.to_dict())
                     cost, facts = len(data.encode("utf-8")), 0
                     partial = True
+                    binding_data.pop(path, None)
+                    full_parses[path] = parsed
+                billing[path] = (cost, facts)
                 if parse_bytes + cost <= self.max_parse_bytes:
                     parse_bytes += cost
                     parse_facts += facts
                     if sha is not None and not any(
                         d.get("code", "").startswith("PROJECT_") for d in parsed.diagnostics
                     ):
-                        parses.append(
-                            (
-                                project_id,
-                                source.source_id,
-                                path,
-                                sha,
-                                # Old builds only understand plain JSON with
-                                # PARSER_VERSION. A distinct storage marker lets
-                                # them skip compressed rows and rebuild safely.
-                                _PARSE_CACHE_VERSION,
-                                _parse_cache_payload(data),
-                            )
+                        parse_row = (
+                            project_id,
+                            source.source_id,
+                            path,
+                            sha,
+                            # Old builds only understand plain JSON with
+                            # PARSER_VERSION. A distinct storage marker lets
+                            # them skip compressed rows and rebuild safely.
+                            _PARSE_CACHE_VERSION,
+                            cached[1] if data is None else _parse_cache_payload(data),
                         )
+                        parses.append(parse_row)
+                        parse_rows[path] = parse_row
                 parsed_files[path] = parsed
                 partial |= parsed.status != "ready"
         del prior
-        resolver = Resolver(parsed_files, configuration)
+        resolver = Resolver(parsed_files, configuration, track_dependencies=True)
         excluded_paths = {
             path
             for path, parsed in parsed_files.items()
@@ -1016,43 +1136,81 @@ class LiveIndexService:
             )
         )
         reuse_relations = old_topology_hash == topology_hash and reuse_safe
+        file_updates = {row[3] for row in files if old_files.get(row[3]) != row}
+        removed = set(old_files) - {row[3] for row in files}
+        local_candidate = (
+            reuse_safe
+            and old_stats.get("relation_reuse_safe", False)
+            and old_stats.get("local_bindings_complete", False)
+            and all(path in binding_data for path in reused_paths)
+            and list(resolver.python_source_roots) == old_stats.get("python_source_roots")
+            and not (_CONFIG_PATHS & (file_updates | removed))
+            and encode(exclusion_versions) == encode(old_stats.get("excluded_versions", []))
+        )
         reused_relation_files = 0
         indexed, symbols, relations = [], [], []
+        bindings, retained_facts = [], set()
+        fact_updates, parse_updates = set(), set()
+        binding_bytes = 0
         index_bytes, fact_count = file_bytes, 0
         languages, statuses = {}, {}
         for path, parsed in parsed_files.items():
-            symbol_rows = [
-                (
-                    project_id,
-                    source.source_id,
-                    1,
-                    symbol.id,
-                    path,
-                    symbol.name,
-                    symbol.qualname,
-                    symbol.kind,
-                    symbol.start_line,
-                    symbol.end_line,
-                    encode({**asdict(symbol), "symbol_id": symbol.id, "language": parsed.language}),
-                )
-                for symbol in parsed.symbols
-            ]
+            cached_info = binding_data.get(path)
+            reuse_file = reuse_relations and path in reused_paths and cached_info is not None
+            if local_candidate and path in reused_paths and not reuse_relations:
+                try:
+                    reuse_file = resolver.binding_reads.unchanged(cached_info["reads"])
+                except (ValueError, TypeError, KeyError):
+                    local_candidate, reuse_file = False, False
+            retain = local_candidate and reuse_file
+            symbol_rows = (
+                []
+                if retain
+                else [
+                    (
+                        project_id,
+                        source.source_id,
+                        1,
+                        symbol.id,
+                        path,
+                        symbol.name,
+                        symbol.qualname,
+                        symbol.kind,
+                        symbol.start_line,
+                        symbol.end_line,
+                        encode(
+                            {**asdict(symbol), "symbol_id": symbol.id, "language": parsed.language}
+                        ),
+                    )
+                    for symbol in parsed.symbols
+                ]
+            )
             relation_rows = []
-            if reuse_relations and path in reused_paths:
+            if reuse_file:
                 # Immutable file and unchanged project topology retain valid bindings.
                 # Load a single file at a time; never hold a second project-wide graph.
-                with self._lock:
-                    old_rows = self._db.execute(
-                        "SELECT source_symbol_id, target_path, target_symbol_id, "
-                        "kind, resolution, line, data FROM ci_relations "
-                        "WHERE project_id=? AND source_path=? ORDER BY rowid",
-                        (project_id, path),
-                    ).fetchall()
-                relation_rows = [
-                    (project_id, source.source_id, 1, path, *tuple(row)) for row in old_rows
-                ]
+                if not retain:
+                    with self._lock:
+                        old_rows = self._db.execute(
+                            "SELECT source_symbol_id, target_path, target_symbol_id, "
+                            "kind, resolution, line, data FROM ci_relations "
+                            "WHERE project_id=? AND source_path=? ORDER BY rowid",
+                            (project_id, path),
+                        ).fetchall()
+                    relation_rows = [
+                        (project_id, source.source_id, 1, path, *tuple(row)) for row in old_rows
+                    ]
                 reused_relation_files += 1
             else:
+                # Unchanged sources use declaration-only inputs until their reads
+                # actually changed. Reload just that file's validated parse body.
+                if path not in full_parses and path in parse_rows:
+                    parsed = _parse_cached_file(
+                        parse_rows[path][-1], max_bytes=self.max_parse_bytes
+                    )
+                    resolver.files[path] = parsed
+                    full_parses[path] = parsed
+                fact_updates.add(path)
                 for relation in resolver.resolve_file(path):
                     relation_rows.append(
                         (
@@ -1079,10 +1237,13 @@ class LiveIndexService:
                 parsed.module,
                 encode({"items": parsed.diagnostics[:20]}),
             )
-            cost = len(encode(indexed_row).encode("utf-8")) + sum(
-                _row_budget(row) for row in [*symbol_rows, *relation_rows]
+            cost = (
+                cached_info["index_bytes"]
+                if retain
+                else len(encode(indexed_row).encode("utf-8"))
+                + sum(_row_budget(row) for row in [*symbol_rows, *relation_rows])
             )
-            count = len(symbol_rows) + len(relation_rows)
+            count = cached_info["index_facts"] if retain else len(symbol_rows) + len(relation_rows)
             status, diagnostics = parsed.status, parsed.diagnostics
             accepted = (
                 index_bytes + cost <= self.max_index_bytes and fact_count + count <= self.max_facts
@@ -1097,6 +1258,8 @@ class LiveIndexService:
             else:
                 symbols.extend(symbol_rows)
                 relations.extend(relation_rows)
+                if retain:
+                    retained_facts.add(path)
                 index_bytes += cost
                 fact_count += count
             languages[parsed.language] = languages.get(parsed.language, 0) + 1
@@ -1117,6 +1280,64 @@ class LiveIndexService:
             elif index_bytes + metadata_cost <= self.max_index_bytes:
                 index_bytes += metadata_cost
                 indexed.append(indexed_row)
+            # Incomplete/resource-limited builds keep their original full-build
+            # semantics. Auxiliary metadata is capped independently inside the
+            # same physical database; exhausting it disables local optimization.
+            parse_row = parse_rows.get(path)
+            if reuse_safe:
+                reads = (
+                    cached_info["reads"]
+                    if reuse_file and cached_info
+                    else resolver.binding_reads.files.get(path, {})
+                )
+                if retain:
+                    payload = prior_bindings[path]
+                else:
+                    payload = _binding_payload(
+                        {
+                            "version": _BINDING_CACHE_VERSION,
+                            "summary": declaration_summary(parsed),
+                            "reads": reads,
+                            "sha256": parse_row[3] if parse_row else None,
+                            "parse_digest": _payload_digest(parse_row[-1]) if parse_row else None,
+                            "parse_bytes": billing[path][0],
+                            "parse_facts": billing[path][1],
+                            "index_bytes": cost,
+                            "index_facts": count,
+                        }
+                    )
+                binding_bytes += len(payload)
+                bindings.append((project_id, source.source_id, path, payload))
+            if path not in reused_paths:
+                parse_updates.add(path)
+        local_complete = (
+            reuse_safe
+            and len(bindings) == len(parsed_files)
+            and binding_bytes <= _MAX_BINDING_BYTES
+        )
+        local = bool(local_candidate and local_complete)
+        if not local_complete:
+            bindings = []
+        if not local:
+            # Full fallback still needs the untouched facts that a local build
+            # retained in-place. Read them only on this uncommon fallback path.
+            with self._lock:
+                for path in sorted(retained_facts):
+                    symbols.extend(
+                        tuple(row)
+                        for row in self._db.execute(
+                            "SELECT * FROM ci_symbols WHERE project_id=? AND path=? ORDER BY rowid",
+                            (project_id, path),
+                        )
+                    )
+                    relations.extend(
+                        tuple(row)
+                        for row in self._db.execute(
+                            "SELECT * FROM ci_relations WHERE project_id=? AND source_path=? "
+                            "ORDER BY rowid",
+                            (project_id, path),
+                        )
+                    )
         stats = {
             "partial": partial or bool(resolver.python_roots.diagnostic),
             "supported_languages": ["python", "java"],
@@ -1135,6 +1356,15 @@ class LiveIndexService:
             "rebound_files": len(parsed_files) - reused_relation_files,
             "relation_reuse_safe": reuse_safe,
             "topology_hash": topology_hash,
+            "excluded_versions": exclusion_versions,
+            "local_bindings_complete": local_complete,
+            "binding_metadata_digest": _bindings_digest((row[2], row[3]) for row in bindings)
+            if local_complete
+            else None,
+            "binding_metadata_bytes": binding_bytes if local_complete else 0,
+            "publication_mode": "local" if local else "full",
+            "published_fact_files": len(fact_updates) if local else len(parsed_files),
+            "published_metadata_files": len(file_updates) if local else len(files),
             "source_bytes": source_bytes,
             "parse_payload_bytes": parse_bytes,
             "index_payload_bytes": index_bytes,
@@ -1156,12 +1386,28 @@ class LiveIndexService:
             symbols,
             relations,
             stats,
+            bindings,
+            old["manifest"] if old else None,
+            local,
+            file_updates,
+            parse_updates,
+            fact_updates,
+            removed,
         )
 
     def _publish(self, build):
         # Retry an atomic replacement with successively more LRU victims. SQLITE_FULL
         # rolls back the entire transaction, including attempted evictions.
         db = self._db
+        if build.local:
+            base = self._cached(build.project_id)
+            if (
+                base is None
+                or base["manifest"] != build.base_manifest
+                or base["source_id"] != build.source_id
+                or base["index_version"] != self._index_version
+            ):
+                raise SourceError("LIVE_INDEX_CHANGED: local publication base changed")
         victims = [
             row[0]
             for row in db.execute(
@@ -1181,28 +1427,72 @@ class LiveIndexService:
                 "fact_count": build.stats["fact_count"],
                 "index_payload_bytes": build.stats["index_payload_bytes"],
                 "parse_payload_bytes": build.stats["parse_payload_bytes"],
+                "mode": "local" if build.local else "full",
             }
             try:
                 db.execute("BEGIN IMMEDIATE")
-                for project_id in [build.project_id, *victims[:count]]:
+                for project_id in victims[:count]:
                     db.execute("DELETE FROM li_projects WHERE project_id=?", (project_id,))
-                db.execute(
-                    "INSERT INTO li_projects VALUES(?, ?, ?, ?, ?, ?)",
-                    (
-                        build.project_id,
-                        build.source_id,
-                        build.manifest,
-                        self._index_version,
-                        encode(build.stats),
-                        time.time(),
-                    ),
+                if build.local:
+                    db.execute(
+                        "UPDATE li_projects SET manifest=?, index_version=?, stats=?, last_used=? "
+                        "WHERE project_id=? AND source_id=?",
+                        (
+                            build.manifest,
+                            self._index_version,
+                            encode(build.stats),
+                            time.time(),
+                            build.project_id,
+                            build.source_id,
+                        ),
+                    )
+                else:
+                    db.execute("DELETE FROM li_projects WHERE project_id=?", (build.project_id,))
+                    db.execute(
+                        "INSERT INTO li_projects VALUES(?, ?, ?, ?, ?, ?)",
+                        (
+                            build.project_id,
+                            build.source_id,
+                            build.manifest,
+                            self._index_version,
+                            encode(build.stats),
+                            time.time(),
+                        ),
+                    )
+                self._last_publication["inserted_rows"] = {}
+                local_paths = (
+                    build.file_updates,
+                    build.parse_updates,
+                    build.parse_updates,
+                    build.parse_updates,
+                    build.fact_updates,
+                    build.fact_updates,
                 )
+                path_columns = ("path", "path", "path", "path", "source_path", "path")
+                path_indexes = (3, 2, 3, 4, 3, 2)
                 for table, rows in zip(
                     _TABLES,
-                    (build.files, build.parses, build.indexed, build.symbols, build.relations),
+                    (
+                        build.files,
+                        build.parses,
+                        build.indexed,
+                        build.symbols,
+                        build.relations,
+                        build.bindings,
+                    ),
                     strict=True,
                 ):
                     self._last_publication["phase"] = table
+                    if build.local:
+                        position = _TABLES.index(table)
+                        paths = local_paths[position]
+                        db.executemany(
+                            f"DELETE FROM {table} WHERE project_id=? "
+                            f"AND {path_columns[position]}=?",
+                            ((build.project_id, path) for path in sorted(paths | build.removed)),
+                        )
+                        rows = [row for row in rows if row[path_indexes[position]] in paths]
+                    self._last_publication["inserted_rows"][table] = len(rows)
                     if rows:
                         db.executemany(
                             f"INSERT INTO {table} VALUES({','.join('?' for _ in rows[0])})", rows
@@ -1216,6 +1506,9 @@ class LiveIndexService:
                 db.rollback()
                 if exc.sqlite_errorcode != sqlite3.SQLITE_FULL:
                     raise
+            except Exception:
+                db.rollback()
+                raise
             else:
                 self._last_publication.update(phase="committed", complete=True)
                 for project_id in victims[:count]:
