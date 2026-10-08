@@ -325,6 +325,7 @@ def bundle_resources(
     copy_tree(
         workspace / "src/code_context", resources / "backend/src/code_context", python_only=True
     )
+    bundle_sandbox(workspace, resources / "backend/src/code_context/resources/sandbox")
     sample = workspace / "examples/sample_project"
     for name in ("main.py", "models.py"):
         copy_file(sample / name, resources / "sample_project" / name, sample)
@@ -337,6 +338,49 @@ def bundle_resources(
             source = workspace / "THIRD_PARTY_NOTICES"
         copy_file(source, resources / "licenses" / source.name, workspace)
     (resources / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n")
+
+
+def bundle_sandbox(workspace: Path, destination: Path) -> None:
+    """Copy the fixed production dependency closure and its original licenses.
+
+    This step verifies an already installed npm lock, and never fetches packages
+    or runs lifecycle scripts. The host's approved Node runtime is discovered
+    separately; a full Codex/Node distribution is not silently bundled.
+    """
+    source = workspace / "src/code_context/resources/sandbox"
+    try:
+        package = json.loads((source / "package.json").read_text())
+        lock = json.loads((source / "package-lock.json").read_text())
+        expected = "0.0.78"
+        if (
+            package["dependencies"] != {"@anthropic-ai/sandbox-runtime": expected}
+            or lock["lockfileVersion"] != 3
+        ):
+            raise PackageError("Sandbox dependency version must remain pinned.")
+        entries = lock["packages"]
+        for path, entry in entries.items():
+            if not path:
+                continue
+            relative = Path(path)
+            if not path.startswith("node_modules/") or ".." in relative.parts or entry.get("dev"):
+                raise PackageError("Sandbox lock contains an unexpected dependency.")
+            installed = json.loads((source / relative / "package.json").read_text())
+            if installed["version"] != entry["version"] or not entry.get("integrity"):
+                raise PackageError("Installed sandbox dependency differs from lock.")
+        if entries["node_modules/@anthropic-ai/sandbox-runtime"]["version"] != expected:
+            raise PackageError("Sandbox runtime lock differs from the fixed version.")
+        for name in (
+            "helper.mjs",
+            "database-probe.mjs",
+            "node-service.cjs",
+            "package.json",
+            "package-lock.json",
+        ):
+            copy_file(source / name, destination / name, source)
+        copy_tree(source / "node_modules", destination / "node_modules")
+        copy_tree(source / "licenses", destination / "licenses")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise PackageError("Fixed sandbox runtime or license inventory is unavailable.") from exc
 
 
 def runtime_configuration(
@@ -457,6 +501,7 @@ def verify_relocation(app: Path, output_dir: Path) -> None:
             raise PackageError("The relocated interpreter is not Python 3.11.")
         probe = (
             "import pathlib,sys,ssl,sqlite3; import code_context.cli,mcp,httpx; "
+            "import code_context.terminal,code_context.terminal_read; "
             "import pydantic_core,watchfiles,cryptography.hazmat.bindings._rust; "
             "import tree_sitter,tree_sitter_java; "
             "tree_sitter.Parser(tree_sitter.Language(tree_sitter_java.language())); "

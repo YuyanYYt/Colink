@@ -340,6 +340,10 @@ def desktop_control(workspace: Path, root: Path, action: str, parameters: dict):
         "enable_write": {"project_ids"},
         "disable_write": set(),
         "recover_write": {"project_id"},
+        "enable_execution": {"project_ids", "ports"},
+        "disable_execution": set(),
+        "confirm_port_release": {"plan_id", "allow_force"},
+        "development_status": {"project_id"},
     }
     if (
         not isinstance(action, str)
@@ -352,7 +356,7 @@ def desktop_control(workspace: Path, root: Path, action: str, parameters: dict):
     def valid_id(value):
         return isinstance(value, str) and 0 < len(value) <= 256 and "\x00" not in value
 
-    if action == "enable_write":
+    if action in {"enable_write", "enable_execution"}:
         projects = parameters["project_ids"]
         if (
             not isinstance(projects, list)
@@ -361,6 +365,12 @@ def desktop_control(workspace: Path, root: Path, action: str, parameters: dict):
             or len(set(projects)) != len(projects)
         ):
             raise SyncError("select explicit current project IDs before enabling writes")
+    if action == "enable_execution" and (
+        not isinstance(parameters["ports"], list)
+        or len(parameters["ports"]) > 16
+        or any(type(p) is not int or not 1024 <= p <= 65535 for p in parameters["ports"])
+    ):
+        raise SyncError("select exact local development ports")
     if any(
         key in parameters and not valid_id(parameters[key])
         for key in ("project_id", "task_id", "request_id")
@@ -387,11 +397,22 @@ def desktop_control(workspace: Path, root: Path, action: str, parameters: dict):
             or result.get("write_projects") != []
         ):
             raise SyncError("backend did not confirm that writes are disabled")
+        if action == "enable_execution" and (
+            result.get("execution_enabled") is not True
+            or set(result.get("execution_projects", [])) != set(projects)
+        ):
+            raise SyncError("backend did not confirm exact execution projects")
+        if action == "disable_execution" and result.get("execution_enabled") is not False:
+            raise SyncError("backend did not confirm that execution is disabled")
         return result
     except (SourceError, SyncError):
-        if action == "enable_write":
+        if action in {"enable_write", "enable_execution"}:
             try:
-                control_request(binding.data, "disable_write", {})
+                control_request(
+                    binding.data,
+                    "disable_write" if action == "enable_write" else "disable_execution",
+                    {},
+                )
             except SourceError:
                 pass
         raise

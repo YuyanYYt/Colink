@@ -1,0 +1,10 @@
+{
+  "name": "colink-sandbox-helper",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "CoLink per-job native sandbox adapter; no model or shell credentials",
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.78"
+  }
+}

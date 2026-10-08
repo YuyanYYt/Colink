@@ -15,6 +15,8 @@ WRITE_TOOL_NAMES = {
     "delete_file",
     "finish_write_task",
     "write_task_status",
+    "move_path",
+    "move_path_status",
 }
 
 
@@ -37,12 +39,43 @@ def register_write_tools(mcp, coordinator, authorize):
                 "WRITE_OPERATION_FAILED: preserve materials and inspect locally"
             ) from None
 
+    @mcp.tool(annotations=read, structured_output=True)
+    def move_path_status(project_id: str, path: str) -> dict[str, Any]:
+        """Read a bounded file/tree identity for an explicitly planned move, including
+        static assets. Use the exact sha256/tree_digest as the move precondition; no links,
+        credentials, nested projects or arbitrary directory expansion.
+        """
+        return call(project_id, lambda: coordinator.move_path_status(project_id, path))
+
+    @mcp.tool(annotations=write, structured_output=True)
+    def move_path(
+        project_id: str,
+        task_id: str,
+        request_id: str,
+        source_path: str,
+        target_path: str,
+        expected_sha256: str | None = None,
+    ) -> dict[str, Any]:
+        """Move one task-declared regular file or bounded source/resource tree, with pinned
+        source/target, no overwrite and durable two-end recovery. Expected hash is the exact
+        file SHA256 or tree_digest from move_path_status. Case-only changes use a journaled
+        unique two-step rename. No links, secrets, .git, nested roots or cross-filesystem move.
+        """
+        return call(
+            project_id,
+            lambda: coordinator.move_path(
+                project_id, task_id, request_id, source_path, target_path, expected_sha256
+            ),
+        )
+
     @mcp.tool(annotations=write, structured_output=True)
     def begin_write_task(
         project_id: str, request_id: str, title: str = "", paths: list[str] | None = None
     ) -> dict[str, Any]:
         """Begin one explicit user-requested editing task. Requires the local app's default-off
         project grant. Obtain next_task_request_id from write_task_status; reuse it on retry.
+        Pass title as a short, user-readable goal in the user's language, e.g. "Add login and
+        role permissions". It appears in the local app; do not use IDs or paste source code.
         Prefer declaring the exact target files and all future parent directories for large
         projects. Keep one task across related A/B/C edits. No commands or directory expansion.
         """
@@ -118,7 +151,7 @@ def register_write_tools(mcp, coordinator, authorize):
     @mcp.tool(annotations=write, structured_output=True)
     def finish_write_task(project_id: str, task_id: str, request_id: str) -> dict[str, Any]:
         """Complete a related edit task after requested checks, retaining at most the latest
-        completed comparison baseline for seven days. No command execution/test runner is provided.
+        completed comparison baseline for seven days. Execution has a separate local grant.
         Readback proves content, not business behavior. External changes cause a conflict.
         """
         return call(

@@ -22,13 +22,22 @@ jobs:
           python-version: '3.11'
       - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
       - run: uv sync --locked
+      - run: uv run python scripts/check-publication.py
       - run: uv run ruff check src tests macos scripts/check-publication.py
       - run: uv run ruff format --check src tests macos scripts/check-publication.py
-      - name: Test in an independent workspace directory
+      # This portable gate runs on both hosts. The macOS native process and
+      # isolated-runner integration suite is validated on Darwin 27 locally.
+      - name: Portable source, write, index, and packaging regression
         run: |
           mkdir -p .artifacts
-          colink_test_dir=$(mktemp -d .artifacts/ci-tests.XXXXXX)
-          uv run pytest -q --basetemp "$colink_test_dir"
+          colink_test_dir=$(mktemp -d .artifacts/ci-portable.XXXXXX)
+          uv run pytest -q --basetemp "$colink_test_dir" \
+            tests/test_publication.py tests/test_packaging.py tests/test_macos_assets.py \
+            tests/test_project_index.py tests/test_live_index.py \
+            tests/test_workspace.py tests/test_workspace_write.py \
+            tests/test_workspace_write_stdio.py tests/test_desktop_write.py \
+            tests/test_database_discovery.py tests/test_database_services.py \
+            tests/test_workspace_mcp_status.py
       - run: uv run colink demo
       - run: uv run colink demo-local
       - run: bash -n scripts/install-macos.sh

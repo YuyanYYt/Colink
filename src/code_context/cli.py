@@ -11,6 +11,7 @@ import uvicorn
 
 from code_context import __version__
 from code_context.client import RetryableSyncError, SyncClient, SyncError, read_local_status
+from code_context.execution_defaults import DEFAULT_HTTP_PORT
 from code_context.models import FileChange, SyncBatch
 from code_context.scanner import ScanError, Scanner
 from code_context.server import build_mcp, create_app
@@ -30,7 +31,7 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     serve = commands.add_parser("serve", help="启动 HTTP 同步接口与 /mcp 端点")
     serve.add_argument("--host", default="127.0.0.1")
-    serve.add_argument("--port", type=int, default=8765)
+    serve.add_argument("--port", type=int, default=DEFAULT_HTTP_PORT)
     serve.add_argument("--public-url", default=os.getenv("CODE_CONTEXT_PUBLIC_URL"))
     serve.add_argument("--data-dir", type=Path, default=Path(".code-context"))
 
@@ -113,7 +114,7 @@ def parser() -> argparse.ArgumentParser:
         if name != "scan":
             command.add_argument("--project", required=True)
         if name in {"sync", "watch", "status"}:
-            command.add_argument("--server", default="http://127.0.0.1:8765")
+            command.add_argument("--server", default=f"http://127.0.0.1:{DEFAULT_HTTP_PORT}")
         if name == "watch":
             command.add_argument("--reconcile-seconds", type=float, default=60)
     demo = commands.add_parser("demo", help="运行完整本机演示，验证同步、快照与 MCP")

@@ -1,5 +1,5 @@
 interface:
   display_name: "CoLink 代码上下文"
-  short_description: "按需读取自己的本机项目，解释代码、定位问题和审查改动；已有充分代码上下文时直接分析。"
+  short_description: "按需读取和修改本机项目；开发档运行终端、服务和数据库命令，只读档查询数据。"
 policy:
   allow_implicit_invocation: true

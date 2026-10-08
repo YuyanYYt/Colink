@@ -3,9 +3,18 @@
 import json
 from collections import defaultdict, deque
 
-from code_context.intelligence_models import CLASS_KINDS, module_id
+from code_context.fact_payloads import FactCacheError, decode_fact
+from code_context.intelligence_models import CLASS_KINDS, Relation, module_id
 from code_context.policy import validate_path
 from code_context.source_page import source_page
+
+
+def decode_relation(payload: str | bytes) -> dict:
+    """Decode legacy JSON or bounded, compressed live-index relation facts."""
+    value = decode_fact(payload, prefix=b"CL1:", max_bytes=65_536)
+    if value.keys() != Relation.__dataclass_fields__.keys():
+        raise FactCacheError("invalid derived relation") from None
+    return value
 
 
 def _bounds(offset: int, limit: int, maximum: int = 100) -> None:
@@ -212,7 +221,7 @@ def find_references(
     ).fetchall()
     return {
         "symbol": symbol,
-        "references": [json.loads(row["data"]) for row in rows],
+        "references": [decode_relation(row["data"]) for row in rows],
         "total": total,
         "offset": offset,
         "has_more": offset + len(rows) < total,
@@ -264,7 +273,7 @@ def symbol_graph(
             [project_id, revision, *sorted(kinds), *([current] * len(clauses)), max_edges + 1],
         ).fetchall()
         for row in rows:
-            relation = json.loads(row["data"])
+            relation = decode_relation(row["data"])
             key = row["data"]
             if key in seen:
                 continue
@@ -309,7 +318,7 @@ def _file_edges(db, project_id: str, revision: int) -> dict[tuple[str, str], dic
         "AND kind<>'CONTAINS' ORDER BY source_path, target_path, line",
         (project_id, revision),
     ):
-        relation = json.loads(row["data"])
+        relation = decode_relation(row["data"])
         key = relation["source_path"], relation["target_path"]
         if key not in edges:
             edges[key] = {
@@ -541,7 +550,7 @@ def external_dependencies(
         "AND kind='IMPORT' ORDER BY source_path, line",
         (project_id, revision),
     ):
-        relation = json.loads(row["data"])
+        relation = decode_relation(row["data"])
         name = relation.get("target_module") or relation["name"]
         if query and query.casefold() not in name.casefold():
             continue

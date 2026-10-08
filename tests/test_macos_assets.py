@@ -5,8 +5,11 @@ import plistlib
 import re
 import runpy
 import shutil
+import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+import pytest
 
 WORKSPACE = Path(__file__).resolve().parents[1]
 SVG = "{http://www.w3.org/2000/svg}"
@@ -66,10 +69,27 @@ def test_menu_and_brand_share_the_same_continuous_mark():
 
 def test_main_panel_keeps_controls_without_technical_metrics():
     panel = (WORKSPACE / "macos/CodeConnect/Panel.swift").read_text()
-    panel = panel.split("private struct ConnectionSetupView:")[0]
-    for required in ("选择文件夹", 'Label("启动"', 'Label("关闭"'):
+    panel = panel.split("private struct ModeAuthorizationView:")[0]
+    for required in (
+        "选择文件夹",
+        'Label("启动"',
+        'Label("关闭"',
+        'Image(systemName: "gearshape")',
+    ):
         assert required in panel
-    for removed in ("快照版本", "已收录文件", "私有隧道", "LOCAL ·", "没有后台采集"):
+    for removed in (
+        "数据库连接",
+        "快照版本",
+        "已收录文件",
+        "私有隧道",
+        "LOCAL ·",
+        "没有后台采集",
+        "允许运行项目",
+        "允许修改代码",
+        "开发环境与数据库引导",
+        "当前作业",
+        "存储位置",
+    ):
         assert removed not in panel
     assert "controller.phase == .failed || controller.phase == .external" in panel
 
@@ -131,6 +151,65 @@ def test_native_ui_removes_user_undo_but_preserves_interrupted_recovery():
     assert "回退这项任务" not in panel
     assert 'Button("恢复未完成任务")' in panel
     assert 'control("recover_write"' in runtime
+
+
+@pytest.mark.skipif(
+    shutil.which("xcrun") is None, reason="native Swift presentation requires macOS"
+)
+def test_task_presentation_uses_saved_goal_and_never_falls_back_to_internal_ids(tmp_path):
+    runtime = (WORKSPACE / "macos/CodeConnect/Runtime.swift").read_text()
+    model = (
+        "struct WorkspaceWriteTask"
+        + runtime.split("struct WorkspaceWriteTask", 1)[1].split("enum ConnectionPhase", 1)[0]
+    )
+    main = tmp_path / "main.swift"
+    main.write_text(
+        "import Foundation\n"
+        + model
+        + r"""
+func task(_ title: Any? = nil, state: String = "completed") -> WorkspaceWriteTask {
+    var values: [String: Any] = [
+        "task_id": "wt_internal", "project_id": "p_internal", "state": state
+    ]
+    if let title { values["title"] = title }
+    return WorkspaceWriteTask(values)!
+}
+assert(task("超市系统登录与角色权限").detail() == "最近完成：超市系统登录与角色权限")
+assert(task("登录与角色权限", state: "active").detail() == "任务进行中：登录与角色权限")
+assert(task("  Add\n login\tpermissions  ").summary == "Add login permissions")
+assert(task("修复\u{202E}登录\u{0000}").summary == "修复登录")
+assert(task().detail() == "最近完成：代码修改任务")
+assert(task(123).detail() == "最近完成：代码修改任务")
+assert(task().detail(projectName: "样例项目") == "最近完成：样例项目的代码修改")
+assert(task().detail(projectName: "p_internal") == "最近完成：代码修改任务")
+assert(task("p_internal").detail() == "最近完成：代码修改任务")
+assert(task("wt_internal").detail() == "最近完成：代码修改任务")
+let longTitle = task(String(repeating: "测", count: 80)).summary
+assert(longTitle.count == 49 && longTitle.hasSuffix("…"))
+assert(task("处理中", state: "recovery_required").detail() == "任务需要恢复：处理中")
+print("Task presentation checks passed")
+""",
+        encoding="utf-8",
+    )
+    binary = tmp_path / "task-presentation"
+    subprocess.run(
+        [
+            "xcrun",
+            "swiftc",
+            "-module-cache-path",
+            str(WORKSPACE / "swift-module-cache"),
+            str(main),
+            "-o",
+            str(binary),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = subprocess.run([str(binary)], check=True, capture_output=True, text=True)
+    assert "Task presentation checks passed" in result.stdout
+    detail = runtime.split("var taskDetail: String?", 1)[1].split("private var modeArguments", 1)[0]
+    assert "?? task.projectID" not in detail and "task.detail(projectName: name)" in detail
 
 
 def test_complete_mark_is_center_symmetric_about_the_canvas_center():

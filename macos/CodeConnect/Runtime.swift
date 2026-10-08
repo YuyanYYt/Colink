@@ -1,6 +1,8 @@
 import AppKit
 import Foundation
 import SwiftUI
+import Security
+import CryptoKit
 
 struct RuntimeConfiguration {
     let workspace: String
@@ -10,9 +12,23 @@ struct RuntimeConfiguration {
     let chatURL: String
     let python: String?
     let sourceMode: String
+    var developmentWorkspace: String? = nil
 
     var isBundled: Bool { python != nil }
     var isLive: Bool { sourceMode == "live" }
+    var commandWorkspace: String { developmentWorkspace ?? workspace }
+
+    func relocated(to destination: URL) throws -> RuntimeConfiguration {
+        try StorageLocation.relocate(self, to: destination)
+        if isBundled, let resources = Bundle.main.resourceURL {
+            try StorageLocation.prepareSample(in: destination,
+                                              template: resources.appendingPathComponent("sample_project"))
+        }
+        UserDefaults.standard.set(destination.standardizedFileURL.path, forKey: StorageLocation.preferenceKey)
+        return Self(workspace: destination.standardizedFileURL.path, uv: uv, client: client,
+                    sampleRoot: sampleRoot, chatURL: chatURL, python: python,
+                    sourceMode: sourceMode, developmentWorkspace: isBundled ? nil : commandWorkspace)
+    }
 
     private struct Manifest: Decodable {
         let mode: String?
@@ -37,7 +53,6 @@ struct RuntimeConfiguration {
             throw NSError(domain: "Colink", code: 7)
         }
         if values.mode == "bundled" {
-            let manager = FileManager.default
             guard let resources = Bundle.main.resourceURL, let python = values.python else {
                 throw NSError(domain: "Colink", code: 2)
             }
@@ -46,38 +61,36 @@ struct RuntimeConfiguration {
                       NSString(string: values.sampleRoot).isAbsolutePath else {
                     throw NSError(domain: "Colink", code: 8)
                 }
-                return Self(workspace: workspace, uv: "",
+                let location = StorageLocation.savedURL ?? URL(fileURLWithPath: workspace, isDirectory: true)
+                try StorageLocation.prepare(location)
+                return Self(workspace: location.path, uv: "",
                             client: resources.appendingPathComponent(values.client).path,
                             sampleRoot: values.sampleRoot, chatURL: values.chatURL,
                             python: resources.appendingPathComponent(python).path,
                             sourceMode: sourceMode)
             }
-            let support = try manager.url(for: .applicationSupportDirectory, in: .userDomainMask,
-                                          appropriateFor: nil, create: true)
+            let manager = FileManager.default
             let name = values.dataName ?? "Colink"
             guard !name.contains("/"), name != ".", name != ".." else {
                 throw NSError(domain: "Colink", code: 3)
             }
-            let workspace = support.appendingPathComponent(name, isDirectory: true)
-            if (try? workspace.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true {
-                throw NSError(domain: "Colink", code: 4)
+            let workspace = StorageLocation.savedURL ?? StorageLocation.defaultURL
+            let legacy = StorageLocation.legacyURL.deletingLastPathComponent()
+                .appendingPathComponent(name, isDirectory: true)
+            if StorageLocation.savedURL == nil,
+               manager.fileExists(atPath: legacy.appendingPathComponent(".code-context").path) {
+                let previous = Self(workspace: legacy.path, uv: "",
+                                    client: resources.appendingPathComponent(values.client).path,
+                                    sampleRoot: legacy.appendingPathComponent("examples/sample_project").path,
+                                    chatURL: values.chatURL,
+                                    python: resources.appendingPathComponent(python).path,
+                                    sourceMode: sourceMode)
+                _ = try previous.relocated(to: workspace)
             }
-            let examples = workspace.appendingPathComponent("examples", isDirectory: true)
-            let sample = examples.appendingPathComponent("sample_project", isDirectory: true)
-            for directory in [examples, sample] {
-                if (try? directory.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true {
-                    throw NSError(domain: "Colink", code: 6)
-                }
-            }
-            try manager.createDirectory(at: sample, withIntermediateDirectories: true,
-                                        attributes: [.posixPermissions: 0o700])
-            for name in ["main.py", "models.py"] {
-                let destination = sample.appendingPathComponent(name)
-                if !manager.fileExists(atPath: destination.path) {
-                    try manager.copyItem(at: resources.appendingPathComponent(values.sampleRoot)
-                        .appendingPathComponent(name), to: destination)
-                }
-            }
+            try StorageLocation.prepare(workspace)
+            let sample = workspace.appendingPathComponent("examples/sample_project", isDirectory: true)
+            try StorageLocation.prepareSample(in: workspace,
+                                              template: resources.appendingPathComponent(values.sampleRoot))
             return Self(workspace: workspace.path, uv: "", client: resources.appendingPathComponent(values.client).path,
                         sampleRoot: sample.path, chatURL: values.chatURL,
                         python: resources.appendingPathComponent(python).path,
@@ -86,9 +99,10 @@ struct RuntimeConfiguration {
         guard let workspace = values.workspace, let uv = values.uv else {
             throw NSError(domain: "Colink", code: 5)
         }
-        return Self(workspace: workspace, uv: uv, client: values.client,
+        let location = StorageLocation.savedURL?.path ?? workspace
+        return Self(workspace: location, uv: uv, client: values.client,
                     sampleRoot: values.sampleRoot, chatURL: values.chatURL, python: nil,
-                    sourceMode: sourceMode)
+                    sourceMode: sourceMode, developmentWorkspace: workspace)
     }
 }
 
@@ -124,6 +138,7 @@ struct WorkspaceWriteTask: Equatable {
     let id: String
     let projectID: String
     let state: String
+    let summary: String
 
     init?(_ value: [String: Any]) {
         guard let id = value["task_id"] as? String, !id.isEmpty, id.count <= 256,
@@ -132,12 +147,29 @@ struct WorkspaceWriteTask: Equatable {
         self.id = id
         self.projectID = projectID
         self.state = state
+        let summary = Self.compact(value["title"] as? String ?? "")
+        self.summary = summary == id || summary == projectID ? "" : summary
+    }
+
+    private static func compact(_ text: String) -> String {
+        let line = text.components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }.joined(separator: " ")
+        let visible = String(String.UnicodeScalarView(line.unicodeScalars.filter {
+            !CharacterSet.controlCharacters.contains($0)
+        })).trimmingCharacters(in: .whitespacesAndNewlines)
+        return visible.count > 48 ? String(visible.prefix(48)) + "…" : visible
+    }
+
+    func detail(projectName: String? = nil) -> String {
+        let name = Self.compact(projectName ?? "")
+        let fallback = name.isEmpty || name == projectID ? "代码修改任务" : "\(name)的代码修改"
+        return "\(title)：\(summary.isEmpty ? fallback : summary)"
     }
 
     var title: String {
         switch state {
         case "active": return "任务进行中"
-        case "completed": return "最近任务已完成"
+        case "completed": return "最近完成"
         case "rolled_back": return "任务已回退"
         case "rolling_back": return "任务回退待恢复"
         case "recovery_required": return "任务需要恢复"
@@ -196,6 +228,18 @@ private final class LocalControlOperation: @unchecked Sendable {
     }
 }
 
+enum CodeAccessMode: String, CaseIterable, Identifiable {
+    case readOnly, write, development
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .readOnly: return "只读"
+        case .write: return "写入"
+        case .development: return "开发"
+        }
+    }
+}
+
 @MainActor
 final class ConnectionController: ObservableObject {
     @Published var root: String
@@ -208,12 +252,22 @@ final class ConnectionController: ObservableObject {
     @Published var configuring = false
     @Published var setupError: String?
     @Published var showingSetup = false
+    @Published var showingSettings = false
     @Published var showingProjects = false
-    @Published var showingWriteAuthorization = false
-    @Published var selectedWriteProjectIDs: Set<String> = []
+    @Published var showingModeAuthorization = false
+    @Published var requestedMode: CodeAccessMode = .readOnly
+    @Published var selectedModeProjectIDs: Set<String> = []
+    @Published var storageChanging = false
+    @Published var storageError: String?
+    @Published var storageExpanded = false
     @Published var projects: [WorkspaceProject] = []
     @Published var writeEnabled = false
     @Published var writeAvailable = false
+    @Published var executionEnabled = false
+    @Published var executionAvailable = false
+    @Published var executionPortsText = "43117,43118,43119,43120,43121"
+    @Published var pendingPortReleases: [[String: Any]] = []
+    private var acknowledgedExecutionProjectIDs: Set<String> = []
     @Published var recoveryRequired = false
     @Published var hasActiveTask = false
     @Published var activeTask: WorkspaceWriteTask?
@@ -223,9 +277,10 @@ final class ConnectionController: ObservableObject {
     @Published var projectError: String?
     let setupInput = ConnectionSetupInput()
     let registrationInput = ProjectRegistrationInput()
-    let configuration: RuntimeConfiguration
+    @Published private(set) var configuration: RuntimeConfiguration
     var showPanel: (() -> Void)?
     var hidePanel: (() -> Void)?
+    var updatePanelSize: ((CGFloat, CGFloat) -> Void)?
     var didStop: (() -> Void)?
     private var connection: Process?
     private var controlPipe: Pipe?
@@ -242,10 +297,10 @@ final class ConnectionController: ObservableObject {
         && FileManager.default.fileExists(atPath: configuration.workspace + "/.env.local")
     }
     var canStart: Bool {
-        isConfigured && !ownsConnection && !projectBusy && [.stopped, .failed].contains(phase)
+        isConfigured && !ownsConnection && !projectBusy && !storageChanging && [.stopped, .failed].contains(phase)
     }
     var canChooseFolder: Bool {
-        !ownsConnection && !projectBusy && ![.preparing, .stopping, .external].contains(phase)
+        !ownsConnection && !projectBusy && !storageChanging && ![.preparing, .starting, .stopping, .external].contains(phase)
     }
     var canManageProjects: Bool {
         configuration.isLive && ownsConnection && isReady && phase == .running
@@ -254,24 +309,113 @@ final class ConnectionController: ObservableObject {
     var writableProjects: [WorkspaceProject] {
         projects.filter { $0.enabled && $0.status != "unavailable" }
     }
-    var canChangeWrite: Bool {
-        configuration.isLive && ownsConnection && isReady && phase == .running
-        && !projectBusy && (writeEnabled || (writeAvailable && !recoveryRequired
-                                            && !writableProjects.isEmpty))
-    }
-    var canConfirmWrite: Bool {
-        canChangeWrite && !writeEnabled && !selectedWriteProjectIDs.isEmpty
-        && selectedWriteProjectIDs.isSubset(of: Set(writableProjects.map(\.id)))
-    }
     var canRecoverWrite: Bool {
         configuration.isLive && ownsConnection && isReady && phase == .running
         && !projectBusy && recoveryRequired && activeTask != nil
         && localActions.contains("recover_write")
     }
+
+    var accessMode: CodeAccessMode {
+        if executionEnabled && writeEnabled { return .development }
+        return writeEnabled ? .write : .readOnly
+    }
+
+    var canChangeMode: Bool {
+        configuration.isLive && ownsConnection && isReady && phase == .running
+        && !projectBusy && !storageChanging
+    }
+
+    func canSelectMode(_ mode: CodeAccessMode) -> Bool {
+        guard canChangeMode else { return false }
+        if mode == .readOnly { return true }
+        guard writeAvailable, !recoveryRequired, !writableProjects.isEmpty else { return false }
+        return mode != .development || executionAvailable
+    }
+
+    private var selectedModePorts: [Int]? {
+        let values = executionPortsText.split(separator: ",", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let ports = values.compactMap(Int.init)
+        guard !ports.isEmpty, ports.count == values.count, ports.count <= 16,
+              Set(ports).count == ports.count,
+              ports.allSatisfy({ (1024...65535).contains($0) }) else { return nil }
+        return ports
+    }
+
+    var canConfirmMode: Bool {
+        canSelectMode(requestedMode) && requestedMode != .readOnly
+        && !selectedModeProjectIDs.isEmpty
+        && selectedModeProjectIDs.isSubset(of: Set(writableProjects.map(\.id)))
+        && (requestedMode != .development || selectedModePorts != nil)
+    }
+
+    func requestMode(_ mode: CodeAccessMode) {
+        guard canSelectMode(mode), mode != accessMode else { return }
+        if mode == .readOnly {
+            control("disable_write") { [weak self] result in
+                guard let self else { return }
+                guard result?["write_enabled"] as? Bool == false,
+                      result?["execution_enabled"] as? Bool == false else { self.stop(); return }
+                self.clearWriteAuthorization()
+            }
+        } else if mode == .write && executionEnabled {
+            control("disable_execution") { [weak self] result in
+                guard let self else { return }
+                guard result?["execution_enabled"] as? Bool == false else { self.stop(); return }
+                self.acknowledgedExecutionProjectIDs = []
+                self.executionEnabled = false
+            }
+        } else {
+            requestedMode = mode
+            selectedModeProjectIDs = acknowledgedWriteProjectIDs
+            if selectedModeProjectIDs.isEmpty && writableProjects.count == 1 {
+                selectedModeProjectIDs = Set(writableProjects.map(\.id))
+            }
+            showingModeAuthorization = true
+        }
+    }
+
+    func confirmModeAuthorization() {
+        guard canConfirmMode else { return }
+        let mode = requestedMode
+        let projectIDs = selectedModeProjectIDs.sorted()
+        let ports = selectedModePorts ?? []
+        showingModeAuthorization = false
+        control("enable_write", parameters: ["project_ids": projectIDs]) { [weak self] result in
+            guard let self else { return }
+            guard result?["write_enabled"] as? Bool == true,
+                  Set(result?["write_projects"] as? [String] ?? []) == Set(projectIDs) else {
+                self.stop()
+                return
+            }
+            self.acknowledgedWriteProjectIDs = Set(projectIDs)
+            if mode == .development {
+                self.control("enable_execution", parameters: ["project_ids": projectIDs, "ports": ports]) { [weak self] result in
+                    guard let self else { return }
+                    guard let result else {
+                        self.projectError = "写入已开启，开发权限未开启。"
+                        return
+                    }
+                    guard result["execution_enabled"] as? Bool == true,
+                          Set(result["execution_projects"] as? [String] ?? []) == Set(projectIDs) else {
+                        self.stop()
+                        return
+                    }
+                    self.acknowledgedExecutionProjectIDs = Set(projectIDs)
+                }
+            }
+        }
+    }
+
+    func confirmPortRelease(_ plan: [String: Any], allowForce: Bool = false) {
+        guard let id = plan["port_plan_id"] as? String else { return }
+        control("confirm_port_release", parameters: ["plan_id": id, "allow_force": allowForce])
+    }
+
     var taskDetail: String? {
         guard let task = activeTask ?? recentTask else { return nil }
-        let name = projects.first(where: { $0.id == task.projectID })?.selectionTitle ?? task.projectID
-        return "\(task.title) · \(name)"
+        let name = projects.first(where: { $0.id == task.projectID })?.selectionTitle
+        return task.detail(projectName: name)
     }
     private var modeArguments: [String] { configuration.isLive ? ["--mode", "live"] : [] }
     var detail: String {
@@ -285,8 +429,16 @@ final class ConnectionController: ObservableObject {
 
     init(configuration: RuntimeConfiguration) {
         self.configuration = configuration
+        root = Self.savedRoot(for: configuration)
+        // Do not restore a running intent: every application launch is idle.
+        timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refresh() }
+        }
+        refresh()
+    }
+
+    private static func savedRoot(for configuration: RuntimeConfiguration) -> String {
         if configuration.isLive {
-            root = configuration.sampleRoot
             let selection = URL(fileURLWithPath: configuration.workspace)
                 .appendingPathComponent(".code-context/desktop/selection-live.json")
             if let metadata = try? selection.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey]),
@@ -295,22 +447,17 @@ final class ConnectionController: ObservableObject {
                let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let selected = value["selected_root"] as? String,
                selected.count <= 4096, NSString(string: selected).isAbsolutePath {
-                root = selected
+                return selected
             }
-        } else {
-            root = UserDefaults.standard.string(forKey: "SelectedFolder") ?? configuration.sampleRoot
+            return configuration.sampleRoot
         }
-        // Do not restore a running intent: every application launch is idle.
-        timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
-        }
-        refresh()
+        return UserDefaults.standard.string(forKey: "SelectedFolder") ?? configuration.sampleRoot
     }
 
     private func command(_ arguments: [String]) -> Process {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: configuration.python ?? configuration.uv)
-        process.currentDirectoryURL = URL(fileURLWithPath: configuration.workspace)
+        process.currentDirectoryURL = URL(fileURLWithPath: configuration.commandWorkspace)
         process.arguments = configuration.isBundled
             ? ["-I", "-B", "-m", "code_context"] + arguments
             : ["run", "--locked", "--no-sync", "colink"] + arguments
@@ -327,7 +474,7 @@ final class ConnectionController: ObservableObject {
     }
 
     func refresh() {
-        guard !checking, !projectBusy else { return }
+        guard !checking, !projectBusy, !storageChanging else { return }
         guard isConfigured || configuration.isLive else { phase = .unconfigured; return }
         checking = true
         let selected = root
@@ -399,13 +546,21 @@ final class ConnectionController: ObservableObject {
         guard configuration.isLive else { return }
         let workspace = result["workspace_status"] as? [String: Any] ?? [:]
         projects = (workspace["projects"] as? [[String: Any]] ?? []).compactMap(WorkspaceProject.init)
+        executionAvailable = workspace["execution_available"] as? Bool == true
+        let executionGrants = Set(workspace["execution_projects"] as? [String] ?? [])
+        let executionAcknowledged = workspace["execution_enabled"] as? Bool == true
+        executionEnabled = executionAcknowledged && executionAvailable && ownsConnection && isReady
+            && executionGrants == acknowledgedExecutionProjectIDs && !executionGrants.isEmpty
+        if !executionAcknowledged { acknowledgedExecutionProjectIDs = [] }
+        if executionAcknowledged && !executionEnabled && ownsConnection { stop() }
+        pendingPortReleases = workspace["pending_port_releases"] as? [[String: Any]] ?? []
         writeAvailable = workspace["write_available"] as? Bool ?? false
         recoveryRequired = workspace["recovery_required"] as? Bool ?? false
         hasActiveTask = workspace["active_task"] != nil && !(workspace["active_task"] is NSNull)
         activeTask = (workspace["active_task"] as? [String: Any]).flatMap(WorkspaceWriteTask.init)
         recentTask = (workspace["recent_task"] as? [String: Any]).flatMap(WorkspaceWriteTask.init)
         localActions = Set(workspace["local_actions"] as? [String] ?? [])
-        selectedWriteProjectIDs.formIntersection(Set(writableProjects.map(\.id)))
+        selectedModeProjectIDs.formIntersection(Set(writableProjects.map(\.id)))
         let grants = Set(workspace["write_projects"] as? [String] ?? [])
         let enabled = workspace["write_enabled"] as? Bool == true
         writeEnabled = enabled && writeAvailable && isReady && ownsConnection
@@ -421,12 +576,16 @@ final class ConnectionController: ObservableObject {
 
     private func runLocal(_ arguments: [String], payload: Data? = nil,
                           completion: @escaping ([String: Any]?) -> Void = { _ in }) {
+        runLocalProcess(command(arguments + modeArguments), payload: payload, completion: completion)
+    }
+
+    private func runLocalProcess(_ process: Process, payload: Data? = nil,
+                                 completion: @escaping ([String: Any]?) -> Void = { _ in }) {
         guard configuration.isLive, !projectBusy else { return }
         projectBusy = true
         projectError = nil
         stateEpoch += 1
         let epoch = stateEpoch
-        let process = command(arguments + modeArguments)
         let input = payload == nil ? nil : Pipe()
         if let input { process.standardInput = input }
         else { process.standardInput = FileHandle.nullDevice }
@@ -486,40 +645,14 @@ final class ConnectionController: ObservableObject {
         control("register", parameters: ["relative_root": relativeRoot, "display_name": displayName])
     }
 
-    func setWriteEnabled(_ enabled: Bool) {
-        guard canChangeWrite, enabled != writeEnabled else { return }
-        if enabled {
-            selectedWriteProjectIDs = []
-            showingWriteAuthorization = true
-        } else {
-            clearWriteAuthorization()
-            control("disable_write") { [weak self] result in
-                if result == nil { self?.stop() }
-            }
-        }
-    }
-
-    func confirmWriteAuthorization() {
-        guard canConfirmWrite else { return }
-        let projectIDs = selectedWriteProjectIDs.sorted()
-        showingWriteAuthorization = false
-        control("enable_write", parameters: ["project_ids": projectIDs]) { [weak self] result in
-            guard let self else { return }
-            guard result?["write_enabled"] as? Bool == true,
-                  Set(result?["write_projects"] as? [String] ?? []) == Set(projectIDs) else {
-                self.stop()
-                return
-            }
-            self.acknowledgedWriteProjectIDs = Set(projectIDs)
-            // A subsequent current-root desktop-status must also confirm these grants.
-        }
-    }
-
     private func clearWriteAuthorization() {
+        showingModeAuthorization = false
+        selectedModeProjectIDs = []
+        requestedMode = .readOnly
+        executionEnabled = false
+        acknowledgedExecutionProjectIDs = []
         writeEnabled = false
         acknowledgedWriteProjectIDs = []
-        selectedWriteProjectIDs = []
-        showingWriteAuthorization = false
     }
 
     func recoverWrite() {
@@ -534,7 +667,7 @@ final class ConnectionController: ObservableObject {
 
 
     func configure(tunnelID: String, apiKey: String, completion: @escaping () -> Void) {
-        guard !configuring, !ownsConnection, !isConfigured else { return }
+        guard !configuring, !ownsConnection, !isConfigured, !storageChanging else { return }
         guard let payload = try? JSONSerialization.data(withJSONObject: [
             "tunnel_id": tunnelID.trimmingCharacters(in: .whitespacesAndNewlines),
             "api_key": apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -604,6 +737,60 @@ final class ConnectionController: ObservableObject {
         showPanel?()
     }
 
+    var canChangeStorage: Bool {
+        !ownsConnection && !projectBusy && !configuring && !storageChanging && !checking
+        && !hasActiveTask && !recoveryRequired
+        && [.stopped, .failed, .unconfigured].contains(phase)
+    }
+
+    func chooseStorage() {
+        guard canChangeStorage else { return }
+        storageChanging = true
+        storageError = nil
+        stateEpoch += 1
+        hidePanel?()
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        let chooser = NSOpenPanel()
+        chooser.title = "选择 CoLink 存储位置"
+        chooser.prompt = "选择存储位置"
+        chooser.canChooseDirectories = true
+        chooser.canChooseFiles = false
+        chooser.canCreateDirectories = true
+        chooser.allowsMultipleSelection = false
+        chooser.resolvesAliases = false
+        chooser.directoryURL = URL(fileURLWithPath: configuration.workspace)
+        guard chooser.runModal() == .OK, let selected = chooser.url else {
+            storageChanging = false
+            refresh()
+            showPanel?()
+            return
+        }
+        let current = configuration
+        queue.async { [weak self] in
+            let result: Result<RuntimeConfiguration, Error>
+            do { result = .success(try current.relocated(to: selected)) }
+            catch { result = .failure(error) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.storageChanging = false
+                switch result {
+                case .success(let updated):
+                    self.configuration = updated
+                    self.applySelection(Self.savedRoot(for: updated))
+                    self.refresh()
+                case .failure(let error):
+                    self.storageError = error.localizedDescription
+                }
+                self.showPanel?()
+            }
+        }
+        showPanel?()
+    }
+
+    func openStorage() {
+        NSWorkspace.shared.open(URL(fileURLWithPath: configuration.workspace))
+    }
+
     private func applySelection(_ selectedRoot: String) {
         stateEpoch += 1
         root = selectedRoot
@@ -611,6 +798,8 @@ final class ConnectionController: ObservableObject {
         fileCount = 0
         clearWriteAuthorization()
         writeAvailable = false
+        executionAvailable = false
+        pendingPortReleases = []
         activeTask = nil
         recentTask = nil
         hasActiveTask = false
@@ -618,6 +807,8 @@ final class ConnectionController: ObservableObject {
         localActions = []
         projects = []
         errorText = nil
+        projectError = nil
+        setupError = nil
         phase = isConfigured ? .stopped : .unconfigured
     }
 
