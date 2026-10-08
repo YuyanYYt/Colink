@@ -81,6 +81,7 @@ PROVENANCE_FILES = (
     "src/code_context/read_context.py",
     "src/code_context/policy.py",
     "src/code_context/intelligence_queries.py",
+    "src/code_context/fact_payloads.py",
     "src/code_context/intelligence_python.py",
     "src/code_context/intelligence_java.py",
     "src/code_context/intelligence_resolver.py",

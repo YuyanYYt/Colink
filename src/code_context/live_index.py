@@ -29,10 +29,9 @@ from pathlib import Path, PurePosixPath
 from threading import RLock
 from typing import TYPE_CHECKING
 
+from code_context.fact_payloads import FactCacheError, decode_fact
 from code_context.intelligence_index import (
     INDEX_VERSION,
-    MAX_SNAPSHOT_FACTS,
-    MAX_SNAPSHOT_INDEX_BYTES,
     MAX_SNAPSHOT_PARSE_BYTES,
     encode,
     parse_file,
@@ -53,8 +52,13 @@ if TYPE_CHECKING:
 _APPLICATION_ID = 0x434C4958
 _SCHEMA_VERSION = 1
 _PAGE_SIZE = 4096
-_INDEX_VERSION = f"live-facts-v2-{INDEX_VERSION}"
+_INDEX_VERSION = f"live-facts-v3-{INDEX_VERSION}"
+_PARSE_CACHE_VERSION = f"live-packed-v1-{PARSER_VERSION}"
 _CONFIG_PATHS = frozenset({"pyproject.toml", ".gitignore", ".codecontextignore"})
+# Live facts are compressed. These logical limits are independent of the
+# unchanged 64 MiB database ceiling and the 32 MiB source/parse limits.
+MAX_LIVE_INDEX_BYTES = 48 * 1024 * 1024
+MAX_LIVE_FACTS = 200_000
 _TABLES = ("files", "li_parse_cache", "ci_files", "ci_symbols", "ci_relations")
 _SCHEMA = (
     """CREATE TABLE li_projects (
@@ -116,16 +120,14 @@ def _parse_cache_payload(data: str) -> str | bytes:
     return compact if len(compact) < len(raw) else data
 
 
-def _parse_cached_file(payload: str | bytes) -> ParsedFile:
-    if isinstance(payload, bytes):
-        if not payload.startswith(_COMPRESSED_PARSE_PREFIX):
-            raise ValueError("invalid parse cache encoding")
-        inflater = zlib.decompressobj()
-        raw = inflater.decompress(payload[4:], MAX_SNAPSHOT_PARSE_BYTES + 1)
-        if len(raw) > MAX_SNAPSHOT_PARSE_BYTES or not inflater.eof or inflater.unused_data:
-            raise ValueError("invalid parse cache size")
-        return ParsedFile.from_dict(json.loads(raw))
-    return ParsedFile.from_dict(json.loads(payload))
+def _parse_cached_file(
+    payload: str | bytes, *, max_bytes: int = MAX_SNAPSHOT_PARSE_BYTES
+) -> ParsedFile:
+    value = decode_fact(payload, prefix=_COMPRESSED_PARSE_PREFIX, max_bytes=max_bytes)
+    try:
+        return ParsedFile.from_dict(value)
+    except (KeyError, TypeError, AttributeError):
+        raise FactCacheError("invalid derived parse") from None
 
 
 def _relation_payload(value: dict) -> str | bytes:
@@ -199,8 +201,8 @@ class LiveIndexService:
         max_peak_bytes: int | None = None,
         max_source_bytes: int = MAX_SNAPSHOT_PARSE_BYTES,
         max_parse_bytes: int = MAX_SNAPSHOT_PARSE_BYTES,
-        max_index_bytes: int = MAX_SNAPSHOT_INDEX_BYTES,
-        max_facts: int = MAX_SNAPSHOT_FACTS,
+        max_index_bytes: int = MAX_LIVE_INDEX_BYTES,
+        max_facts: int = MAX_LIVE_FACTS,
         max_files: int = MAX_FILES,
         max_pending_projects: int | None = None,
         max_context_bindings: int = 128,
@@ -367,8 +369,9 @@ class LiveIndexService:
     def _guard(self, backend, source, project_id, handle, manifest):
         if self._source(backend, project_id).source_id != source.source_id:
             raise SourceError("SOURCE_REPLACED: reauthorize and restart analysis")
-        if _signature(self._manifest(source)) != manifest:
-            raise SourceError("LIVE_INDEX_CHANGED: project files changed; restart analysis")
+        # Validate all observed hashes, then the full inventory. This guard runs
+        # before publication and on both sides of every fact query; another
+        # inventory walk before the same hash pass adds no freshness guarantee.
         self._context(backend, source, project_id, handle)
         if _signature(self._manifest(source)) != manifest:
             raise SourceError("LIVE_INDEX_CHANGED: project files changed during validation")
@@ -631,6 +634,21 @@ class LiveIndexService:
         except SourceError:
             self.invalidate(project_id)
             raise
+        except FactCacheError:
+            with self._lock:
+                self.invalidate(project_id)
+                try:
+                    # Preserve valid parses but prevent reuse of damaged relations,
+                    # including after restart. Only this derived project's facts
+                    # are rebuilt on the next request.
+                    self._db.execute(
+                        "UPDATE li_projects SET index_version='' WHERE project_id=?",
+                        (project_id,),
+                    )
+                    self._db.commit()
+                except sqlite3.Error:
+                    raise SourceError("INDEX_NOT_READY: fact cache needs rebuilding") from None
+            return self._not_ready(project_id, handle, "INDEX_CACHE_INVALID")
         except (ValueError, TypeError, AttributeError):
             raise SourceError(
                 "INVALID_STRUCTURE_QUERY: check bounds, path and symbol identifier"
@@ -755,8 +773,8 @@ class LiveIndexService:
                     row["path"]: (row["sha256"], row["data"])
                     for row in self._db.execute(
                         "SELECT path, sha256, data FROM li_parse_cache "
-                        "WHERE project_id=? AND parser_version=?",
-                        (project_id, PARSER_VERSION),
+                        "WHERE project_id=? AND parser_version IN (?, ?)",
+                        (project_id, _PARSE_CACHE_VERSION, PARSER_VERSION),
                     )
                 }
             )
@@ -783,6 +801,7 @@ class LiveIndexService:
                 if path not in reusable or source.fingerprint(path) != prior[path][0]:
                     del prior[path]
         source_bytes = parse_bytes = parse_facts = parsed_count = reused_count = file_bytes = 0
+        repaired_parse_files = 0
         configuration = read_root_configuration(None)
         partial = bool(metadata["partial"] or metadata.get("skipped"))
         for item in metadata["files"]:
@@ -824,6 +843,14 @@ class LiveIndexService:
                         )
                 else:
                     cached = prior.pop(path, None) if supported else None
+                    if cached is not None:
+                        try:
+                            parsed = _parse_cached_file(cached[1], max_bytes=self.max_parse_bytes)
+                            if parsed.path != path or parsed.language != _language(path):
+                                raise FactCacheError("invalid derived parse identity")
+                        except FactCacheError:
+                            cached, parsed = None, None
+                            repaired_parse_files += 1
                     try:
                         # Every retained prior parse passed the batch's double-stat
                         # and hash validation; changed files still need complete reads.
@@ -851,7 +878,6 @@ class LiveIndexService:
                             configuration = read_root_configuration(document.content)
                         if supported:
                             if unchanged:
-                                parsed = _parse_cached_file(cached[1])
                                 reused_count += 1
                                 reused_paths.add(path)
                             else:
@@ -899,7 +925,10 @@ class LiveIndexService:
                                 source.source_id,
                                 path,
                                 sha,
-                                PARSER_VERSION,
+                                # Old builds only understand plain JSON with
+                                # PARSER_VERSION. A distinct storage marker lets
+                                # them skip compressed rows and rebuild safely.
+                                _PARSE_CACHE_VERSION,
                                 _parse_cache_payload(data),
                             )
                         )
@@ -1025,6 +1054,7 @@ class LiveIndexService:
             else [],
             "parsed_files": parsed_count,
             "reused_parse_files": reused_count,
+            "repaired_parse_files": repaired_parse_files,
             "resolved_files": len(parsed_files),
             "reused_relation_files": reused_relation_files,
             "topology_hash": topology_hash,

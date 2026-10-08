@@ -109,6 +109,8 @@ def test_default_off_real_socket_authorized_source_and_no_mirror_takeover(runtim
     index_limits = r.backend.index_service.status(pid)["limits"]
     assert index_limits["database_page_ceiling_bytes"] == 64 * 1024 * 1024
     assert index_limits["temporary_peak_bytes"] == 192 * 1024 * 1024
+    assert index_limits["index_bytes_per_project"] == 48 * 1024 * 1024
+    assert index_limits["facts_per_project"] == 200_000
     assert "return 1" in r.backend.read_file(pid, "module.py")["content"]
     with pytest.raises(WriteError, match="WRITE_DISABLED"):
         begin(r)

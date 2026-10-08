@@ -1,25 +1,20 @@
 """Bounded SELECT-only queries over a pinned code-intelligence snapshot."""
 
 import json
-import zlib
 from collections import defaultdict, deque
 
-from code_context.intelligence_models import CLASS_KINDS, module_id
+from code_context.fact_payloads import FactCacheError, decode_fact
+from code_context.intelligence_models import CLASS_KINDS, Relation, module_id
 from code_context.policy import validate_path
 from code_context.source_page import source_page
 
 
 def decode_relation(payload: str | bytes) -> dict:
     """Decode legacy JSON or bounded, compressed live-index relation facts."""
-    if isinstance(payload, bytes):
-        if not payload.startswith(b"CL1:"):
-            raise ValueError("invalid relation payload encoding")
-        inflater = zlib.decompressobj()
-        raw = inflater.decompress(payload[4:], 65_537)
-        if len(raw) > 65_536 or not inflater.eof or inflater.unused_data:
-            raise ValueError("invalid relation payload size")
-        return json.loads(raw)
-    return json.loads(payload)
+    value = decode_fact(payload, prefix=b"CL1:", max_bytes=65_536)
+    if value.keys() != Relation.__dataclass_fields__.keys():
+        raise FactCacheError("invalid derived relation") from None
+    return value
 
 
 def _bounds(offset: int, limit: int, maximum: int = 100) -> None:

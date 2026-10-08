@@ -178,6 +178,6 @@ CoLink 使用 [MIT 许可证](LICENSE)。这是每位用户独立运行的开源
 
 ## 软件恢复锚点
 
-当前首选：`anchor/colink-0.5.0b5-build17-terminal`（`0.5.0b5 · build 17`）。
+当前首选：`9150904`（`anchor/colink-before-live-index-optimization`，`0.5.0b5 · build 17`）。
 恢复前保留当前改动并检查运行数据兼容性，具体步骤和归档记录见
-[build 17 恢复说明](docs/RECOVERY_0.5.0b5_BUILD17.md)。历史锚点保留原目标。
+[9150904 恢复说明](docs/RECOVERY_9150904.md)。后续索引修复不替换该基准；历史锚点保留原目标。

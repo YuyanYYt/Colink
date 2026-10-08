@@ -9,6 +9,7 @@ from threading import Event, Lock, current_thread
 import pytest
 
 import code_context.live_index as module
+from code_context.intelligence_queries import decode_relation
 from code_context.live import LiveQueries
 from code_context.live_index import LiveIndexService
 from code_context.read_context import ReadContexts
@@ -702,7 +703,13 @@ def test_compact_live_relations_and_safe_reuse_after_edits(tmp_path, service_fac
     assert stats["reused_parse_files"] == 3
     assert stats["reused_relation_files"] == 3
     assert not stats["partial"]
-    assert query(backend, changed, "find_references", symbol_id=symbol["symbol_id"])["references"]
+    assert (
+        query(backend, changed, "find_references", symbol_id=symbol["symbol_id"])["references"]
+        == reference_result["references"]
+    )
+    ingest = find(backend, changed, "ingest")
+    graph = query(backend, changed, "get_call_graph", symbol_id=ingest["symbol_id"])
+    assert any(edge["target_symbol_id"] == symbol["symbol_id"] for edge in graph["edges"])
 
     helper.write_text(helper.read_text() + "\ndef extra():\n    pass\n")
     topology_changed = handle(backend)
@@ -710,6 +717,142 @@ def test_compact_live_relations_and_safe_reuse_after_edits(tmp_path, service_fac
     stats = service.status("a")["stats"]
     assert stats["reused_relation_files"] == 0
     assert not stats["partial"]
+
+
+def test_corrupt_parse_cache_reparses_only_the_affected_file(tmp_path, service_factory):
+    backend = backend_for(tmp_path, {"a": python_files(), "b": {"b.py": "def other(): pass\n"}})
+    service = service_factory(backend)
+    snapshot = handle(backend)
+    normalize = find(backend, snapshot, "normalize")
+    before = query(backend, snapshot, "find_references", symbol_id=normalize["symbol_id"])
+    find(backend, handle(backend, "b"), "other", project="b")
+    other = rows(service, "SELECT * FROM li_projects WHERE project_id='b'")
+    with service._lock:
+        service._db.execute(
+            "UPDATE li_parse_cache SET data=? WHERE project_id='a' AND path='Code/pkg/helper.py'",
+            (b"CP1:broken",),
+        )
+        service._db.commit()
+    service.invalidate("a")
+    after = query(backend, snapshot, "find_references", symbol_id=normalize["symbol_id"])
+    assert after["references"] == before["references"]
+    stats = service.status("a")["stats"]
+    assert stats["parsed_files"] == stats["repaired_parse_files"] == 1
+    assert stats["reused_parse_files"] == 3
+    assert rows(service, "SELECT * FROM li_projects WHERE project_id='b'") == other
+    assert not query(backend, snapshot, "project_architecture").get("index_not_ready")
+
+
+def test_corrupt_relation_cache_rebuilds_after_restart_without_reusing_damage(
+    tmp_path, service_factory
+):
+    backend = backend_for(tmp_path, {"a": python_files()})
+    directory = tmp_path / "repair-index"
+    service = service_factory(backend, data_dir=directory)
+    snapshot = handle(backend)
+    ingest = find(backend, snapshot, "ingest")
+    before = query(backend, snapshot, "get_call_graph", symbol_id=ingest["symbol_id"])
+    with service._lock:
+        service._db.execute(
+            "UPDATE ci_relations SET data=? WHERE source_symbol_id=? AND kind='CALL'",
+            (b"CL1:broken", ingest["symbol_id"]),
+        )
+        service._db.commit()
+    refused = query(backend, snapshot, "get_call_graph", symbol_id=ingest["symbol_id"])
+    assert refused["index_not_ready"] and refused["reason"] == "INDEX_CACHE_INVALID"
+    assert "edges" not in refused
+    service.close()
+    repaired = service_factory(backend, data_dir=directory)
+    after = query(backend, snapshot, "get_call_graph", symbol_id=ingest["symbol_id"])
+    assert after["edges"] == before["edges"]
+    stats = repaired.status("a")["stats"]
+    assert stats["parsed_files"] == stats["reused_relation_files"] == 0
+    assert stats["reused_parse_files"] == 4
+
+
+def test_legacy_json_parses_and_relations_remain_readable_and_reusable(tmp_path, service_factory):
+    backend = backend_for(tmp_path, {"a": python_files()})
+    directory = tmp_path / "legacy-index"
+    service = service_factory(backend, data_dir=directory)
+    snapshot = handle(backend)
+    ingest = find(backend, snapshot, "ingest")
+    before = query(backend, snapshot, "get_call_graph", symbol_id=ingest["symbol_id"])
+    with service._lock:
+        for rowid, data in rows(service, "SELECT rowid, data FROM li_parse_cache"):
+            service._db.execute(
+                "UPDATE li_parse_cache SET data=?, parser_version=? WHERE rowid=?",
+                (
+                    json.dumps(module._parse_cached_file(data).to_dict()),
+                    module.PARSER_VERSION,
+                    rowid,
+                ),
+            )
+        for rowid, data in rows(service, "SELECT rowid, data FROM ci_relations"):
+            service._db.execute(
+                "UPDATE ci_relations SET data=? WHERE rowid=?",
+                (json.dumps(decode_relation(data)), rowid),
+            )
+        service._db.commit()
+    service.close()
+    reopened = service_factory(backend, data_dir=directory)
+    assert (
+        query(backend, snapshot, "get_call_graph", symbol_id=ingest["symbol_id"])["edges"]
+        == before["edges"]
+    )
+    reopened.invalidate("a")
+    after = query(backend, snapshot, "get_call_graph", symbol_id=ingest["symbol_id"])
+    assert after["edges"] == before["edges"]
+    assert reopened.status("a")["stats"]["reused_relation_files"] == 4
+    # JSON-only builds select PARSER_VERSION. They must skip packed CP1 rows
+    # on rollback and regenerate their own facts from the original source.
+    assert rows(
+        reopened,
+        "SELECT COUNT(*) FROM li_parse_cache WHERE parser_version=?",
+        (module.PARSER_VERSION,),
+    ) == [(0,)]
+    assert rows(reopened, "SELECT DISTINCT parser_version FROM li_parse_cache") == [
+        (module._PARSE_CACHE_VERSION,)
+    ]
+
+
+@pytest.mark.parametrize("change", ["edit", "add", "remove", "revoke", "pending_write"])
+def test_query_guards_reject_changes_after_fact_selection(
+    tmp_path, service_factory, monkeypatch, change
+):
+    backend = backend_for(tmp_path, {"a": python_files()})
+    service_factory(backend)
+    snapshot = handle(backend)
+    find(backend, snapshot, "normalize")
+
+    class Guard:
+        pending = False
+
+        def guard_read(self, project_id):
+            if self.pending:
+                raise SourceError("PENDING_WRITE: finish recovery first")
+
+    guard = Guard()
+    backend.write_coordinator = guard
+    original = module.QUERIES["project_architecture"]
+
+    def mutate(*args, **kwargs):
+        result = original(*args, **kwargs)
+        root = backend.sources["a"].root
+        if change == "edit":
+            (root / "Code/pkg/helper.py").write_text("def changed(): return 2\n")
+        elif change == "add":
+            (root / "new.md").write_text("New inventory entry\n")
+        elif change == "remove":
+            (root / "Code/pkg/models.py").unlink()
+        elif change == "revoke":
+            del backend.sources["a"]
+        else:
+            guard.pending = True
+        return result
+
+    monkeypatch.setitem(module.QUERIES, "project_architecture", mutate)
+    with pytest.raises(SourceError):
+        query(backend, snapshot, "project_architecture")
 
 
 def test_repeated_edits_replace_current_parse_without_accumulating_versions(

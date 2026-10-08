@@ -329,44 +329,42 @@ def test_bounded_client_limits_large_and_slow_output():
         )
 
 
-def test_mcp_apps_resource_metadata_and_select_only_no_model_grant(tmp_path):
+def test_terminal_database_tools_replace_connections_without_model_grants(tmp_path):
     _, _, database = project(tmp_path, {".env": fixture_env()})
     mcp = MCPServer("fixture")
     register_execution_tools(mcp, SimpleNamespace(databases=database), lambda _: None)
     tools = asyncio.run(mcp.list_tools())
     names = {tool.name for tool in tools}
     assert {
-        "database_status",
-        "database_read",
-        "select_database",
-        "database_environment",
-        "database_prepare",
+        "terminal_start",
+        "terminal_input",
+        "terminal_read_targets",
+        "terminal_read",
     } <= names
-    assert not {"authorize_database", "grant_database"} & names
-    environment = next(tool for tool in tools if tool.name == "database_environment")
-    prepare = next(tool for tool in tools if tool.name == "database_prepare")
-    assert environment.annotations.read_only_hint is True
-    assert prepare.annotations.read_only_hint is False
     assert (
-        prepare.annotations.destructive_hint is False
-        and prepare.annotations.idempotent_hint is True
+        not {
+            "database_status",
+            "database_read",
+            "select_database",
+            "database_environment",
+            "database_prepare",
+            "authorize_database",
+            "grant_database",
+        }
+        & names
     )
-    assert set(prepare.input_schema["properties"]) == {"project_id", "service_id", "database_name"}
-    assert environment.meta["ui"]["resourceUri"] == "ui://colink/database-connection.html"
-    status = next(tool for tool in tools if tool.name == "database_status")
-    assert status.meta["ui"]["resourceUri"] == "ui://colink/database-connection.html"
-    resources = asyncio.run(mcp.list_resources())
-    resource = next(
-        item for item in resources if str(item.uri) == "ui://colink/database-connection.html"
-    )
-    assert resource.mime_type == "text/html;profile=mcp-app"
-    html = asyncio.run(mcp.read_resource(resource.uri))[0].content
-    assert "select_database" in html and "authorize_database" not in html
-    identifier = database.status("p")["database_target_id"]
-    asyncio.run(
-        mcp.call_tool("select_database", {"project_id": "p", "database_target_id": identifier})
-    )
-    assert database.selections["p"]["database_target_id"] == identifier
+    for name in ("terminal_read_targets", "terminal_read"):
+        read_tool = next(tool for tool in tools if tool.name == name)
+        assert read_tool.annotations.read_only_hint is True
+        assert read_tool.annotations.destructive_hint is False
+        assert "ui" not in (read_tool.meta or {})
+    for name in ("terminal_start", "terminal_input"):
+        command_tool = next(tool for tool in tools if tool.name == name)
+        assert command_tool.annotations.read_only_hint is False
+        assert command_tool.annotations.destructive_hint is True
+    targets = next(tool for tool in tools if tool.name == "terminal_read_targets")
+    assert set(targets.input_schema["properties"]) == {"project_id"}
+    assert asyncio.run(mcp.list_resources()) == []
     assert not database.status("p")["authorized"]
 
 
@@ -433,13 +431,14 @@ def test_variable_references_and_empty_password_config_are_not_source_secrets(tm
     assert source.read("application.properties").content == content
 
 
-def test_mcp_app_completes_initialization_and_checks_connection_expiry():
+def test_removed_database_connection_card_is_not_packaged_or_advertised():
     from importlib.resources import files
 
-    html = files("code_context").joinpath("resources/database/connection.html").read_text()
-    assert "ui/initialize" in html and "ui/notifications/initialized" in html
-    assert "ui/notifications/tool-input" in html and "ui/notifications/tool-result" in html
-    assert "Date.now() / 1000 < data.authentication_expires_at" in html
+    assert not files("code_context").joinpath("resources/database/connection.html").is_file()
+    mcp = MCPServer("fixture")
+    register_execution_tools(mcp, SimpleNamespace(), lambda _: None)
+    assert asyncio.run(mcp.list_resources()) == []
+    assert all("ui" not in (tool.meta or {}) for tool in asyncio.run(mcp.list_tools()))
 
 
 @pytest.mark.parametrize(

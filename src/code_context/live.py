@@ -331,7 +331,11 @@ class LiveQueries:
         if self.index_service is None:
             raise SourceError("INDEX_NOT_READY: live structural indexing is not attached")
         result = self.index_service.query(self, project_id, handle, operation, **parameters)
-        self.resolve_snapshot(project_id, handle)
+        # The index service validates the entire context and inventory before
+        # and after its query. Recheck authorization/publication here without
+        # repeating a fifth complete fingerprint pass over a large project.
+        self.source(project_id)
+        self.guard_read(project_id)
         return result
 
     def mcp_status(self):
