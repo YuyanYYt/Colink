@@ -45,7 +45,10 @@ def profiles(tmp_path, monkeypatch):
         implementation.socket, "create_connection", lambda *args, **kwargs: Connected()
     )
     database = DatabaseProfiles(
-        tmp_path / "database-state", sources.__getitem__, secret_reader=secret
+        tmp_path / "database-state",
+        sources.__getitem__,
+        secret_reader=secret,
+        scope_enforcement=False,
     )
     return SimpleNamespace(database=database, sources=sources, seen=seen, root=root, tmp=tmp_path)
 
@@ -96,11 +99,7 @@ def test_profile_file_is_private_and_contains_only_keychain_reference(profiles):
         ("port", 543),
         ("port", True),
         ("port", 65536),
-        ("database", "production"),
         ("database", "colink_fixture; SELECT"),
-        ("user", "root"),
-        ("user", "POSTGRES"),
-        ("user", "admin"),
         ("user", "role; untrusted"),
         ("credential_ref", FAKE_PASSWORD),
         ("tls", "true"),
@@ -178,6 +177,7 @@ def test_restart_retains_metadata_without_caching_secret(profiles):
         profiles.database.state.root,
         profiles.sources.__getitem__,
         secret_reader=lambda _: next_password,
+        scope_enforcement=False,
     )
     assert restarted.status("project")["configured"]
     fresh = restarted.job_configuration("project")
@@ -268,7 +268,7 @@ def test_synthetic_proof_expires_after_twenty_four_hours_and_future_time_is_inva
     monkeypatch.setattr(implementation.time, "time", lambda: now[0])
     configure(profiles)
     record_proof(profiles)
-    assert profiles.database.status("project")["authenticated_connection"] == "verified_for_job"
+    assert profiles.database.status("project")["job_authenticated_connection"] == "verified_for_job"
     now[0] += 86400
     assert profiles.database.status("project")["authenticated_connection"] == "not_verified"
     now[0] = 100_000.0
@@ -328,7 +328,7 @@ def test_failed_connection_save_preserves_previous_profile_and_proof(profiles, m
         configure(profiles, port=15433)
     status = profiles.database.status("project")
     assert status["port"] == 15432
-    assert status["authenticated_connection"] == "verified_for_job"
+    assert status["job_authenticated_connection"] == "verified_for_job"
     assert (profiles.database.state.root / "profiles.json").read_bytes() == before
 
 
@@ -372,6 +372,70 @@ def run_database_adapter(payload):
         check=True,
     )
     return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize(
+    "unexpected", [None, {"PATH": "/fixture"}, {"SPRING_DATASOURCE_PASSWORD": 42}]
+)
+def test_actual_native_helper_accepts_private_spring_payload_and_rejects_unapproved_env(unexpected):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required to exercise the actual native helper")
+    helper = Path(implementation.__file__).parent / "resources/sandbox/helper.mjs"
+    payload = {
+        "env": {
+            "COLINK_DATABASE_NAME": "ordinary_store",
+            "COLINK_DATABASE_KIND": "postgresql",
+            "COLINK_DB_PASSWORD": FAKE_PASSWORD,
+            "SPRING_DATASOURCE_URL": "jdbc:postgresql://127.0.0.1:33333/ordinary_store?sslmode=disable",
+            "SPRING_DATASOURCE_USERNAME": "colink_child",
+            "SPRING_DATASOURCE_PASSWORD": FAKE_PASSWORD,
+        },
+        "redactions": [FAKE_PASSWORD],
+    }
+    if unexpected is not None:
+        payload["env"].update(unexpected)
+    script = """
+      import {readFileSync} from 'node:fs';
+      const helper = await import(process.argv[1]);
+      try {helper.validateDatabasePayload(JSON.parse(readFileSync(0,'utf8')));
+        process.stdout.write('accepted');}
+      catch {process.stdout.write('rejected');}
+    """
+    result = subprocess.run(
+        [node, "--input-type=module", "-e", script, helper.as_uri()],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        timeout=5,
+        check=True,
+    )
+    assert result.stdout == ("accepted" if unexpected is None else "rejected")
+    assert FAKE_PASSWORD not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "name,mode,qualified,accepted",
+    [
+        ("store", "0", "store", True),
+        ("normal_db", "0", r"normal\_db", True),
+        ("normal_db", "0", "normal_db", False),
+        ("normal_db", "1", "normal_db", True),
+        ("my store", "0", "my store", True),
+        ("my-store", "1", "another", False),
+    ],
+)
+def test_actual_mysql_grants_accept_normal_database_names_with_exact_scope(
+    name, mode, qualified, accepted
+):
+    result = run_database_adapter(
+        {
+            "operation": "grants",
+            "expected": name,
+            "text": mode + "\nGRANT SELECT,INSERT ON `" + qualified + "`.* TO `role`@`127.0.0.1`",
+        }
+    )
+    assert result["accepted"] is accepted
 
 
 @pytest.mark.parametrize(

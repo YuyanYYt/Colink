@@ -83,6 +83,10 @@ def inputs(tmp_path):
     write(workspace / "src/code_context/cli.py", "def main(): pass\n")
     write(workspace / "src/code_context/__pycache__/cli.pyc", b"excluded")
     write(workspace / "src/code_context/.env.fixture", "excluded fixture")
+    write(
+        workspace / "src/code_context/resources/database/connection.html",
+        "<!doctype html><title>Database connection fixture</title>",
+    )
     sandbox = workspace / "src/code_context/resources/sandbox"
     write(
         sandbox / "package.json",
@@ -228,6 +232,7 @@ def test_resources_are_whitelisted_licensed_and_use_relative_pth(inputs, tmp_pat
     ):
         assert not any(forbidden in member for member in members)
     assert (resources / "vendor/alpha-1.0.dist-info/licenses/LICENSE").is_file()
+    assert not (resources / "backend/src/code_context/resources/database/connection.html").exists()
     assert (resources / "python/lib/python3.11/LICENSE.txt").is_file()
     assert (resources / "licenses/LICENSE").is_file()
     assert (resources / "licenses/THIRD_PARTY_NOTICES.md").is_file()

@@ -501,6 +501,7 @@ def verify_relocation(app: Path, output_dir: Path) -> None:
             raise PackageError("The relocated interpreter is not Python 3.11.")
         probe = (
             "import pathlib,sys,ssl,sqlite3; import code_context.cli,mcp,httpx; "
+            "import code_context.terminal,code_context.terminal_read; "
             "import pydantic_core,watchfiles,cryptography.hazmat.bindings._rust; "
             "import tree_sitter,tree_sitter_java; "
             "tree_sitter.Parser(tree_sitter.Language(tree_sitter_java.language())); "

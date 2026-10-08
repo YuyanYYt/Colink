@@ -342,16 +342,6 @@ def desktop_control(workspace: Path, root: Path, action: str, parameters: dict):
         "recover_write": {"project_id"},
         "enable_execution": {"project_ids", "ports"},
         "disable_execution": set(),
-        "configure_database": {
-            "project_id",
-            "kind",
-            "host",
-            "port",
-            "database",
-            "user",
-            "credential_ref",
-            "tls",
-        },
         "confirm_port_release": {"plan_id", "allow_force"},
         "development_status": {"project_id"},
     }

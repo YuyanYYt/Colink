@@ -161,6 +161,8 @@ class ExecutionCoordinator:
             raise SourceError(
                 "EXECUTION_GATE_CLOSED: native protection must pass before local authorization"
             )
+        if self.databases and set(ports) & self.databases.raw_service_ports():
+            raise SourceError("DATABASE_SERVICE_PORT_PROTECTED: project jobs use target proxies")
         self.disable()
         with self.lock:
             self.epoch = identifier("epoch-")
@@ -258,6 +260,8 @@ class ExecutionCoordinator:
         write_task_id=None,
         health_path=None,
         database=False,
+        database_target_id=None,
+        database_action=None,
     ):
         grant = self.authorize(project_id)
         if (
@@ -271,6 +275,9 @@ class ExecutionCoordinator:
             or operation not in {"install", "test", "build", "serve", "generate", "shell"}
             or type(service) is not bool
             or type(database) is not bool
+            or database_action not in {None, "create", "drop"}
+            or database_action is not None
+            and (not database or len(command) != 1)
             or network not in {"none", "packages"}
             or any(p.search(" ".join(command)) for p in SECRET_PATTERNS)
         ):
@@ -297,6 +304,8 @@ class ExecutionCoordinator:
             raise SourceError(
                 "EXECUTION_SCOPE_EXPANSION: replan within locally authorized ports and paths"
             )
+        if self.databases and set(ports + connect_ports) & self.databases.raw_service_ports():
+            raise SourceError("DATABASE_SERVICE_PORT_PROTECTED: use the selected target proxy")
         for path in writeback_paths:
             validate_path(path)
             if cwd and not path.startswith(cwd + "/"):
@@ -328,6 +337,16 @@ class ExecutionCoordinator:
             raise SourceError(
                 "TOOLCHAIN_UNAVAILABLE: use an installed Python/npm/Maven tool or sandbox shell"
             )
+        if database_action is not None:
+            if self.databases and self.databases.scope_enforcement:
+                raise SourceError(
+                    "DATABASE_NATIVE_PROVISION_REQUIRED: approve the exact target locally"
+                )
+            if not self.databases:
+                raise SourceError("DATABASE_NOT_CONFIGURED")
+            argv += self.databases.administrative_argv(
+                project_id, database_target_id, database_action, command[0]
+            )
         metadata = {
             "command": command,
             "argv": argv,
@@ -342,6 +361,8 @@ class ExecutionCoordinator:
             "write_task_id": write_task_id,
             "health_path": health_path,
             "database": database,
+            "database_target_id": database_target_id,
+            "database_action": database_action,
             "toolchain": self.sandbox.fingerprint(),
             "requires_rehearsal": operation in {"install", "generate"},
         }
@@ -371,9 +392,15 @@ class ExecutionCoordinator:
         ]
         metadata["cache_key"] = digest([metadata["toolchain"], key_files, os.uname().machine])
         if database:
-            if not self.databases or not self.databases.profile(project_id):
-                raise SourceError("DATABASE_NOT_CONFIGURED: complete the guided local connection")
-            metadata["database_digest"] = digest(self.databases.profile(project_id))
+            if not self.databases:
+                raise SourceError("DATABASE_NOT_CONFIGURED")
+            profile = self.databases.validate_execution_target(
+                project_id, database_target_id, database_action
+            )
+            metadata["database_digest"] = digest(profile)
+            metadata["database_instance_identity"] = self.databases.grants.get(
+                database_target_id, {}
+            ).get("instance_identity")
         # Request identity uses explicit inputs; generated task IDs must never
         # turn an unchanged browser retry into a different request.
         binding = digest(metadata)
@@ -455,11 +482,14 @@ class ExecutionCoordinator:
         source = self.source_for(project_id)
         if self._export(source, None, relative=meta["cwd"])["sha256"] != meta["source_digest"]:
             raise SourceError("EXECUTION_INPUT_CHANGED: read source and obtain a new plan")
-        if meta["database"] and (
-            not self.databases
-            or digest(self.databases.profile(project_id)) != meta["database_digest"]
-        ):
-            raise SourceError("DATABASE_PROFILE_CHANGED: obtain a new execution plan")
+        if meta["database"]:
+            if not self.databases:
+                raise SourceError("DATABASE_NOT_CONFIGURED")
+            profile = self.databases.validate_execution_target(
+                project_id, meta.get("database_target_id"), meta.get("database_action")
+            )
+            if digest(profile) != meta["database_digest"]:
+                raise SourceError("DATABASE_PROFILE_CHANGED: obtain a new execution plan")
         return source
 
     def _export(self, source, destination, *, relative):
@@ -623,7 +653,18 @@ class ExecutionCoordinator:
             self.cache.restore_workspace(
                 project_id, meta["cache_key"], workspace, input_digest=meta["source_digest"]
             )
-            db = self.databases.job_configuration(project_id) if meta["database"] else None
+            db = (
+                self.databases.job_configuration(
+                    project_id,
+                    meta["database_target_id"],
+                    require_authorized=True,
+                    database_action=meta.get("database_action"),
+                )
+                if meta["database"]
+                else None
+            )
+            if db and db.get("proxy"):
+                live["database_proxy"] = db["proxy"]
             argv, env = self.sandbox.prepare(
                 job_id,
                 disk,
@@ -770,6 +811,15 @@ class ExecutionCoordinator:
                 if live.get("disk_creation_started") and not live.get("disk"):
                     raise SourceError("TASK_DISK_CREATION_UNVERIFIED")
                 self._database_proof(job_id)
+                if live["metadata"].get("database") and not live.get("database_lifecycle_checked"):
+                    if live["metadata"].get("database_action") == "drop":
+                        self.databases.revoke(live["metadata"]["database_target_id"])
+                    else:
+                        self.databases.check_connection(live["project_id"])
+                    live["database_lifecycle_checked"] = True
+                if live.get("database_proxy") and not live.get("database_proxy_closed"):
+                    self.databases.release_configuration({"proxy": live["database_proxy"]})
+                    live["database_proxy_closed"] = True
                 if not live.get("helper_retired"):
                     self.sandbox.cleanup_job(job_id, verified=True)
                     live["helper_retired"] = True
@@ -1036,6 +1086,27 @@ class ExecutionCoordinator:
             if self.live.get(job_id, {}).get("cancel_requested"):
                 result.update(state="stopping", cancel_requested=True)
         return result
+
+    def revoke_database(self, database_target_id):
+        """Stop only owned database jobs matching the concrete revoked target."""
+        results = []
+        with self.lock:
+            for job_id, live in list(self.live.items()):
+                if live["metadata"].get("database_target_id") != database_target_id:
+                    continue
+                live["cancel_requested"] = True
+                if live.get("preparing"):
+                    results.append(
+                        {"job_id": job_id, "state": "preparing", "cancel_requested": True}
+                    )
+                    continue
+                try:
+                    result = self.manager.cancel(job_id)
+                    results.append({"job_id": job_id, **result})
+                except ProcessError:
+                    # Revocation is durable even when owned-process stop needs attention.
+                    results.append({"job_id": job_id, "state": "stop_pending"})
+        return results
 
     def cancel(self, project_id, job_id):
         job = self._job(project_id, job_id)

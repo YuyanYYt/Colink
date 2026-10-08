@@ -38,6 +38,7 @@ TOOLS = (
     "pg_config",
     "redis-cli",
     "redis-server",
+    "sqlite3",
 )
 _ARGUMENTS = {
     "node": ["--version"],
@@ -52,6 +53,7 @@ _ARGUMENTS = {
     "pg_config": ["--version"],
     "redis-cli": ["--version"],
     "redis-server": ["--version"],
+    "sqlite3": ["--version"],
 }
 _VERSION = re.compile(r"\b(?:v)?\d+(?:\.\d+){1,3}(?:[-+._a-zA-Z0-9]*)?\b")
 _PACKAGES = (
@@ -148,6 +150,7 @@ def _fallback(name):
         str(Path.home() / ".local/bin" / name),
         "/opt/homebrew/bin/" + name,
         "/usr/local/bin/" + name,
+        "/usr/bin/" + name,
     ]
     if name == "python3":
         candidates.extend([sys.executable, "/Library/Developer/CommandLineTools/usr/bin/python3"])

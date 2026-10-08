@@ -21,11 +21,18 @@ async function databasePayload(required) {
     if (size > 65536) throw Error('Database payload limit');
     parts.push(part);
   }
-  const payload = JSON.parse(Buffer.concat(parts).toString('utf8'));
+  return validateDatabasePayload(JSON.parse(Buffer.concat(parts).toString('utf8')));
+}
+
+export function validateDatabasePayload(payload) {
   const keys = new Set(['COLINK_DATABASE_NAME', 'COLINK_DATABASE_KIND', 'DATABASE_URL',
     'PGHOST', 'PGPORT', 'PGDATABASE', 'PGUSER', 'PGPASSWORD', 'PGSSLMODE', 'PGSERVICEFILE',
+    'COLINK_DB_PASSWORD', 'SPRING_DATASOURCE_URL', 'SPRING_DATASOURCE_USERNAME',
+    'SPRING_DATASOURCE_PASSWORD',
     'MYSQL_HOST', 'MYSQL_TCP_PORT', 'MYSQL_PWD', 'QDRANT_URL', 'QDRANT_API_KEY']);
-  if (!payload.env || Object.entries(payload.env).some(([key, value]) => !keys.has(key) || typeof value !== 'string' || value.includes('\0')) ||
+  if (!payload || typeof payload !== 'object' || !payload.env ||
+      typeof payload.env !== 'object' || Array.isArray(payload.env) ||
+      Object.entries(payload.env).some(([key, value]) => !keys.has(key) || typeof value !== 'string' || value.includes('\0')) ||
       !Array.isArray(payload.redactions) || payload.redactions.some(value => typeof value !== 'string')) throw Error('Invalid database payload');
   return payload;
 }

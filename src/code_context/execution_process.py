@@ -1,4 +1,4 @@
-"""Bounded non-interactive process sessions, not an operating-system sandbox.
+"""Bounded supervised process sessions, not an operating-system sandbox.
 
 Only a trusted coordinator can supply and revalidate prepared sandbox argv.
 There is deliberately no automatic plain-process/shell fallback. Each job has
@@ -51,6 +51,8 @@ class _Job:
     output: object
     created: float
     stdin_payload: bytes | None = None
+    interactive: bool = False
+    tty: bool = False
     state: str = "queued"
     started: float | None = None
     completed: float | None = None
@@ -185,6 +187,8 @@ class ProcessManager:
         timeout_seconds=300,
         on_exit=None,
         stdin_payload=None,
+        interactive=False,
+        tty=False,
     ):
         from code_context.execution_output import OutputBuffer
 
@@ -205,6 +209,12 @@ class ProcessManager:
                 for k, v in env.items()
             )
             or type(service) is not bool
+            or type(interactive) is not bool
+            or type(tty) is not bool
+            or tty
+            and not interactive
+            or interactive
+            and stdin_payload is not None
             or not self._seconds(timeout_seconds, 300)
             or on_exit is not None
             and not callable(on_exit)
@@ -244,6 +254,8 @@ class ProcessManager:
             OutputBuffer(self.job_output_bytes, min(64 * 1024, self.job_output_bytes // 4)),
             self._clock(),
             stdin_payload=stdin_payload,
+            interactive=interactive,
+            tty=tty,
         )
         if not self._approved(job):
             raise ProcessError("EXECUTION_SANDBOX_REQUIRED")
@@ -280,6 +292,8 @@ class ProcessManager:
             "job_id": job.job_id,
             "state": job.state,
             "service": job.service,
+            "interactive": job.interactive,
+            "tty": job.tty,
             "pid": job.pid,
             "exit_code": job.exit_code,
             "reason": job.reason,
@@ -403,17 +417,30 @@ class ProcessManager:
             self._collect_locked()
             return json.loads(json.dumps(list(self._summaries)))
 
-    def _control(self, job, action):
+    def _control(self, job, action, **values):
         with job.control_lock:
             child = job.supervisor
             if child is None or child.stdin is None or child.stdin.closed:
                 return False
             try:
-                child.stdin.write(json.dumps({"action": action}).encode() + b"\n")
+                child.stdin.write(json.dumps({"action": action, **values}).encode() + b"\n")
                 child.stdin.flush()
                 return True
             except (OSError, ValueError):
                 return False
+
+    def send_input(self, job_id, data, *, eof=False):
+        if not isinstance(data, bytes) or len(data) > 16 * 1024 or type(eof) is not bool:
+            raise ProcessError("INVALID_TERMINAL_INPUT")
+        with self._condition:
+            job = self._job(job_id)
+            if not job.interactive or job.state != "running":
+                raise ProcessError("TERMINAL_NOT_READY: wait for running status")
+            if job.tty and eof:
+                raise ProcessError("TERMINAL_TTY_EOF: send exit or control-D instead")
+        if not self._control(job, "input", data=base64.b64encode(data).decode("ascii"), eof=eof):
+            raise ProcessError("TERMINAL_INPUT_UNCERTAIN: read status before continuing")
+        return {"job_id": job_id, "delivery": "queued_to_supervisor", "executed": False}
 
     def touch(self, job_id):
         with self._condition:
@@ -605,6 +632,8 @@ class ProcessManager:
                     "cwd": job.cwd,
                     "env": job.env,
                     "service": job.service,
+                    "interactive": job.interactive,
+                    "tty": job.tty,
                     "timeout": job.timeout,
                     "idle": self.service_idle_seconds,
                     "grace": self.termination_grace,
@@ -1013,16 +1042,51 @@ def _supervise(input_stream=None, output_stream=None, native_scope=None, output_
         if payload is not None and len(payload) > 64 * 1024:
             raise ValueError
         subreaper = _linux_subreaper()
-        child = subprocess.Popen(
-            config["argv"],
-            cwd=config["cwd"],
-            env=config["env"],
-            stdin=subprocess.PIPE if payload is not None else subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-            close_fds=True,
-        )
+        master = slave = None
+        tty = config.get("tty", False)
+        interactive = config.get("interactive", False)
+        if tty:
+            import fcntl
+            import pty
+            import termios
+
+            master, slave = pty.openpty()
+            # Suppress input echo by default. Do not reflect entered credentials into logs.
+            attributes = termios.tcgetattr(slave)
+            attributes[3] &= ~(termios.ECHO | termios.ECHONL)
+            termios.tcsetattr(slave, termios.TCSANOW, attributes)
+
+        def attach_terminal():
+            os.setsid()
+            fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+        try:
+            child = subprocess.Popen(
+                config["argv"],
+                cwd=config["cwd"],
+                env=config["env"],
+                stdin=slave
+                if tty
+                else subprocess.PIPE
+                if interactive or payload is not None
+                else subprocess.DEVNULL,
+                stdout=slave if tty else subprocess.PIPE,
+                stderr=slave if tty else subprocess.PIPE,
+                start_new_session=not tty,
+                preexec_fn=attach_terminal if tty else None,
+                close_fds=True,
+            )
+            if tty:
+                child.stdin = os.fdopen(os.dup(master), "wb", buffering=0)
+                child.stdout = os.fdopen(master, "rb", buffering=0)
+                master = None
+            if interactive:
+                os.set_blocking(child.stdin.fileno(), False)
+        finally:
+            if slave is not None:
+                os.close(slave)
+            if master is not None:
+                os.close(master)
     except (OSError, ValueError, TypeError, KeyError):
         emit(
             {
@@ -1052,7 +1116,14 @@ def _supervise(input_stream=None, output_stream=None, native_scope=None, output_
     def pump(name, stream):
         try:
             while True:
-                data = os.read(stream.fileno(), 64 * 1024)
+                # PTY read/write duplicates share O_NONBLOCK; wait instead of treating
+                # an idle prompt as a failed process.
+                if tty and not select.select([stream], [], [], 0.1)[0]:
+                    continue
+                try:
+                    data = os.read(stream.fileno(), 64 * 1024)
+                except BlockingIOError:
+                    continue
                 if not data:
                     break
                 emit(
@@ -1062,9 +1133,11 @@ def _supervise(input_stream=None, output_stream=None, native_scope=None, output_
                         "data": base64.b64encode(data).decode("ascii"),
                     }
                 )
-        except OSError:
-            reason[0] = reason[0] or "interrupted"
-            stop.set()
+        except OSError as exc:
+            # PTY masters report EIO after the slave closes normally.
+            if not (tty and exc.errno == 5):
+                reason[0] = reason[0] or "interrupted"
+                stop.set()
         finally:
             stream.close()
             streams_done[name].set()
@@ -1072,15 +1145,34 @@ def _supervise(input_stream=None, output_stream=None, native_scope=None, output_
     def control():
         try:
             while True:
-                raw = input_stream.readline(1025)
+                raw = input_stream.readline(MAX_FRAME_BYTES + 1)
                 if not raw:
                     reason[0] = reason[0] or "interrupted"
                     stop.set()
                     return
-                if len(raw) > 1024 or not raw.endswith(b"\n"):
+                if len(raw) > MAX_FRAME_BYTES or not raw.endswith(b"\n"):
                     raise ValueError
-                action = json.loads(raw).get("action")
+                frame = json.loads(raw)
+                action = frame.get("action")
                 if action == "touch":
+                    touched[0] = time.monotonic()
+                elif action == "input" and interactive:
+                    data = base64.b64decode(frame.get("data", ""), validate=True)
+                    if len(data) > 16 * 1024 or type(frame.get("eof")) is not bool:
+                        raise ValueError
+                    deadline = time.monotonic() + 2
+                    while data:
+                        if time.monotonic() >= deadline:
+                            raise ValueError
+                        if select.select([], [child.stdin], [], 0.05)[1]:
+                            try:
+                                data = data[os.write(child.stdin.fileno(), data) :]
+                            except BlockingIOError:
+                                continue
+                    if frame["eof"]:
+                        if tty:
+                            raise ValueError
+                        child.stdin.close()
                     touched[0] = time.monotonic()
                 elif action == "cancel":
                     reason[0] = "cancelled"
@@ -1102,7 +1194,10 @@ def _supervise(input_stream=None, output_stream=None, native_scope=None, output_
             child.stdin.close()
 
     for name, stream in (("stdout", child.stdout), ("stderr", child.stderr)):
-        threading.Thread(target=pump, args=(name, stream), daemon=True).start()
+        if stream is None:
+            streams_done[name].set()
+        else:
+            threading.Thread(target=pump, args=(name, stream), daemon=True).start()
     threading.Thread(target=control, daemon=True).start()
     if payload is not None:
         threading.Thread(target=input_payload, daemon=True).start()
@@ -1200,6 +1295,8 @@ def _supervise(input_stream=None, output_stream=None, native_scope=None, output_
         child.wait(timeout=1)
     except subprocess.TimeoutExpired:
         observed_stopped = False
+    if interactive and child.stdin and not child.stdin.closed:
+        child.stdin.close()
     for event in streams_done.values():
         if not event.wait(1):
             observed_stopped = False

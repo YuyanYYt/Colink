@@ -1,28 +1,51 @@
 # Security and privacy
 
-The public download remains 0.5.0b2. Maintenance source 0.5.0b4 adds default-off,
-project-scoped native development jobs. Actual source, native, webpage and installed
+The public download remains 0.5.0b2. Maintenance source 0.5.0b5 adds compact modes,
+direct host terminals and fixed read-only database commands, and configurable local storage.
+Host terminals require the default-off project development grant. They are NOT sandboxed. Actual source, native, webpage and installed
 application evidence are recorded separately; no production security audit is claimed.
 The legacy mirror protocol and existing databases retain their historical semantics.
 
 Live reads verify original files without keeping a permanent whole-project mirror.
-Task-scoped writes, moves and generated-result writeback go through WriteCoordinator,
+Dedicated source-tool writes, moves and isolated generated-result writeback use WriteCoordinator,
 with source hashes, path/identity checks and durable recovery records. Unknown recovery
 objects and unresolved partial operations are preserved. Intentional code undo is not
 exposed; use independently saved Git history. A task Diff is not a permanent backup or
 a multi-file atomic filesystem transaction.
 
-The webpage cannot register a source, enable local read/write/execute grants, expand
-ports or network scope, or force recovery. Every tool uses an explicit project ID.
+The webpage cannot enable local read/write/execute grants or force recovery through
+management tools. Every tool uses an explicit project ID. Once development is enabled,
+the host terminal has the current OS user filesystem/network permissions; project routing
+and process supervision are not a security boundary against arbitrary host code.
 Local authorization and ChatGPT's action approval policy are separate. Original mirror
 read tools remain read-only. Development status/output/list operations that renew a
 service lease or acknowledge log cleanup are annotated as effects, not read-only.
 
-## Native development boundary
+## Native host terminal (build 17)
+
+- terminal_start/input require the current exact project development grant. Revoke and
+  local-control disconnect stop owned sessions; every queued launch revalidates its grant.
+- Initial cwd is a real directory within the registered project. Commands can subsequently
+  access any path/service available to the OS user. No Seatbelt, exact-database proxy,
+  per-port grant, input export or WriteCoordinator writeback applies to terminal_*.
+- Database permissions are the database account's permissions, including DDL/CRUD/admin
+  commands. No separate CoLink connection page, bootstrap approval or database grant exists.
+- PTY or pipes support continuing input. PTY echo starts disabled; programs may still print
+  secrets or enable echo. Avoid printing credentials. CoLink control/tunnel environment
+  secrets are not automatically inherited. This is not secret isolation from host code.
+- Process ownership supervision, bounded output, idle leases and sampled resource limits
+  remain. Stop requests do not undo file/database/network side effects. Unknown restart
+  outcomes are not rerun. Only opaque start receipts are persisted; command/stdin are not.
+- Connection profiles, credentials and old provisioning recovery records are preserved
+  but are not read or modified by this terminal runtime.
+- This implementation has static/build checks only in this change; runtime/PTY/DB/revocation
+  testing is reserved for the user. Do not infer acceptance from existing supervisor tests.
+
+## Optional isolated execution_plan runner (unchanged scope)
 
 - Only the currently validated Darwin 27 implementation is enabled. Other systems
   keep terminal execution unavailable. A private libproc ABI mismatch fails closed;
-  there is no fallback to parent PID tracking or an unconfined command.
+  there is no fallback to parent PID tracking. Host terminal execution is a separate explicit path.
 - Each job uses validated temporary input and a capacity-limited APFS disk. Original
   project writes are performed only through the existing write coordinator.
 - Fixed SRT 0.0.78 generates Seatbelt profiles with narrower project policy. Controller
@@ -42,8 +65,7 @@ service lease or acknowledge log cleanup are annotated as effects, not read-only
 - CPU, RSS and process-count controls are sampled supervision and stopping thresholds,
   not VM isolation or hard resource reservations. Short exited processes can be missed
   by CPU sampling. A successful exit and absent denial text do not prove containment.
-- Pipe execution is noninteractive; stdin is closed except the private controller's
-  bounded database capability transport. There is no project terminal input or PTY API.
+- This optional isolated runner remains noninteractive. Use terminal_* for explicit host PTY/input.
 
 Output, request metadata, helper input, temporary disks and dependency caches have
 separate bounded budgets. Active or unverified work is not evicted to make room.
@@ -60,21 +82,14 @@ process in the local app. PID birth, listener, executable and project identity a
 rechecked before signalling; unknown/system/other-project processes cannot be released.
 CoLink-owned current-project jobs use the job cancellation path.
 
-Database profiles bind a project-specific endpoint, database and limited role.
-Passwords are stored in the macOS Keychain and passed to jobs through bounded private
-stdin, not command arguments, source files or ordinary metadata. Client presence, TCP
-readiness, authenticated role checks, migrations, CRUD and vector operations remain
-separate facts. PostgreSQL preflight checks inherited privileges and verifies that an
-incorrect password is rejected. MySQL checks the server's actual `partial_revokes`
-mode and parses database-level wildcard escapes before accepting project grants.
-Global/cross-database privileges, grant options and inherited roles are refused.
-Client connection parameters are bound to the profile and cannot be overridden or
-abbreviated by project arguments. The final successful authentication is checked again
-for privilege changes. First SHA2 authentication on an explicitly non-TLS local test
-endpoint uses RSA public-key retrieval; this does not provide full-connection encryption.
-Database server grants remain authoritative; these checks do not turn a SQL server into
-a native sandbox. Qdrant execution is withheld until project-scoped authentication or a
-dedicated instance can be enforced. Never configure production-wide administrative roles.
+Read-only mode exposes terminal_read_targets and terminal_read without HTML resources.
+Targets resolve from current bounded project configuration; credentials never appear in
+these results. MySQL/PostgreSQL use fixed metadata/base-table queries in read-only
+transactions, Redis uses a fixed read-command allowlist, and SQLite opens mode=ro with
+query_only and an authorizer denying write/attach/function commands. No arbitrary SQL,
+shell, scripts or client flags enter this path. Responses/time/row counts are bounded.
+These controls restrict commands issued by CoLink; they do not authenticate a database
+server's implementation or guarantee that server-side functions have no external effects.
 
 Local Git commits use a private index and only selected task files, with HEAD/index/
 source conflict checks. User staging is preserved. Hooks, filters and external helpers

@@ -276,6 +276,17 @@ def test_identical_plan_retry_returns_original_plan_and_development_task(harness
     assert len(harness.coordinator.tasks) == 1
 
 
+def test_database_raw_ports_and_other_active_target_proxy_ports_cannot_be_registered(harness):
+    harness.coordinator.databases = SimpleNamespace(raw_service_ports=lambda: {5432, 3306, 33333})
+    for port in (5432, 3306, 33333):
+        with pytest.raises(SourceError, match="DATABASE_SERVICE_PORT_PROTECTED"):
+            harness.coordinator.enable(["first"], ports=[port])
+    # A previously registered development port becoming a database endpoint is protected too.
+    harness.coordinator.grants["first"]["ports"] = (33333,)
+    with pytest.raises(SourceError, match="DATABASE_SERVICE_PORT_PROTECTED"):
+        plan(harness, connect_ports=[33333])
+
+
 @pytest.mark.parametrize("changed", ["parameters", "project"])
 def test_plan_request_cannot_cross_parameters_or_project(harness, changed):
     prepared = plan(harness)

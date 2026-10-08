@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 
 export function verifyMySqlGrants(text, expected) {
-  if (!/^colink_[a-z0-9_]{1,48}$/.test(expected))
+  if (!/^[A-Za-z0-9_][A-Za-z0-9_. -]{0,63}$/.test(expected))
     throw Error('Project database grants are too broad');
   const lines = text.trim().split('\n');
   const mode = lines.shift();
@@ -45,7 +45,7 @@ export function mysqlConnectionArgs(config, env) {
     '--host=' + env.MYSQL_HOST, '--port=' + env.MYSQL_TCP_PORT,
     '--ssl-mode=' + (config.databaseTLS ? 'VERIFY_IDENTITY' : 'DISABLED'),
     ...(!config.databaseTLS ? ['--get-server-public-key'] : []),
-    '--user=' + config.databaseUser, '--database=' + env.COLINK_DATABASE_NAME];
+    '--local-infile=0', '--user=' + config.databaseUser, '--database=' + env.COLINK_DATABASE_NAME];
 }
 
 export function mysqlProjectArgs(config, env, args) {
@@ -101,7 +101,8 @@ export async function verifyDatabase(profile, config, env) {
     const sql = `WITH RECURSIVE member(oid) AS (
       SELECT oid FROM pg_roles WHERE rolname=current_user
       UNION SELECT m.roleid FROM pg_auth_members m JOIN member r ON m.member=r.oid
-    ) SELECT json_build_object('database',current_database(),
+    ) SELECT json_build_object('database',current_database(), 'user',current_user,
+      'instance_identity',(SELECT oid::text FROM pg_database WHERE datname=current_database()),
       'unsafe_role',EXISTS(SELECT 1 FROM pg_roles WHERE oid IN (SELECT oid FROM member)
         AND (rolsuper OR rolcreaterole OR rolcreatedb OR rolreplication OR rolbypassrls
           OR left(rolname,3)='pg_')),
@@ -113,15 +114,29 @@ export async function verifyDatabase(profile, config, env) {
     passwordKey = 'PGPASSWORD';
     verify = text => {
       const result = JSON.parse(text.trim());
-      if (result.database !== expected || result.unsafe_role || result.other_database_owner)
+      if (result.database !== expected || result.user !== config.databaseUser)
+        throw Error('Database target changed');
+      if (!config.databaseAction && config.databaseInstanceIdentity &&
+          result.instance_identity !== config.databaseInstanceIdentity)
+        throw Error('Database instance changed');
+      if (!config.databaseApprovedAccount && (result.unsafe_role || result.other_database_owner))
         throw Error('Project database role is too broad');
-      return { vector_extension: result.vector_extension, role_check: 'passed' };
+      return { vector_extension: result.vector_extension,
+        role_check: config.databaseApprovedAccount ? 'approved_account' : 'passed' };
     };
   } else if (kind === 'mysql') {
     argv = [config.databaseClient, ...mysqlConnectionArgs(config, env), '--batch', '--raw',
-      '--skip-column-names', '--execute=SELECT @@GLOBAL.partial_revokes; SHOW GRANTS FOR CURRENT_USER();'];
+      '--skip-column-names', config.databaseApprovedAccount
+        ? '--execute=SELECT JSON_OBJECT(\'database\', DATABASE(), \'user\', SUBSTRING_INDEX(CURRENT_USER(),\'@\',1));'
+        : '--execute=SELECT @@GLOBAL.partial_revokes; SHOW GRANTS FOR CURRENT_USER();'];
     passwordKey = 'MYSQL_PWD';
-    verify = text => verifyMySqlGrants(text, expected);
+    verify = text => {
+      if (!config.databaseApprovedAccount) return verifyMySqlGrants(text, expected);
+      const result = JSON.parse(text.trim());
+      if (result.database !== expected || result.user !== config.databaseUser)
+        throw Error('Database target changed');
+      return { role_check: 'approved_account' };
+    };
   } else {
     // A global vector-server API key cannot isolate another project's data.
     throw Error('Dedicated vector instance or scoped credential required');
@@ -133,11 +148,16 @@ export async function verifyDatabase(profile, config, env) {
   verify(positive.text);
   const invalid = { ...env, [passwordKey]: 'colink-negative-' + randomBytes(24).toString('hex') };
   const negative = await probe(profile, argv, invalid, config.cwd);
-  if (negative.code === 0) throw Error('Database endpoint does not enforce password authentication');
+  if (negative.code === 0 && !config.databaseApprovedAccount && !config.databaseTargetEnforced)
+    throw Error('Database endpoint does not enforce password authentication');
   const again = await probe(profile, argv, env, config.cwd);
   if (again.code !== 0) throw Error('Database authentication could not be confirmed');
   const result = verify(again.text);
-  return { kind, authenticated: true, password_enforced: true, ...result,
+  return { kind, authenticated: true, password_enforced: negative.code !== 0, ...result,
+    database_action: config.databaseAction || null,
+    target_enforced: config.databaseTargetEnforced === true,
     migrations: 'not_verified', crud: 'not_verified',
-    data_scope: 'project role; server database grants remain authoritative' };
+    data_scope: config.databaseApprovedAccount
+      ? 'approved target; native account privileges remain authoritative'
+      : 'project role; server database grants remain authoritative' };
 }

@@ -69,10 +69,27 @@ def test_menu_and_brand_share_the_same_continuous_mark():
 
 def test_main_panel_keeps_controls_without_technical_metrics():
     panel = (WORKSPACE / "macos/CodeConnect/Panel.swift").read_text()
-    panel = panel.split("private struct ConnectionSetupView:")[0]
-    for required in ("选择文件夹", 'Label("启动"', 'Label("关闭"'):
+    panel = panel.split("private struct ModeAuthorizationView:")[0]
+    for required in (
+        "选择文件夹",
+        'Label("启动"',
+        'Label("关闭"',
+        'Image(systemName: "gearshape")',
+    ):
         assert required in panel
-    for removed in ("快照版本", "已收录文件", "私有隧道", "LOCAL ·", "没有后台采集"):
+    for removed in (
+        "数据库连接",
+        "快照版本",
+        "已收录文件",
+        "私有隧道",
+        "LOCAL ·",
+        "没有后台采集",
+        "允许运行项目",
+        "允许修改代码",
+        "开发环境与数据库引导",
+        "当前作业",
+        "存储位置",
+    ):
         assert removed not in panel
     assert "controller.phase == .failed || controller.phase == .external" in panel
 

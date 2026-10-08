@@ -636,6 +636,10 @@ class NativeSandbox:
             config["databaseClient"] = self.tools.get("mysql" if kind == "mysql" else "psql")
             config["databaseUser"] = database.get("user")
             config["databaseTLS"] = database.get("tls", False)
+            config["databaseApprovedAccount"] = database.get("approved_account", False)
+            config["databaseTargetEnforced"] = database.get("target_enforced", False)
+            config["databaseAction"] = database.get("database_action")
+            config["databaseInstanceIdentity"] = database.get("instance_identity")
             with self.payload_lock:
                 self.payloads[job_id] = payload
         write_state(self.state, name, config)

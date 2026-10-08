@@ -59,6 +59,7 @@ VERSION_ARGUMENTS = {
     "pg_config": ("--version",),
     "redis-cli": ("--version",),
     "redis-server": ("--version",),
+    "sqlite3": ("--version",),
 }
 _LINK_LINE = re.compile(r"^\s+(.+) \(compatibility version [0-9.]+, current version [0-9.]+\)$")
 _VERSION = re.compile(r"\b(?:v)?\d+(?:\.\d+){1,3}(?:[-+._a-zA-Z0-9]*)?\b")
