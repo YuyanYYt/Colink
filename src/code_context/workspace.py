@@ -11,9 +11,9 @@ from code_context.execution_gate import native_gate
 from code_context.execution_git import GitCoordinator
 from code_context.execution_ports import PortsCoordinator
 from code_context.live import LiveQueries
-from code_context.live_index import LiveIndexService
 from code_context.live_watch import WatchCoordinator
 from code_context.local_control import LocalControl, control_request, private_directory
+from code_context.project_index import ProjectIndexService
 from code_context.project_registry import ProjectRegistry
 from code_context.recovery_store import RecoveryStore
 from code_context.source_access import SourceError
@@ -84,12 +84,7 @@ class WorkspaceRuntime:
                 )
             self.backend = LiveQueries(registry=self.registry)
             index_directory = private_directory(self.data_dir / "index")
-            self.backend.index_service = LiveIndexService(
-                index_directory.root,
-                max_bytes=64 * 1024 * 1024,
-                # DELETE journal needs headroom; this does not preallocate 192 MiB.
-                max_peak_bytes=192 * 1024 * 1024,
-            )
+            self.backend.index_service = ProjectIndexService(index_directory.root)
             self.watcher = WatchCoordinator(
                 self.backend.sources, self.backend.index_service.invalidate
             )

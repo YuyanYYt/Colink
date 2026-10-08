@@ -52,11 +52,12 @@ if TYPE_CHECKING:
 _APPLICATION_ID = 0x434C4958
 _SCHEMA_VERSION = 1
 _PAGE_SIZE = 4096
-_INDEX_VERSION = f"live-facts-v3-{INDEX_VERSION}"
+_INDEX_VERSION = f"live-facts-v4-{INDEX_VERSION}"
 _PARSE_CACHE_VERSION = f"live-packed-v1-{PARSER_VERSION}"
 _CONFIG_PATHS = frozenset({"pyproject.toml", ".gitignore", ".codecontextignore"})
-# Live facts are compressed. These logical limits are independent of the
-# unchanged 64 MiB database ceiling and the 32 MiB source/parse limits.
+# Disk space is allocated on demand; this is not a process memory ceiling.
+MAX_LIVE_DATABASE_BYTES = 500 * 1024 * 1024
+# Compressed payload budgets remain separate from physical pages.
 MAX_LIVE_INDEX_BYTES = 48 * 1024 * 1024
 MAX_LIVE_FACTS = 200_000
 _TABLES = ("files", "li_parse_cache", "ci_files", "ci_symbols", "ci_relations")
@@ -103,8 +104,10 @@ _SCHEMA = (
         kind TEXT NOT NULL, resolution TEXT NOT NULL, line INTEGER NOT NULL, data TEXT NOT NULL,
         FOREIGN KEY(project_id, source_id) REFERENCES li_projects(project_id, source_id)
         ON DELETE CASCADE)""",
-    "CREATE INDEX ci_relation_source ON ci_relations(project_id, revision, source_symbol_id)",
-    "CREATE INDEX ci_relation_target ON ci_relations(project_id, revision, target_symbol_id)",
+    "CREATE INDEX ci_relation_source ON ci_relations(project_id, revision, source_symbol_id) "
+    "WHERE source_symbol_id IS NOT NULL",
+    "CREATE INDEX ci_relation_target ON ci_relations(project_id, revision, target_symbol_id) "
+    "WHERE target_symbol_id IS NOT NULL",
     "CREATE INDEX ci_relation_file ON ci_relations(project_id, revision, source_path)",
 )
 
@@ -194,7 +197,7 @@ class LiveIndexService:
     def __init__(
         self,
         data_dir: Path,
-        max_bytes: int = 64 * 1024 * 1024,
+        max_bytes: int = MAX_LIVE_DATABASE_BYTES,
         max_projects: int = 4,
         wait_seconds: float = 10,
         *,
@@ -207,6 +210,7 @@ class LiveIndexService:
         max_pending_projects: int | None = None,
         max_context_bindings: int = 128,
         manifest_seconds: float = 5,
+        executor: ThreadPoolExecutor | None = None,
     ):
         budgets = (
             max_bytes,
@@ -266,6 +270,7 @@ class LiveIndexService:
         self._db: sqlite3.Connection | None = None
         self._ownership_fd: int | None = None
         self._storage_error: str | None = None
+        self._last_publication: dict = {}
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
             self._ownership_fd = os.open(
@@ -281,7 +286,10 @@ class LiveIndexService:
             raise SourceError(
                 "INDEX_STORAGE_UNAVAILABLE: cannot own the dedicated fact cache"
             ) from None
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="colink-live-index")
+        self._owns_executor = executor is None
+        self._executor = executor or ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="colink-live-index"
+        )
 
     def _open_database(self):
         if self.path.is_symlink():
@@ -324,6 +332,33 @@ class LiveIndexService:
         if not db.execute("SELECT 1 FROM sqlite_master WHERE name='li_projects'").fetchone():
             self._storage_error = "GLOBAL_STORAGE_BUDGET_EXCEEDED"
             return
+        # NULL endpoints cannot match the symbol equality queries. Keep their
+        # evidence rows, but omit those keys from the search indexes. This also
+        # upgrades existing derived caches without changing the table schema.
+        replacements = []
+        for name, column in (
+            ("ci_relation_source", "source_symbol_id"),
+            ("ci_relation_target", "target_symbol_id"),
+        ):
+            definition = db.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (name,)
+            ).fetchone()
+            if definition is None or "WHERE" not in definition[0].upper():
+                replacements.append((name, column, definition is not None))
+        if replacements:
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                for name, column, exists in replacements:
+                    if exists:
+                        db.execute(f"DROP INDEX {name}")
+                    db.execute(
+                        f"CREATE INDEX {name} ON ci_relations(project_id, revision, {column}) "
+                        f"WHERE {column} IS NOT NULL"
+                    )
+                db.commit()
+            except sqlite3.Error:
+                db.rollback()
+                raise
         for row in db.execute(
             "SELECT project_id FROM li_projects ORDER BY last_used DESC"
         ).fetchall()[self.max_projects :]:
@@ -446,8 +481,22 @@ class LiveIndexService:
                 or self._recent.get(project_id),
                 "stats": stats,
                 "storage_bytes": storage_bytes,
+                "storage": self._storage_details(project_id),
                 "limits": self._limits(),
             }
+
+    def _storage_details(self, project_id):
+        # Page limits belong to this live connection; a separate read-only
+        # diagnostic connection reports its own default max_page_count instead.
+        details = {"page_ceiling": self._page_limit, "page_size": _PAGE_SIZE}
+        if not self._closed:
+            details.update(
+                page_count=self._db.execute("PRAGMA page_count").fetchone()[0],
+                free_pages=self._db.execute("PRAGMA freelist_count").fetchone()[0],
+            )
+        if self._last_publication.get("project_id") == project_id:
+            details["last_publication"] = dict(self._last_publication)
+        return details
 
     def _limits(self):
         return {
@@ -546,7 +595,10 @@ class LiveIndexService:
             raise SourceError("INVALID_RESPONSE_BUDGET: max_chars must be between 1000 and 50000")
         try:
             source = self._source(backend, project_id)
-            self._context(backend, source, project_id, handle)
+            # LiveQueries already validates the entry context. Direct callers
+            # still require a live handle, and complete hash/inventory guards
+            # remain before publication and on both sides of the fact query.
+            self._context(backend, source, project_id, handle, validate=False)
             metadata = self._manifest(source)
             manifest = _signature(metadata)
             self._bind_context(backend, source, project_id, handle, manifest)
@@ -657,8 +709,9 @@ class LiveIndexService:
             self.invalidate(project_id)
             raise SourceError("INDEX_NOT_READY: fact cache could not serve the query") from None
 
-    @staticmethod
-    def _not_ready(project_id, handle, reason):
+    def _not_ready(self, project_id, handle, reason):
+        with self._lock:
+            storage = self._storage_details(project_id)
         return {
             "project_id": project_id,
             "snapshot": handle,
@@ -667,6 +720,7 @@ class LiveIndexService:
             "index_not_ready": True,
             "index_status": "index_not_ready",
             "reason": reason,
+            "storage": storage,
         }
 
     def _read_symbol(
@@ -786,7 +840,9 @@ class LiveIndexService:
                 else {}
             )
             old_topology_hash = (
-                old_stats.get("topology_hash") if not old_stats.get("partial", True) else None
+                old_stats.get("topology_hash")
+                if old_stats.get("relation_reuse_safe", False)
+                else None
             )
         files, parsed_files, parses = [], {}, []
         reused_paths = set()
@@ -936,12 +992,30 @@ class LiveIndexService:
                 partial |= parsed.status != "ready"
         del prior
         resolver = Resolver(parsed_files, configuration)
-        topology_hash = hashlib.sha256(repr(resolver.topology()).encode("utf-8")).hexdigest()
-        reuse_relations = (
-            old_topology_hash == topology_hash
-            and not partial
-            and not resolver.python_roots.diagnostic
+        excluded_paths = {
+            path
+            for path, parsed in parsed_files.items()
+            if parsed.status == "resource_limited"
+            and parsed.diagnostics == [{"code": "SOURCE_TEXT_EXCLUDED"}]
+        }
+        exclusion_versions = tuple(
+            (item["path"], item["fingerprint"])
+            for item in metadata["files"]
+            if item["path"] in excluded_paths
         )
+        topology_hash = hashlib.sha256(
+            repr((resolver.topology(), exclusion_versions)).encode("utf-8")
+        ).hexdigest()
+        reuse_safe = (
+            not metadata["partial"]
+            and not metadata.get("skipped")
+            and not resolver.python_roots.diagnostic
+            and all(
+                parsed.status == "ready" or path in excluded_paths
+                for path, parsed in parsed_files.items()
+            )
+        )
+        reuse_relations = old_topology_hash == topology_hash and reuse_safe
         reused_relation_files = 0
         indexed, symbols, relations = [], [], []
         index_bytes, fact_count = file_bytes, 0
@@ -1014,6 +1088,7 @@ class LiveIndexService:
                 index_bytes + cost <= self.max_index_bytes and fact_count + count <= self.max_facts
             )
             if not accepted:
+                reuse_safe = False
                 status, diagnostics, partial = (
                     "resource_limited",
                     [{"code": "PROJECT_INDEX_BUDGET_EXCEEDED"}],
@@ -1057,6 +1132,8 @@ class LiveIndexService:
             "repaired_parse_files": repaired_parse_files,
             "resolved_files": len(parsed_files),
             "reused_relation_files": reused_relation_files,
+            "rebound_files": len(parsed_files) - reused_relation_files,
+            "relation_reuse_safe": reuse_safe,
             "topology_hash": topology_hash,
             "source_bytes": source_bytes,
             "parse_payload_bytes": parse_bytes,
@@ -1095,6 +1172,16 @@ class LiveIndexService:
         ]
         minimum = max(0, len(victims) + 1 - self.max_projects)
         for count in range(minimum, len(victims) + 1):
+            self._last_publication = {
+                "project_id": build.project_id,
+                "phase": "li_projects",
+                "complete": False,
+                "completed_table_peak_pages": db.execute("PRAGMA page_count").fetchone()[0],
+                "project_id_bytes": len(build.project_id.encode("utf-8")),
+                "fact_count": build.stats["fact_count"],
+                "index_payload_bytes": build.stats["index_payload_bytes"],
+                "parse_payload_bytes": build.stats["parse_payload_bytes"],
+            }
             try:
                 db.execute("BEGIN IMMEDIATE")
                 for project_id in [build.project_id, *victims[:count]]:
@@ -1115,16 +1202,22 @@ class LiveIndexService:
                     (build.files, build.parses, build.indexed, build.symbols, build.relations),
                     strict=True,
                 ):
+                    self._last_publication["phase"] = table
                     if rows:
                         db.executemany(
                             f"INSERT INTO {table} VALUES({','.join('?' for _ in rows[0])})", rows
                         )
+                    self._last_publication["completed_table_peak_pages"] = max(
+                        self._last_publication["completed_table_peak_pages"],
+                        db.execute("PRAGMA page_count").fetchone()[0],
+                    )
                 db.commit()
             except sqlite3.OperationalError as exc:
                 db.rollback()
                 if exc.sqlite_errorcode != sqlite3.SQLITE_FULL:
                     raise
             else:
+                self._last_publication.update(phase="committed", complete=True)
                 for project_id in victims[:count]:
                     if project_id not in self._tasks:
                         self._states.pop(project_id, None)
@@ -1141,7 +1234,17 @@ class LiveIndexService:
             if self._closed:
                 return
             self._closed = True
-        self._executor.shutdown(wait=True, cancel_futures=True)
+            tasks = list(self._tasks.values())
+        if self._owns_executor:
+            self._executor.shutdown(wait=True, cancel_futures=True)
+        else:
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
+                try:
+                    task.result()
+                except Exception:
+                    pass  # The build's existing structured failure is retained.
         with self._lock:
             self._db.close()
             self._bindings.clear()

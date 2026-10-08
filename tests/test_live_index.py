@@ -719,6 +719,135 @@ def test_compact_live_relations_and_safe_reuse_after_edits(tmp_path, service_fac
     assert not stats["partial"]
 
 
+def test_stable_content_exclusions_allow_reuse_but_changed_exclusions_rebind(
+    tmp_path, service_factory
+):
+    files = python_files()
+    files["blocked.py"] = "credential = 'sk-" + "x" * 35 + "'\n"
+    backend = backend_for(tmp_path, {"a": files})
+    service = service_factory(backend)
+    original = find(backend, handle(backend), "normalize")
+    assert service.status("a")["stats"]["partial"]
+    helper = backend.sources["a"].root / "Code/pkg/helper.py"
+    helper.write_text(helper.read_text().replace("return doc.value", "return doc.value + 1"))
+    snapshot = handle(backend)
+    current = find(backend, snapshot, "normalize")
+    assert current["symbol_id"] == original["symbol_id"]
+    stats = service.status("a")["stats"]
+    assert stats["partial"] and stats["relation_reuse_safe"]
+    assert stats["reused_relation_files"] == 3 and stats["rebound_files"] == 2
+    ingest = find(backend, snapshot, "ingest")
+    assert any(
+        edge["target_symbol_id"] == current["symbol_id"]
+        for edge in query(backend, snapshot, "get_call_graph", symbol_id=ingest["symbol_id"])[
+            "edges"
+        ]
+    )
+    blocked = backend.sources["a"].root / "blocked.py"
+    with pytest.raises(SourceError, match="FILE_EXCLUDED"):
+        backend.sources["a"].read("blocked.py")
+    blocked.write_text(blocked.read_text() + "# changed unavailable source\n")
+    find(backend, handle(backend), "normalize")
+    assert service.status("a")["stats"]["reused_relation_files"] == 0
+    blocked.write_text("def now_visible(): return 1\n")
+    assert find(backend, handle(backend), "now_visible")
+    assert not service.status("a")["stats"]["partial"]
+    assert service.status("a")["stats"]["reused_relation_files"] == 0
+
+
+def test_changed_calls_rebind_only_changed_file_and_match_full_rebuild(tmp_path, service_factory):
+    backend = backend_for(
+        tmp_path,
+        {
+            "a": {
+                "model.py": "def first(): return 1\ndef second(): return 2\n",
+                "caller.py": "from model import first, second\ndef run(): return first()\n",
+            }
+        },
+    )
+    service = service_factory(backend)
+    snapshot = handle(backend)
+    run = find(backend, snapshot, "run")
+    first = find(backend, snapshot, "first")
+    second = find(backend, snapshot, "second")
+    initial = query(backend, snapshot, "get_call_graph", symbol_id=run["symbol_id"])
+    assert any(e["target_symbol_id"] == first["symbol_id"] for e in initial["edges"])
+    caller = backend.sources["a"].root / "caller.py"
+    caller.write_text(caller.read_text().replace("return first()", "return second()"))
+    updated = handle(backend)
+    find(backend, updated, "run")
+    stats = service.status("a")["stats"]
+    assert stats["parsed_files"] == 1 and stats["reused_relation_files"] == 1
+    incremental = query(backend, updated, "get_call_graph", symbol_id=run["symbol_id"])
+    assert any(e["target_symbol_id"] == second["symbol_id"] for e in incremental["edges"])
+    assert all(e["target_symbol_id"] != first["symbol_id"] for e in incremental["edges"])
+    old_facts = rows(service, "SELECT data FROM ci_relations ORDER BY rowid")
+    fresh = service_factory(backend)
+    find(backend, handle(backend), "run")
+    assert [decode_relation(r[0]) for r in old_facts] == [
+        decode_relation(r[0]) for r in rows(fresh, "SELECT data FROM ci_relations ORDER BY rowid")
+    ]
+
+
+def test_legacy_endpoint_indexes_migrate_without_losing_unresolved_facts(tmp_path, service_factory):
+    project = "p_" + "f" * 32
+    backend = backend_for(tmp_path, {project: python_files()})
+    directory = tmp_path / "legacy-endpoint-index"
+    service = service_factory(backend, data_dir=directory)
+    symbol = find(backend, handle(backend, project), "normalize", project)
+    baseline = rows(service, "SELECT data FROM ci_relations ORDER BY rowid")
+    service.close()
+    with sqlite3.connect(service.path) as db:
+        for name, column in (
+            ("ci_relation_source", "source_symbol_id"),
+            ("ci_relation_target", "target_symbol_id"),
+        ):
+            db.execute(f"DROP INDEX {name}")
+            db.execute(f"CREATE INDEX {name} ON ci_relations(project_id,revision,{column})")
+    reopened = service_factory(backend, data_dir=directory)
+    assert rows(reopened, "SELECT data FROM ci_relations ORDER BY rowid") == baseline
+    assert rows(reopened, "PRAGMA integrity_check") == [("ok",)]
+    definitions = dict(
+        rows(reopened, "SELECT name,sql FROM sqlite_master WHERE name LIKE 'ci_relation_%'")
+    )
+    assert "WHERE target_symbol_id IS NOT NULL" in definitions["ci_relation_target"]
+    assert "WHERE source_symbol_id IS NOT NULL" in definitions["ci_relation_source"]
+    assert find(backend, handle(backend, project), "normalize", project) == symbol
+    external = query(backend, handle(backend, project), "external_dependencies", project)
+    assert external["dependencies"]
+    assert rows(reopened, "SELECT count(*) FROM ci_relations WHERE target_symbol_id IS NULL")[0][0]
+
+
+def test_real_length_project_ids_fit_compact_index_and_failed_publish_reports_storage(
+    tmp_path, service_factory
+):
+    project = "p_" + "1" * 32
+    text = "".join(f"def value_{n}(): return missing_{n}()\n" for n in range(350))
+    backend = backend_for(tmp_path, {project: {"a.py": text}})
+    probe = service_factory(backend)
+    find(backend, handle(backend, project), "value_0", project)
+    compact_bytes = probe.path.stat().st_size
+    probe.close()
+    with sqlite3.connect(probe.path) as db:
+        db.execute("DROP INDEX ci_relation_target")
+        db.execute(
+            "CREATE INDEX ci_relation_target ON ci_relations(project_id,revision,target_symbol_id)"
+        )
+    assert probe.path.stat().st_size > compact_bytes
+    service = service_factory(backend, max_bytes=compact_bytes)
+    find(backend, handle(backend, project), "value_0", project)
+    assert service.path.stat().st_size <= compact_bytes
+    assert service.status(project)["limits"]["database_bytes"] == compact_bytes
+    (backend.sources[project].root / "a.py").write_text(text + text.replace("value_", "extra_"))
+    failed = query(backend, handle(backend, project), "project_architecture", project)
+    assert failed["reason"] == "GLOBAL_STORAGE_BUDGET_EXCEEDED"
+    publication = failed["storage"]["last_publication"]
+    assert publication["project_id_bytes"] == 34 and not publication["complete"]
+    assert publication["phase"] in module._TABLES
+    assert failed["storage"]["page_count"] <= failed["storage"]["page_ceiling"]
+    assert rows(service, "PRAGMA integrity_check") == [("ok",)]
+
+
 def test_corrupt_parse_cache_reparses_only_the_affected_file(tmp_path, service_factory):
     backend = backend_for(tmp_path, {"a": python_files(), "b": {"b.py": "def other(): pass\n"}})
     service = service_factory(backend)
@@ -974,7 +1103,9 @@ def test_index_context_and_parse_reuse_batch_without_holding_index_lock(
     reads = backend.sources["a"].metrics["body_reads"]
     scopes.clear()
     query(backend, snapshot, "project_architecture")
-    assert len(scopes) >= 4 and set(scopes) == {"a"}
+    # Entry validation plus the two complete pre/post fact guards, all outside
+    # the index lock; an extra duplicate entry hash pass is unnecessary.
+    assert len(scopes) == 3 and set(scopes) == {"a"}
     service.invalidate("a")
     query(backend, snapshot, "project_architecture")
     assert backend.sources["a"].metrics["body_reads"] == reads
