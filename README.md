@@ -182,6 +182,7 @@ CoLink 使用 [MIT 许可证](LICENSE)。这是每位用户独立运行的开源
 
 ## 软件恢复锚点
 
-当前首选：`9150904`（`anchor/colink-before-live-index-optimization`，`0.5.0b5 · build 17`）。
+当前首选：`anchor/colink-0.5.0b5-build19-verified`（本机 `0.5.0b5 · build 19`，安装版源码 `79ad2ae`）。
 恢复前保留当前改动并检查运行数据兼容性，具体步骤和归档记录见
-[9150904 恢复说明](docs/RECOVERY_9150904.md)。后续索引修复不替换该基准；历史锚点保留原目标。
+[build 19 恢复说明](docs/RECOVERY_0.5.0b5_BUILD19.md)。2026-10-08 用户明确改选本机新版，
+旧 CoLink 恢复标签已删除；历史文档仅保留当时记录。
