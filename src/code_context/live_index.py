@@ -196,7 +196,13 @@ def _binding_cached(payload, path, language, cached):
     ):
         raise FactCacheError("invalid binding cache")
     try:
-        return value, summary_file(value["summary"], path, language)
+        parsed = summary_file(value["summary"], path, language)
+        # Keep only small accounting values. The raw summary duplicates every
+        # declaration, and read sets are needed only if topology changes. Load
+        # those one file at a time below, rather than retaining all decoded JSON.
+        return {
+            key: value[key] for key in ("parse_bytes", "parse_facts", "index_bytes", "index_facts")
+        }, parsed
     except (KeyError, TypeError, ValueError, AttributeError):
         raise FactCacheError("invalid binding summary") from None
 
@@ -1159,7 +1165,11 @@ class LiveIndexService:
             reuse_file = reuse_relations and path in reused_paths and cached_info is not None
             if local_candidate and path in reused_paths and not reuse_relations:
                 try:
-                    reuse_file = resolver.binding_reads.unchanged(cached_info["reads"])
+                    previous_reads = decode_fact(
+                        prior_bindings[path], prefix=b"BC1:", max_bytes=MAX_SNAPSHOT_PARSE_BYTES
+                    )["reads"]
+                    reuse_file = resolver.binding_reads.unchanged(previous_reads)
+                    del previous_reads
                 except (ValueError, TypeError, KeyError):
                     local_candidate, reuse_file = False, False
             retain = local_candidate and reuse_file
@@ -1285,19 +1295,14 @@ class LiveIndexService:
             # same physical database; exhausting it disables local optimization.
             parse_row = parse_rows.get(path)
             if reuse_safe:
-                reads = (
-                    cached_info["reads"]
-                    if reuse_file and cached_info
-                    else resolver.binding_reads.files.get(path, {})
-                )
-                if retain:
+                if reuse_file and cached_info:
                     payload = prior_bindings[path]
                 else:
                     payload = _binding_payload(
                         {
                             "version": _BINDING_CACHE_VERSION,
                             "summary": declaration_summary(parsed),
-                            "reads": reads,
+                            "reads": resolver.binding_reads.files.pop(path, {}),
                             "sha256": parse_row[3] if parse_row else None,
                             "parse_digest": _payload_digest(parse_row[-1]) if parse_row else None,
                             "parse_bytes": billing[path][0],

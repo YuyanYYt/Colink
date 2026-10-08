@@ -8,6 +8,7 @@ import hashlib
 import json
 from collections import defaultdict
 from dataclasses import asdict
+from weakref import proxy
 
 from code_context.intelligence_models import ParsedFile
 
@@ -74,7 +75,10 @@ class BindingReads:
     """One build's memoized lookup digests and per-file read sets."""
 
     def __init__(self, resolver):
-        self.resolver = resolver
+        # ReadMap callbacks retain this tracker. A strong reference back to the
+        # resolver would retain the whole build until cyclic GC runs, inflating
+        # resident memory across successive local updates.
+        self.resolver = proxy(resolver)
         self.active = None
         self.files = {}
         self.digests = {}

@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from threading import Event, Lock, current_thread
@@ -9,7 +10,9 @@ from threading import Event, Lock, current_thread
 import pytest
 
 import code_context.live_index as module
+from code_context.intelligence_models import ParsedFile
 from code_context.intelligence_queries import decode_relation
+from code_context.intelligence_resolver import Resolver
 from code_context.live import LiveQueries
 from code_context.live_index import LiveIndexService
 from code_context.read_context import ReadContexts
@@ -798,6 +801,18 @@ def _canonical_core(service):
         table: sorted(repr(row) for row in rows(service, f"SELECT * FROM {table}"))
         for table in ("ci_files", "ci_symbols", "ci_relations")
     }
+
+
+def test_binding_read_tracker_does_not_retain_completed_resolver():
+    resolver = Resolver({"a.py": ParsedFile("a.py")}, track_dependencies=True)
+    resolver.resolve_file("a.py")
+    reference = weakref.ref(resolver)
+    # Keep the callback owner alive to prove no strong back-edge is present;
+    # do not mask a cycle with an explicit gc.collect().
+    tracker = resolver.binding_reads
+    del resolver
+    assert reference() is None
+    assert tracker.files["a.py"]
 
 
 def _assert_full_equivalent(backend, service, service_factory, name="run"):
