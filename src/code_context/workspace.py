@@ -87,7 +87,8 @@ class WorkspaceRuntime:
             self.backend.index_service = LiveIndexService(
                 index_directory.root,
                 max_bytes=64 * 1024 * 1024,
-                max_peak_bytes=128 * 1024 * 1024,
+                # DELETE journal needs headroom; this does not preallocate 192 MiB.
+                max_peak_bytes=192 * 1024 * 1024,
             )
             self.watcher = WatchCoordinator(
                 self.backend.sources, self.backend.index_service.invalidate
