@@ -22,6 +22,7 @@ from starlette.routing import Mount, Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from code_context import __version__
+from code_context.execution_tools import EXECUTION_TOOL_NAMES, register_execution_tools
 from code_context.intelligence_tools import CODE_TOOL_NAMES, register_code_tools
 from code_context.models import FileChange, SyncBatch, validate_project
 from code_context.policy import (
@@ -55,7 +56,7 @@ class CodeMCPServer(MCPServer):
                 "CoLink tool definitions changed; refresh this connection's tools "
                 "and start a fresh analysis with repo_overview"
             )
-        if name in WRITE_TOOL_NAMES:
+        if name in WRITE_TOOL_NAMES | EXECUTION_TOOL_NAMES:
             tool = self._tool_manager.get_tool(name)
             if tool is not None:
                 allowed = tool.parameters.get("properties", {})
@@ -117,8 +118,27 @@ def build_mcp(
             "No user code rollback tool. Use user-saved Git checkpoints for code history; "
             "conflicts require local inspection. "
             "Delete only explicitly requested individual source files through delete_file; "
-            "read the current SHA first. No recursive directory deletion or renaming tool. "
-            "No command execution. Platform approvals remain controlled by the client."
+            "read the current SHA first. Moves use move_path_status and a bounded two-end task. "
+            "Development is a default-off local grant for the exact project. Read "
+            "execution_environment first. Use terminal_start for direct host shell/argv, "
+            "database CLI or Python/Node database drivers; terminal_input sends stdin, "
+            "terminal_output reads bounded output, terminal_status/list resume sessions, "
+            "terminal_cancel stops owned processes. Terminal runs as the current OS user, "
+            "in the real project directory, not a filesystem or network sandbox. Commands "
+            "can modify user-accessible files and services directly, without writeback. "
+            "In read-only mode use terminal_read_targets and terminal_read for fixed database "
+            "metadata, table previews and Redis reads; generic terminal commands are unavailable. "
+            "Database access uses normal credentials and database-account permissions; "
+            "there is no CoLink database connection page, target grant or database_* tool. "
+            "Read current project configuration and local environment without printing "
+            "secrets. For a new project use installed database clients/drivers to create "
+            "its database and schema as requested. Prefer local credential files/environment, "
+            "never echo passwords or put them in CLI arguments. Use stable request IDs; "
+            "an uncertain send is not safe to repeat under a new ID. Check process output "
+            "and exit status; running does not prove application/database health. "
+            "The older execution_plan/rehearse/start path remains an optional isolated "
+            "build/test runner, with its own temporary input, network and writeback limits. "
+            "Platform approvals remain controlled by the client."
         )
         if live_mode
         else (
@@ -164,6 +184,8 @@ def build_mcp(
         when this server's watcher is not ready. A completely offline tunnel cannot answer;
         request failure does not distinguish an offline client from other transport failures.
         Mirror-only servers cannot certify live synchronization. Includes enforced filters.
+        execution_enabled and execution_projects report actual local development grants
+        within this connection; execution_gate describes platform readiness, not permission.
         """
         authorize(check_source=False)
         projects = store.list_projects()["projects"]
@@ -178,6 +200,7 @@ def build_mcp(
         )
         visible = {p["project_id"] for p in projects}
         write_projects = [p for p in status.get("write_projects", []) if p in visible]
+        execution_projects = [p for p in status.get("execution_projects", []) if p in visible]
         return {
             "server_reachable": True,
             "source_mode": store.source_mode,
@@ -199,6 +222,12 @@ def build_mcp(
             "write_enabled": bool(status.get("write_enabled", False)) and bool(write_projects),
             "write_available": bool(status.get("write_available", False)),
             "write_projects": write_projects,
+            "execution_available": bool(status.get("execution_available", False)),
+            "execution_enabled": bool(status.get("execution_enabled", False))
+            and bool(execution_projects),
+            "execution_projects": execution_projects,
+            "execution_gate": status.get("execution_gate", "closed"),
+            "execution_limits": status.get("execution_limits", {}),
             "recovery_required": bool(status.get("recovery_required", False)),
             "filters": {
                 "excluded_directories": sorted(EXCLUDED_DIRS),
@@ -375,6 +404,8 @@ def build_mcp(
     register_code_tools(mcp, store, authorize, display_name, annotations)
     if live_mode and getattr(store, "write_coordinator", None) is not None:
         register_write_tools(mcp, store.write_coordinator, authorize)
+    if live_mode and getattr(store, "workspace_runtime", None) is not None:
+        register_execution_tools(mcp, store.workspace_runtime, authorize)
     return mcp
 
 

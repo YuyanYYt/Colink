@@ -24,8 +24,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             controller = ConnectionController(configuration: configuration)
         } catch {
             let alert = NSAlert()
-            alert.messageText = "CoLink 无法读取运行配置"
-            alert.informativeText = "请从项目重新构建应用；不会启动任何连接。"
+            alert.messageText = "无法打开存储位置"
+            alert.informativeText = "请检查路径与权限。\n\(error.localizedDescription)"
             alert.runModal()
             NSApplication.shared.terminate(nil)
             return
@@ -66,11 +66,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         ])
         popover = NSPopover()
         popover.contentViewController = container
-        popover.contentSize = NSSize(width: 360, height: controller.configuration.isLive ? 600 : 428)
+        popover.contentSize = NSSize(width: 360, height: controller.configuration.isLive ? 520 : 440)
         popover.behavior = .transient
         popover.delegate = self
         controller.showPanel = { [weak self] in self?.showPanel() }
         controller.hidePanel = { [weak self] in self?.popover.performClose(nil) }
+        controller.updatePanelSize = { [weak self] width, height in
+            self?.popover.contentSize = NSSize(width: width, height: height)
+        }
         controller.didStop = { [weak self] in
             if self?.quitting == true { NSApplication.shared.reply(toApplicationShouldTerminate: true) }
         }

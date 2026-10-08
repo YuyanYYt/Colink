@@ -91,9 +91,11 @@ def test_actual_local_frontend_grant_read_edit_diff_undo_and_disable(monkeypatch
         assert not runtime.status()["write_enabled"]
         result = desktop_control(base, root, "enable_write", {"project_ids": [pid]})
         assert result["write_enabled"] and result["write_projects"] == [pid]
-        task = runtime.begin_task(pid, result["next_task_request_id"], paths=["module.py"])[
-            "task_id"
-        ]
+        title = "修复模块中的数值"
+        task = runtime.begin_task(
+            pid, result["next_task_request_id"], title=title, paths=["module.py"]
+        )["task_id"]
+        assert runtime.status()["active_task"]["title"] == title
         runtime.apply_edit(
             pid,
             task,
@@ -113,5 +115,7 @@ def test_actual_local_frontend_grant_read_edit_diff_undo_and_disable(monkeypatch
             )
         assert runtime.backend.get_recent_diff(pid)["summary"]["files_changed"] == 1
         assert (root / "module.py").read_text() == "VALUE = 2\n"
-        assert not desktop_control(base, root, "disable_write", {})["write_enabled"]
+        disabled = desktop_control(base, root, "disable_write", {})
+        assert not disabled["write_enabled"]
+        assert disabled["active_task"]["title"] == title
         assert not (state / "server" / "mirror.sqlite3").exists()

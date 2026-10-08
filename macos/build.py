@@ -73,6 +73,7 @@ def build(
             "-module-cache-path",
             str(module_cache),
             str(sources / "Runtime.swift"),
+            str(sources / "StorageLocation.swift"),
             str(sources / "Panel.swift"),
             str(sources / "main.swift"),
             "-o",
@@ -121,7 +122,7 @@ def build(
                 "CFBundlePackageType": "APPL",
                 "CFBundleShortVersionString": release[1],
                 "CoLinkVersion": version,
-                "CFBundleVersion": "8",
+                "CFBundleVersion": "22",
                 "CFBundleIconFile": "CodeConnect",
                 "LSApplicationCategoryType": "public.app-category.developer-tools",
                 # Declare the menu-bar agent at launch; the installed bundle

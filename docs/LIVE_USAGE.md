@@ -1,14 +1,15 @@
 # CoLink · 原文件直读与任务写入
 
-适用：**0.5.0 Beta 2（`0.5.0b2`）安装包**、当前维护源码与 `workspace` 入口。
+适用：**0.5.0 Beta 5（`0.5.0b5`，build 22）安装包**、当前源码与 `workspace` 入口。
 旧 0.4.1 包及 mirror 兼容入口不使用这些语义。安装和升级见
-[INSTALL.md](INSTALL.md)，[下载新版](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b2)。
+[INSTALL.md](INSTALL.md)，[下载新版](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b5)。
 
 本版包含单文件 `delete_file`，已移除用户主动代码回退；无 Git 项目发现与同名
 消歧已改善。代码历史由项目 Git 管理。登记格式兼容限制见
-[维护说明](PROJECT_MANAGEMENT_AND_UNDO_REMOVAL.md)。终端目前只有设计，不能执行。
+[维护说明](PROJECT_MANAGEMENT_AND_UNDO_REMOVAL.md)。本机开发档另有原生终端，
+按当前 macOS 用户权限执行，见 [发行说明](RELEASE_0.5.0b5.md) 和 [安全说明](../SECURITY.md)。
 
-当前客户端应列出十五项读取工具和七项任务工具；更新旧版后刷新连接并新建对话。
+更新旧版后应刷新连接工具并新建对话；写入和开发授权仍需分别在本机开启。
 历史实际网页与本地证据分别见 [WEB_WRITE_VALIDATION.md](WEB_WRITE_VALIDATION.md)
 和 [FILE_DELETE_AND_LATENCY.md](FILE_DELETE_AND_LATENCY.md)，不代表任意账号均已验证。
 
@@ -50,8 +51,8 @@
    网页不必再调用独立「备份工具」。
 4. 新对象用 `create_directory` 和 `create_file`，先逐个创建已声明的父目录。
    已有对象不覆盖。客户端实际列出 `delete_file` 后，可在同一任务中用当前完整 SHA
-   删除明确要求的单个源文件。本版本
-   不提供用户撤销；删除前请确认需要的 Git 版本。不提供递归删除、重命名、终端。
+   删除明确要求的单个源文件。本版本不提供用户撤销；删除前请确认需要的 Git
+   版本。源码写工具不提供递归删除；受控移动和开发档终端分别有独立规则。
 5. 每笔不同操作用新的 `request_id`；同一次重试才复用同标识与全部相同参数。
    `REQUEST_ID_CONFLICT` 只表示标识复用错误，不是源码冲突。
 6. 保存后用新读取上下文确认需要的正文和 `get_diff`。旧上下文/哈希拒绝时停止
@@ -114,6 +115,6 @@ uv run python macos/package.py --output-dir .artifacts/releases/colink-0.5.0b2 -
 这种包绑定维护者独立状态，不是公开分发物；通用包不能带这两个参数。实际验收
 与候选归档分别留证，不把生成 DMG 当成系统安装/任意账号网页成功。
 
-维护者当前首选软件恢复基线固定在本版，见
-[RECOVERY_0.5.0b2.md](RECOVERY_0.5.0b2.md)。旧锚点仍保留，不靠删除持久化数据
-“解决”兼容。软件恢复和用户项目 Git 恢复是两件事，操作前均须保存现有工作。
+维护者当前首选软件恢复基线为本机 0.5.0b5 / build 19，见
+[当前恢复说明](RECOVERY_0.5.0b5_BUILD19.md)。旧 CoLink 恢复标签已按用户指令撤销。
+软件恢复前保留当前工作并检查持久数据兼容性，不靠删除运行数据库绕过问题。

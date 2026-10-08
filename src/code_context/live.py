@@ -331,20 +331,34 @@ class LiveQueries:
         if self.index_service is None:
             raise SourceError("INDEX_NOT_READY: live structural indexing is not attached")
         result = self.index_service.query(self, project_id, handle, operation, **parameters)
-        self.resolve_snapshot(project_id, handle)
+        # The index service validates the entire context and inventory before
+        # and after its query. Recheck authorization/publication here without
+        # repeating a fifth complete fingerprint pass over a large project.
+        self.source(project_id)
+        self.guard_read(project_id)
         return result
 
     def mcp_status(self):
-        writes = self.write_coordinator.status() if self.write_coordinator is not None else {}
+        runtime = getattr(self, "workspace_runtime", None)
+        # The workspace owns both write and execution grants, including revocation
+        # when its local control dies. Do not report execution as closed merely
+        # because this source-query backend omitted the runtime's status fields.
+        status = (
+            runtime.status()
+            if runtime is not None
+            else self.write_coordinator.status()
+            if self.write_coordinator is not None
+            else {}
+        )
         return {
-            **writes,
-            "state": "live_read",
+            **status,
+            "state": status.get("state", "live_read"),
             "source_mode": "live",
             "history_available": False,
             "last_seen": datetime.now(UTC).isoformat(),
             "last_sync_at": None,
             "watcher": self.watcher.status() if self.watcher is not None else None,
-            "write_enabled": writes.get("write_enabled", False),
+            "write_enabled": status.get("write_enabled", False),
         }
 
     def clear(self):

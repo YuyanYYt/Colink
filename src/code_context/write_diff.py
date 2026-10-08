@@ -22,6 +22,13 @@ MAX_LINE_PRODUCT = 4_000_000
 
 def verify_task_files(c, task, source):
     rows = c.store.query("SELECT * FROM files WHERE task_id=? ORDER BY path", (task["task_id"],))
+    binary_paths = {
+        row["path"]
+        for row in c.store.query(
+            "SELECT path FROM move_mappings WHERE task_id=? AND kind='binary'",
+            (task["task_id"],),
+        )
+    }
     for row in rows:
         if row["kind"] != "directory" and row["last_hash"] is None:
             from code_context.write_deletion import verify_deleted
@@ -43,7 +50,12 @@ def verify_task_files(c, task, source):
                 before is None
                 or not stat.S_ISREG(before.st_mode)
                 or _version(before) != tuple(json.loads(row["last_version"]))
-                or source.fingerprint(row["path"]) != row["last_hash"]
+                or (
+                    c.movement.snapshot(source, row["path"]).digest
+                    if row["path"] in binary_paths
+                    else source.fingerprint(row["path"])
+                )
+                != row["last_hash"]
             ):
                 raise WriteError("WRITE_DIFF_CONFLICT: a task file changed outside its last state")
             after = source.scanner._stat(parent, name, row["path"])
@@ -53,10 +65,11 @@ def verify_task_files(c, task, source):
     from code_context.write_attributes import verify_task_attributes
 
     verify_task_attributes(c, task, source, rows)
+    c.movement.verify(task, source)
     return rows
 
 
-def bounded_patch(path, before, after, max_chars):
+def bounded_patch(path, before, after, max_chars, *, from_path=None):
     old, new = physical_lines(before, keepends=True), physical_lines(after, keepends=True)
     if (
         len(old) > MAX_DIFF_LINES
@@ -65,7 +78,9 @@ def bounded_patch(path, before, after, max_chars):
     ):
         return "", True, "DIFF_COMPUTATION_LIMIT"
     parts, remaining, truncated = [], max_chars, False
-    for piece in difflib.unified_diff(old, new, fromfile="a/" + path, tofile="b/" + path):
+    for piece in difflib.unified_diff(
+        old, new, fromfile="a/" + (from_path or path), tofile="b/" + path
+    ):
         if len(piece) > remaining:
             parts.append(piece[:remaining])
             truncated = True
@@ -149,21 +164,64 @@ class TaskDiff:
                     return self._result(project, task, [], [], detail, offset, False)
             with source.lock:
                 rows = verify_task_files(self.c, task, source)
-                descriptions = [
-                    {
-                        "path": row["path"],
-                        "op": "delete"
+                mappings = {
+                    row["path"]: row
+                    for row in self.store.query(
+                        "SELECT * FROM move_mappings WHERE task_id=?", (task["task_id"],)
+                    )
+                }
+                descriptions = []
+                for row in rows:
+                    mapping = mappings.get(row["path"])
+                    origin = mapping["origin_path"] if mapping else row["path"]
+                    moved = origin is not None and origin != row["path"]
+                    if (
+                        (path is not None and path not in {row["path"], origin})
+                        or (
+                            row["kind"] == "modified"
+                            and row["origin_hash"] == row["last_hash"]
+                            and not moved
+                        )
+                        or (row["kind"] == "created" and row["last_hash"] is None)
+                    ):
+                        continue
+                    operation = (
+                        "delete"
                         if row["last_hash"] is None and row["kind"] != "directory"
                         else "add"
                         if row["kind"] in {"created", "directory"}
-                        else "modify",
+                        else "move"
+                        if moved
+                        else "modify"
+                    )
+                    description = {
+                        "path": row["path"],
+                        "op": operation,
                         "kind": "directory" if row["kind"] == "directory" else "file",
                     }
-                    for row in rows
-                    if (path is None or row["path"] == path)
-                    and (row["kind"] != "modified" or row["origin_hash"] != row["last_hash"])
-                    and not (row["kind"] == "created" and row["last_hash"] is None)
-                ]
+                    if moved and row["kind"] not in {"created", "directory"}:
+                        description.update({"from_path": origin, "to_path": row["path"]})
+                    if mapping and mapping["kind"] == "binary":
+                        description["content_kind"] = "binary"
+                    descriptions.append(description)
+                for current_path, mapping in mappings.items():
+                    origin = mapping["origin_path"]
+                    if (
+                        mapping["kind"] == "directory"
+                        and origin is not None
+                        and origin != current_path
+                        and (path is None or path in {current_path, origin})
+                    ):
+                        descriptions.append(
+                            {
+                                "path": current_path,
+                                "from_path": origin,
+                                "to_path": current_path,
+                                "op": "move",
+                                "kind": "directory",
+                            }
+                        )
+                descriptions.sort(key=lambda item: item["path"])
                 selected = descriptions[offset : offset + limit]
                 changes, remaining, truncated = [], max_chars, False
                 by_path = {row["path"]: row for row in rows}
@@ -174,7 +232,15 @@ class TaskDiff:
                         truncated = True
                         break
                     remaining -= charge + 128
-                    if detail == "patch" and entry["kind"] != "directory":
+                    if detail == "patch" and entry.get("content_kind") == "binary":
+                        entry.update(
+                            {
+                                "patch": "",
+                                "patch_truncated": False,
+                                "patch_unavailable_reason": "BINARY_CONTENT",
+                            }
+                        )
+                    elif detail == "patch" and entry["kind"] != "directory":
                         row = by_path[entry["path"]]
                         current_text = ""
                         if row["last_hash"] is not None:
@@ -190,7 +256,11 @@ class TaskDiff:
                             else ""
                         )
                         patch, cut, reason = bounded_patch(
-                            row["path"], original, current_text, remaining
+                            row["path"],
+                            original,
+                            current_text,
+                            remaining,
+                            from_path=entry.get("from_path"),
                         )
                         entry.update({"patch": patch, "patch_truncated": cut})
                         if reason:
@@ -215,10 +285,13 @@ class TaskDiff:
             "source_is_untrusted": True,
             "summary": {
                 "files_changed": sum(item["kind"] == "file" for item in descriptions),
-                "directories_added": sum(item["kind"] == "directory" for item in descriptions),
+                "directories_added": sum(
+                    item["kind"] == "directory" and item["op"] == "add" for item in descriptions
+                ),
                 "added": sum(item["op"] == "add" for item in descriptions),
                 "modified": sum(item["op"] == "modify" for item in descriptions),
                 "deleted": sum(item["op"] == "delete" for item in descriptions),
+                "moved": sum(item["op"] == "move" for item in descriptions),
                 "line_counts_available": False,
             },
             "changes": changes,

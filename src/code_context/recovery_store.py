@@ -43,6 +43,22 @@ CREATE TABLE IF NOT EXISTS baseline_directories (
     path TEXT NOT NULL, version TEXT NOT NULL,
     PRIMARY KEY (task_id, path)
 );
+-- Additive schema-1 extension: old databases and pending writes stay intact.
+CREATE TABLE IF NOT EXISTS move_baselines (
+    task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+    path TEXT NOT NULL, binding TEXT NOT NULL,
+    PRIMARY KEY (task_id, path)
+);
+CREATE TABLE IF NOT EXISTS move_mappings (
+    task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+    path TEXT NOT NULL, origin_path TEXT, kind TEXT NOT NULL, binding TEXT NOT NULL,
+    PRIMARY KEY (task_id, path)
+);
+CREATE TABLE IF NOT EXISTS move_absences (
+    task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+    path TEXT NOT NULL, parent_identity TEXT NOT NULL,
+    PRIMARY KEY (task_id, path)
+);
 CREATE TABLE IF NOT EXISTS files (
     task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
     path TEXT NOT NULL, kind TEXT NOT NULL, origin_hash TEXT, origin_mode INTEGER,

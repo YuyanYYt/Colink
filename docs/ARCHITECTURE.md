@@ -4,7 +4,8 @@
 语义。开发分支 0.5.0-beta.1 已引入 SourceAccess / LiveQueries / ProjectRegistry / 有界
 ReadContexts、单生产线程按需 LiveIndexService 和 WatchCoordinator。本机私有控制
 与网页 MCP 分离，WriteCoordinator / RecoveryStore 负责默认关闭项目授权、任务起点、
-先保存后提交、持久幂等、整项回退和冲突恢复；未完成操作时停止该项目正常查询发布。
+先保存后提交、持久幂等和冲突恢复；当前产品没有主动代码回退入口，旧中断恢复仍兼容。
+未完成操作时停止该项目正常查询发布。
 live 索引只存当前结构事实，读取直接核验原文件；`get_diff` 的 previous 参数表示
 保留任务起点，而非不可变旧源码快照，返回 task_origin 或 NO_TASK_BASELINE。
 旧 mirror 工具的历史语义不改，旧数据库不删除。当前本地/网页证据分别见
@@ -15,6 +16,15 @@ live 索引只存当前结构事实，读取直接核验原文件；`get_diff` �
 按需直读、多项目工作区与按需索引”，详见
 [LIVE_WORKSPACE_REFACTOR.md](LIVE_WORKSPACE_REFACTOR.md)；实施状态以上方新模式记录为准。
 不能把新读取语义套到旧镜像入口；既有数据库、历史状态和来源限制继续有效。
+
+2026-10-07 维护源码 0.5.0b4 的 live 开发链路为：ChatGPT 网页 → 既有远程 MCP/stdio
+隧道 → ExecutionCoordinator → 固定 SRT 0.0.78 辅助进程 → Seatbelt 内开发进程。
+作业独立于 HTTP 请求，原文件仅由 WriteCoordinator 修改；小型幂等账本、滚动日志和
+任务输入分别有界。ProcessManager 使用 launchd 的独立内核 resource coalition 跟踪
+fork/exec/setsid 后代，以出生身份发送信号并确认停止；当前仅验证 Darwin 27，不使用
+PPID 回退。可信 LocalRelay 绑定明确 127.0.0.1 注册端口，并核验 Unix peer 的内核
+身份与 coalition 后转发；项目进程不能自行绑定 TCP。数据库账号权限仍由数据库
+服务器强制执行。完整预算、接入与验证边界见[当前方案](WEB_SESSION_DEVELOPMENT_PLAN.md)。
 
 ```text
 指定项目目录
@@ -51,7 +61,14 @@ MirrorStore（SQLite 原子提交 / 不可变快照 / 内容去重 / Python-Java
 | `intelligence_models.py` / `intelligence_python.py` / `intelligence_java.py` | 有界语法事实与两种语言解析，不执行项目代码 |
 | `intelligence_roots.py` / `intelligence_resolver.py` / `intelligence_index.py` | 镜像内源码根配置/发现、保守静态绑定、哈希复用、生产端原子索引与两份状态清理 |
 | `intelligence_queries.py` / `intelligence_tools.py` | 只读符号、引用、关系、层级、循环和影响查询 |
+| `live_index.py` / `binding_dependencies.py` | live 项目当前索引、包含缺失名称的绑定输入摘要、受影响文件重绑与单库局部事务发布 |
 | `server.py` | MCP 工具注册、生命周期、HTTP 认证和独立同步接口 |
+| `execution_coordinator.py` / `execution_store.py` | 本机默认关闭授权、绑定计划、异步准备、幂等作业、生成结果受控写回与重连回执 |
+| `execution_process.py` / `execution_scope.py` / `execution_output.py` | 内核生命周期监督、取消/截止时间、软资源阈值、增量 UTF-8 滚动输出 |
+| `execution_sandbox.py` / `execution_disk_recovery.py` / `execution_cache.py` | 原生策略、输入校验、有界 APFS 作业盘与项目缓存、身份绑定中断恢复 |
+| `execution_environment.py` / `execution_toolchain.py` | 实际工具与版本、虚拟环境、有效工具链和精确动态库/符号链接摘要 |
+| `execution_relay.py` / `execution_ports.py` | 注册回环服务、Unix peer 身份核验、端口归属与具体旧服务的本机确认 |
+| `execution_database.py` / `execution_git.py` / `execution_tools.py` | 项目数据库配置/认证证据、隔离 Git 索引提交、准确副作用注解的网页工具 |
 | `demo.py` | 保留数据的端到端演示 |
 
 ## 上传协议

@@ -82,6 +82,7 @@ class WriteCoordinator:
             )
         from code_context.write_deletion import WriteDeletion
         from code_context.write_diff import TaskDiff
+        from code_context.write_move import WriteMove
         from code_context.write_operations import WriteOperations
         from code_context.write_recovery import WriteRecovery
         from code_context.write_rollback import WriteRollback
@@ -91,6 +92,7 @@ class WriteCoordinator:
         self.recovery = WriteRecovery(self)
         self.rollback = WriteRollback(self)
         self.deletion = WriteDeletion(self)
+        self.movement = WriteMove(self)
 
     def _pending(self):
         return bool(
@@ -164,8 +166,17 @@ class WriteCoordinator:
                 self.grants = {}
                 self.stop_requested.set()
             tasks = self.store.query(
-                "SELECT task_id,project_id,state,created,completed FROM tasks ORDER BY created DESC"
+                "SELECT task_id,project_id,state,created,completed,metadata "
+                "FROM tasks ORDER BY created DESC"
             )
+            for task in tasks:
+                # Reuse the saved goal, not source text or an inferred AI summary.
+                # Old/malformed labels must not hide recovery state or expose raw metadata.
+                try:
+                    title = json.loads(task.pop("metadata")).get("title", "")
+                except (ValueError, AttributeError, TypeError):
+                    title = ""
+                task["title"] = title[:256] if isinstance(title, str) else ""
             active = next((row for row in tasks if row["state"] not in TERMINAL), None)
             return {
                 "write_enabled": bool(self.grants) and not self.stop_requested.is_set(),
@@ -240,6 +251,10 @@ class WriteCoordinator:
     def _baseline(self, source, scope):
         started = time.monotonic()
         directories = {}
+        move_bindings = {}
+        binary_paths = set()
+        expanded = {}
+        move_bindings[""] = self.movement.directory_baseline(source, "")
         if scope is None:
             metadata = source.manifest()
             if metadata["partial"]:
@@ -252,8 +267,48 @@ class WriteCoordinator:
                         if info is None or not stat.S_ISDIR(info.st_mode):
                             raise WriteError("WRITE_BASELINE_CHANGED: origin directory changed")
                         directories[path] = encode_metadata(_version(info))
+                        move_bindings[path] = self.movement.directory_baseline(source, path)
         else:
-            paths = scope
+            paths = list(scope)
+            # A declared directory is one move root. Capture its complete safe
+            # bounded tree, while ordinary edit/create still require exact scope.
+            for path in scope:
+                if self._declared_missing_parent(source, path, scope):
+                    continue
+                with source.parent_fd(path) as (parent, name):
+                    info = source.scanner._stat(parent, name, path)
+                    if not self.movement.literal_exists(parent, name):
+                        info = None  # Future case-only target on case-insensitive APFS.
+                if info is not None and stat.S_ISDIR(info.st_mode):
+                    captured = self.movement.snapshot(source, path)
+                    for entry in captured.entries:
+                        child = path + "/" + entry["rel"] if entry["rel"] else path
+                        if entry["kind"] == "directory":
+                            directories[child] = encode_metadata(entry["version"])
+                            move_bindings[child] = {
+                                "version": entry["version"],
+                                "attributes": entry["attributes"],
+                            }
+                        else:
+                            expanded[child] = entry
+                            if entry["kind"] == "binary":
+                                binary_paths.add(child)
+            paths = sorted(set(paths) | set(expanded))
+        # Future targets also bind each existing ancestor now. A later external
+        # replacement is not an authorized destination merely because it is a
+        # real directory by the time a move starts.
+        for path in paths:
+            parts = path.split("/")
+            for size in range(1, len(parts)):
+                ancestor = "/".join(parts[:size])
+                if ancestor in move_bindings:
+                    continue
+                try:
+                    move_bindings[ancestor] = self.movement.directory_baseline(source, ancestor)
+                except (FileNotFoundError, SourceError):
+                    # Missing parents must still be explicitly declared below.
+                    if scope is None or ancestor not in scope:
+                        raise
         rows, consumed = [], 0
         for path in paths:
             if time.monotonic() - started > self.baseline_seconds:
@@ -263,7 +318,11 @@ class WriteCoordinator:
             # parent_fd reapplies current source/ignore/registered-child boundaries.
             with source.parent_fd(path) as (parent, name):
                 before = source.scanner._stat(parent, name, path)
-                if before is None:
+                if before is None or (
+                    scope is not None
+                    and path in scope
+                    and not self.movement.literal_exists(parent, name)
+                ):
                     continue  # Explicit future file; creation will require absence.
                 if stat.S_ISDIR(before.st_mode) and scope is not None:
                     directories[path] = encode_metadata(_version(before))
@@ -276,6 +335,17 @@ class WriteCoordinator:
                         "WRITE_BASELINE_BYTE_LIMIT: use a narrower declared task scope"
                     )
                 sha = source.fingerprint(path)
+                if sha is None:
+                    # Keep arbitrary binaries outside ordinary task baselines;
+                    # recognized static resources may join a later safe move.
+                    try:
+                        captured = self.movement.snapshot(source, path)
+                        if captured.entries[0]["kind"] == "binary":
+                            sha = captured.digest
+                            binary_paths.add(path)
+                    except SourceError:
+                        if path in expanded:
+                            raise
                 after = source.scanner._stat(parent, name, path)
                 if after is None or _version(before) != _version(after):
                     raise WriteError("WRITE_BASELINE_CHANGED: source changed while preparing task")
@@ -293,7 +363,12 @@ class WriteCoordinator:
                 if (
                     info is None
                     or encode_metadata(_version(info)) != version
-                    or source.fingerprint(path) != sha
+                    or (
+                        self.movement.snapshot(source, path).digest
+                        if path in binary_paths
+                        else source.fingerprint(path)
+                    )
+                    != sha
                 ):
                     raise WriteError("WRITE_BASELINE_CHANGED: source changed while preparing task")
         for path, version in directories.items():
@@ -304,7 +379,12 @@ class WriteCoordinator:
                 if info is None or encode_metadata(_version(info)) != version:
                     raise WriteError("WRITE_BASELINE_CHANGED: origin directory changed")
         source.ensure_available()
-        return rows, list(directories.items())
+        for path, binding in move_bindings.items():
+            if time.monotonic() - started > self.baseline_seconds:
+                raise WriteError("WRITE_BASELINE_TIME_LIMIT: use a narrower declared task scope")
+            if self.movement.directory_baseline(source, path) != binding:
+                raise WriteError("WRITE_BASELINE_CHANGED: directory attributes changed")
+        return rows, list(directories.items()), list(move_bindings.items())
 
     def reserve_growth(
         self,
@@ -381,13 +461,17 @@ class WriteCoordinator:
                 "SELECT task_id FROM tasks WHERE state NOT IN ('completed','rolled_back') LIMIT 1"
             ):
                 raise WriteError("WRITE_TASK_ACTIVE: continue or finish the existing task")
-            rows, directories = self._baseline(source, scope)
+            rows, directories, move_bindings = self._baseline(source, scope)
             self._authorized(project_id)
             self.reserve_growth(
                 metadata_bytes=sum(
                     len(path.encode()) + len(version) + 256 for path, _sha, version in rows
                 )
                 + sum(len(path.encode()) + len(version) + 256 for path, version in directories)
+                + sum(
+                    len(path.encode()) + len(encode_metadata(binding).encode()) + 256
+                    for path, binding in move_bindings
+                )
                 + 16384
             )
             task_id = "wt_" + uuid.uuid4().hex
@@ -416,6 +500,10 @@ class WriteCoordinator:
                 db.executemany(
                     "INSERT INTO baseline_directories VALUES(?,?,?)",
                     ((task_id, *row) for row in directories),
+                )
+                db.executemany(
+                    "INSERT INTO move_baselines VALUES(?,?,?)",
+                    ((task_id, path, encode_metadata(binding)) for path, binding in move_bindings),
                 )
                 db.execute(
                     "UPDATE settings SET value=? WHERE key='next_task_request'",
@@ -479,6 +567,17 @@ class WriteCoordinator:
 
     def delete_file(self, project_id, task_id, request_id, path, expected_sha256):
         return self.deletion.delete_file(project_id, task_id, request_id, path, expected_sha256)
+
+    def move_path(
+        self, project_id, task_id, request_id, source_path, target_path, expected_sha256=None
+    ):
+        return self.movement.move_path(
+            project_id, task_id, request_id, source_path, target_path, expected_sha256
+        )
+
+    def move_path_status(self, project_id, path):
+        """Read-only bounded move digest, including recognized static binaries."""
+        return self.movement.status(project_id, path)
 
     def finish_write_task(self, project_id, task_id, request_id):
         return self.operations.finish_write_task(project_id, task_id, request_id)

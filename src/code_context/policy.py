@@ -59,6 +59,16 @@ SECRET_PATTERNS = (
     re.compile(r"\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16})\b"),
     re.compile(r"\b(?:ghp_|github_pat_)[A-Za-z0-9_]{20,}\b"),
     re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
+    re.compile(
+        r"(?im)^\s*(?:-\s*)?(?:spring\.datasource\.password|datasource\.password|"
+        r"DB_PASSWORD|POSTGRES_PASSWORD|MYSQL_PASSWORD|MYSQL_ROOT_PASSWORD|password)"
+        r"\s*[=:]\s*(?!['\"]?\$\{)['\"]?[^'\"\s#]+"
+    ),
+    re.compile(
+        r"\b(?:postgres(?:ql)?(?:\+[A-Za-z0-9_]+)?|mysql(?:\+[A-Za-z0-9_]+)?)://"
+        r"[^/\s:@]+:(?!\$\{)[^@\s/]+@"
+    ),
+    re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*PASSWORD[A-Za-z0-9_]*:[^}]+\}"),
 )
 
 

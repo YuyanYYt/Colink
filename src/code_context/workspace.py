@@ -6,13 +6,19 @@ import stat
 import threading
 from pathlib import Path
 
+from code_context.execution_coordinator import ExecutionCoordinator
+from code_context.execution_gate import native_gate
+from code_context.execution_git import GitCoordinator
+from code_context.execution_ports import PortsCoordinator
 from code_context.live import LiveQueries
-from code_context.live_index import LiveIndexService
 from code_context.live_watch import WatchCoordinator
 from code_context.local_control import LocalControl, control_request, private_directory
+from code_context.project_index import ProjectIndexService
 from code_context.project_registry import ProjectRegistry
 from code_context.recovery_store import RecoveryStore
 from code_context.source_access import SourceError
+from code_context.terminal import HostTerminal
+from code_context.terminal_read import TerminalReader
 from code_context.write_coordinator import WriteCoordinator
 
 
@@ -41,6 +47,10 @@ class WorkspaceRuntime:
         self.watcher = None
         self.recovery_store = None
         self.write_coordinator = None
+        self.terminal = None
+        self.execution = None
+        self.git = None
+        self.ports = None
         self.closed = False
         with self.state.root_fd() as directory:
             fd = os.open(
@@ -74,11 +84,7 @@ class WorkspaceRuntime:
                 )
             self.backend = LiveQueries(registry=self.registry)
             index_directory = private_directory(self.data_dir / "index")
-            self.backend.index_service = LiveIndexService(
-                index_directory.root,
-                max_bytes=64 * 1024 * 1024,
-                max_peak_bytes=128 * 1024 * 1024,
-            )
+            self.backend.index_service = ProjectIndexService(index_directory.root)
             self.watcher = WatchCoordinator(
                 self.backend.sources, self.backend.index_service.invalidate
             )
@@ -108,6 +114,37 @@ class WorkspaceRuntime:
                 on_change=self._on_change,
             )
             self.backend.write_coordinator = self.write_coordinator
+            self.execution = ExecutionCoordinator(
+                self.data_dir / "execution-v1",
+                self.backend.source,
+                self.write_coordinator,
+                control_alive=self._control_alive,
+                gate=native_gate,
+                protected_paths=[
+                    controls,
+                    recovery_dir,
+                    self.data_dir / "registry",
+                    self.data_dir / "index",
+                    self.data_dir / "database-profiles",
+                    state_boundary / "desktop" / "database-authorizations",
+                ],
+            )
+            self.terminal = HostTerminal(
+                self.data_dir / "terminal-v1",
+                self.backend.source,
+                self.execution.authorize,
+                self._on_change,
+                self.execution.sandbox.tools,
+            )
+            self.terminal_reader = TerminalReader(self.backend.source)
+            self.git = GitCoordinator(
+                self.data_dir / "git-v1",
+                self.backend.source,
+                self.write_coordinator,
+                self.execution.authorize,
+            )
+            self.ports = PortsCoordinator(self.backend.source, self.execution, self._control_alive)
+            self.backend.workspace_runtime = self
         except BaseException:
             self.close()
             raise
@@ -127,6 +164,15 @@ class WorkspaceRuntime:
         if self.write_coordinator is not None:
             self.write_coordinator.stop_requested.set()
             self.write_coordinator.grants = {}
+        if self.terminal is not None:
+            threading.Thread(
+                target=self.terminal.revoke, name="terminal-revoke", daemon=True
+            ).start()
+        if self.execution is not None:
+            self.execution.grants = {}
+            threading.Thread(
+                target=self.execution.disable, name="execution-revoke", daemon=True
+            ).start()
 
     def _control_alive(self):
         return not self.closed and self.control is not None and self.control.is_alive()
@@ -142,6 +188,56 @@ class WorkspaceRuntime:
     def _revoke(self):
         # disable() sets stop_requested before waiting for an in-flight writer.
         self.write_coordinator.disable()
+        if self.terminal is not None:
+            self.terminal.revoke()
+        if self.execution is not None:
+            self.execution.disable()
+
+    def environment(self, project_id):
+        from code_context.execution_environment import inventory, venv_plan
+
+        self.backend.source(project_id).ensure_available()
+        result = inventory(self.execution.sandbox.tools)
+        try:
+            result["venv_creation"] = venv_plan(result)
+        except SourceError:
+            result["venv_creation"] = {
+                "available": False,
+                "message": "当前解释器未验证虚拟环境能力，请先选择本机实际安装的兼容 Python。",
+            }
+        result["project_permissions"] = self.project_permissions(project_id)
+        result["terminal"] = {
+            "start": "terminal_start",
+            "input": "terminal_input",
+            "output": "terminal_output",
+            "status": "terminal_status",
+            "cancel": "terminal_cancel",
+            "list": "terminal_list",
+            "read_targets": "terminal_read_targets",
+            "read": "terminal_read",
+            "scope": "current_os_user",
+            "database_authorization": "database_account",
+            "project_is_initial_cwd_not_sandbox": True,
+        }
+        return result
+
+    def project_permissions(self, project_id):
+        self.backend.source(project_id).ensure_available()
+        writes = self.write_coordinator.status()
+        try:
+            self.execution.authorize(project_id)
+            execution = True
+        except SourceError:
+            execution = False
+        return {
+            "write_enabled": bool(
+                writes["write_enabled"] and project_id in writes["write_projects"]
+            ),
+            "execution_enabled": execution,
+            "authorization_scope": "exact_project_id",
+            "registered_child_projects_inherit": False,
+            "approval_location": "desktop",
+        }
 
     def begin_task(self, project_id, request_id, *, title="", paths=None):
         return self.write_coordinator.begin_write_task(
@@ -186,6 +282,10 @@ class WorkspaceRuntime:
             "state": "stopped" if self.closed else "live_read",
             "source_mode": "live",
             **writes,
+            **self.execution.status(),
+            "pending_port_releases": self.ports.pending_confirmations()
+            if hasattr(self.ports, "pending_confirmations")
+            else [],
             "write_available": available,
             "write_enabled": available and writes["write_enabled"],
             "write_projects": writes["write_projects"] if available else [],
@@ -193,6 +293,9 @@ class WorkspaceRuntime:
                 "enable_write",
                 "disable_write",
                 "recover_write",
+                "enable_execution",
+                "disable_execution",
+                "confirm_port_release",
             ]
             if available
             else [],
@@ -242,13 +345,48 @@ class WorkspaceRuntime:
             return self.status()
         if action == "recover_write" and set(parameters) == {"project_id"}:
             return self.recover_local(parameters["project_id"])
+        if action == "enable_execution" and set(parameters) == {"project_ids", "ports"}:
+            self._local_only()
+            self.terminal.revoke()
+            self.execution.enable(parameters["project_ids"], ports=parameters["ports"])
+            return self.status()
+        if action == "disable_execution" and not parameters:
+            self._local_only()
+            self.execution.disable()
+            self.terminal.revoke()
+            return self.status()
+        if action == "development_status" and set(parameters) == {"project_id"}:
+            self._local_only()
+            project_id = parameters["project_id"]
+            return {
+                "environment": self.environment(project_id),
+                "project_permissions": self.project_permissions(project_id),
+                "ports": self.ports.status(project_id),
+            }
+        if action == "confirm_port_release" and set(parameters) == {"plan_id", "allow_force"}:
+            self._local_only()
+            return self.ports.confirm_release(
+                parameters["plan_id"], allow_force=parameters["allow_force"]
+            )
         raise SourceError("UNKNOWN_CONTROL_ACTION: use a supported local action")
 
     def close(self):
         self.closed = True
         try:
-            if self.write_coordinator is not None:
-                self.write_coordinator.close()
+            try:
+                if self.terminal is not None:
+                    self.terminal.close()
+                if self.execution is not None:
+                    self.execution.close()
+            finally:
+                try:
+                    if self.ports is not None:
+                        self.ports.close()
+                    if self.git is not None:
+                        self.git.close()
+                finally:
+                    if self.write_coordinator is not None:
+                        self.write_coordinator.close()
         finally:
             try:
                 if self.control is not None:

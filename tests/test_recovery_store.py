@@ -61,7 +61,7 @@ def test_reserve_refuses_capacity_without_saving_or_losing_protected_materials(t
         tmp_path / "state",
         max_bytes=512 * 1024,
         max_peak_bytes=1024 * 1024,
-        max_metadata_bytes=128 * 1024,
+        max_metadata_bytes=256 * 1024,
     ) as store:
         sha = store.put_blob(b"protected", "task:origin")
         before = store.usage()

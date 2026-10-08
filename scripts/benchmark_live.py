@@ -33,8 +33,7 @@ sys.dont_write_bytecode = True
 
 REPO = Path(__file__).resolve().parents[1]
 MIB = 1024 * 1024
-DATABASE_BYTES = 64 * MIB
-MANAGED_PEAK_BYTES = 128 * MIB
+STORAGE_PROFILES = {"runtime": (500 * MIB, 1500 * MIB), "legacy": (64 * MIB, 128 * MIB)}
 DEFAULT_DEFINITIONS_PER_FILE = 50
 MAX_FIXTURE_ENTRIES = 6000
 LARGE_BYTES = 3 * MIB
@@ -59,6 +58,8 @@ STAT_KEYS = (
     "reused_parse_files",
     "resolved_files",
     "reused_relation_files",
+    "rebound_files",
+    "relation_reuse_safe",
     "source_bytes",
     "parse_payload_bytes",
     "index_payload_bytes",
@@ -73,6 +74,7 @@ PROVENANCE_FILES = (
     "scripts/benchmark_live.py",
     "src/code_context/live.py",
     "src/code_context/live_index.py",
+    "src/code_context/project_index.py",
     "src/code_context/live_watch.py",
     "src/code_context/source_access.py",
     "src/code_context/fingerprint_cache.py",
@@ -81,6 +83,7 @@ PROVENANCE_FILES = (
     "src/code_context/read_context.py",
     "src/code_context/policy.py",
     "src/code_context/intelligence_queries.py",
+    "src/code_context/fact_payloads.py",
     "src/code_context/intelligence_python.py",
     "src/code_context/intelligence_java.py",
     "src/code_context/intelligence_resolver.py",
@@ -189,7 +192,13 @@ def provenance():
     }
 
 
-def make_fixture(output, definitions, repeats, definitions_per_file=DEFAULT_DEFINITIONS_PER_FILE):
+def make_fixture(
+    output,
+    definitions,
+    repeats,
+    definitions_per_file=DEFAULT_DEFINITIONS_PER_FILE,
+    storage_profile="runtime",
+):
     started = time.perf_counter()
     workspace = output / "workspace"
     workspace.mkdir(mode=0o700)
@@ -247,6 +256,7 @@ def make_fixture(output, definitions, repeats, definitions_per_file=DEFAULT_DEFI
         "definitions_per_file": definitions_per_file,
         "large_text_bytes": LARGE_BYTES,
         "repeat_requests": repeats,
+        "storage_profile": storage_profile,
         "generation_ms": round((time.perf_counter() - started) * 1000, 3),
         "generated_file_bytes": sum(p.stat().st_size for p in workspace.rglob("*") if p.is_file()),
     }
@@ -271,6 +281,7 @@ def check_fixture(output):
         or not 1000 <= fixture["projects"]["A"]["python_definitions"] <= 5000
         or fixture["projects"]["B"]["python_definitions"] != 100
         or not 1 <= fixture["repeat_requests"] <= 5
+        or fixture.get("storage_profile", "legacy") not in STORAGE_PROFILES
     ):
         raise BenchmarkError("INVALID_WORKER: unrecognized synthetic fixture")
     # No user roots, symlinks or unbounded pre-existing directory trees accepted.
@@ -391,6 +402,14 @@ def process_resources():
 
 
 def storage(path, project_ids):
+    if not path.exists():
+        return {
+            "database_file_bytes": 0,
+            "database_allocated_bytes": 0,
+            "sidecar_file_bytes": {suffix: 0 for suffix in ("-journal", "-wal", "-shm")},
+            "project_rows": {label: {table: 0 for table in TABLES} for label in project_ids},
+            "raw_content_columns": [],
+        }
     result = {"database_file_bytes": path.stat().st_size, "project_rows": {}}
     result["database_allocated_bytes"] = getattr(path.stat(), "st_blocks", 0) * 512
     result["sidecar_file_bytes"] = {
@@ -413,6 +432,19 @@ def storage(path, project_ids):
             for table in TABLES
             if any(row[1] == "content" for row in db.execute(f"PRAGMA table_info({table})"))
         ]
+    return result
+
+
+def service_storage(service, project_ids):
+    path_for = getattr(service, "path_for", None)
+    if not callable(path_for):
+        return storage(service.path, project_ids)
+    result = storage(path_for(project_ids["A"]), project_ids)
+    result["project_database_file_bytes"] = {}
+    for label, project_id in project_ids.items():
+        data = storage(path_for(project_id), {label: project_id})
+        result["project_rows"][label] = data["project_rows"][label]
+        result["project_database_file_bytes"][label] = data["database_file_bytes"]
     return result
 
 
@@ -546,9 +578,11 @@ def phase_worker(output, phase):
     if (output / "performance.json").exists() or (output / f"phase-{phase}.json").exists():
         raise BenchmarkError("OUTPUT_NOT_EMPTY: this phase has already been run")
     fixture = check_fixture(output)
+    database_bytes, peak_bytes = STORAGE_PROFILES[fixture.get("storage_profile", "legacy")]
     from code_context.live import LiveQueries
     from code_context.live_index import LiveIndexService
     from code_context.live_watch import WatchCoordinator
+    from code_context.project_index import ProjectIndexService
     from code_context.project_registry import ProjectRegistry
     from code_context.source_access import MAX_BATCH_PARENT_FDS, MAX_BATCH_PARENTS
 
@@ -579,9 +613,11 @@ def phase_worker(output, phase):
         backend = LiveQueries(registry=registry)
         service = measurements.measure(
             "index_service_setup",
-            lambda: LiveIndexService(
-                output / "state", max_bytes=DATABASE_BYTES, max_peak_bytes=MANAGED_PEAK_BYTES
-            ),
+            lambda: (
+                ProjectIndexService
+                if fixture.get("storage_profile") == "runtime"
+                else LiveIndexService
+            )(output / "state", max_bytes=database_bytes, max_peak_bytes=peak_bytes),
         )
         backend.index_service = service
         report["fingerprint_cache_before"] = backend.fingerprint_cache.stats()
@@ -615,7 +651,7 @@ def phase_worker(output, phase):
                 "returned_files": len(value["files"]),
             },
         )
-        report["storage_before_query"] = storage(service.path, ids)
+        report["storage_before_query"] = service_storage(service, ids)
         before_query = ledger.snapshot()
         report["checks"]["discovery_and_overview_no_source_text_reads"] = all(
             before_query[label]["code_reads"] == before_query[label]["other_text_reads"] == 0
@@ -653,7 +689,7 @@ def phase_worker(output, phase):
                 query_summary,
             )
             report["a_index_first"] = index_status(service, ids["A"])
-            report["storage_first"] = storage(service.path, ids)
+            report["storage_first"] = service_storage(service, ids)
             measurements.sample("after_first_structure")
             report["checks"]["first_query_ready_and_exact"] = (
                 not first.get("index_not_ready")
@@ -710,6 +746,37 @@ def phase_worker(output, phase):
             )
             del page_one, page_two, expected
             measurements.sample("after_large_file_pages")
+            body_path = workspace / "A" / "pkg" / "module_000.py"
+            prior_body_watch = probe.snapshot()
+            body_path.write_text(
+                body_path.read_text().replace("return value + 0", "return value + 1", 1)
+            )
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                now = probe.snapshot()
+                if (
+                    now["invalidations"]["A"] > prior_body_watch["invalidations"]["A"]
+                    and now["sessions"] > prior_body_watch["sessions"]
+                ):
+                    break
+                threading.Event().wait(0.02)
+            # Wait for native invalidation before measuring incremental work;
+            # missed-event freshness is covered by the independent source tests.
+            # Only the changed file's relations should be rebound.
+            body_changed = measurements.measure(
+                "a_body_only_rebuild", lambda: query("a_func_00000"), query_summary
+            )
+            report["a_index_after_body_edit"] = index_status(service, ids["A"])
+            body_stats = report["a_index_after_body_edit"]["stats"]
+            report["checks"]["body_only_edit_reuses_unchanged_relations"] = (
+                not body_changed.get("index_not_ready")
+                and body_changed.get("total") == 1
+                and body_stats.get("parsed_files") == 1
+                and body_stats.get("rebound_files") == 1
+                and body_stats.get("reused_relation_files")
+                == body_stats.get("resolved_files", 0) - 1
+            )
+            current_snapshot = body_changed["snapshot"]
             prior = probe.snapshot()
             with (workspace / "A" / "pkg" / "module_000.py").open("a", encoding="utf-8") as stream:
                 stream.write("\ndef changed_once(value=0):\n    return value + 1\n")
@@ -731,7 +798,7 @@ def phase_worker(output, phase):
 
             def old_context():
                 try:
-                    backend.resolve_snapshot(ids["A"], first["snapshot"])
+                    backend.resolve_snapshot(ids["A"], current_snapshot)
                 except Exception as exc:
                     return {"rejected": True, "error": safe_error(exc)}
                 return {"rejected": False}
@@ -748,7 +815,7 @@ def phase_worker(output, phase):
             report["checks"]["new_context_detects_live_edit"] = (
                 not changed.get("index_not_ready")
                 and changed.get("total") == 1
-                and changed["snapshot"] != first["snapshot"]
+                and changed["snapshot"] != current_snapshot
             )
             report["checks"]["only_one_file_reparsed_live_edit"] = (
                 report["a_index_after_edit"]["stats"].get("parsed_files") == 1
@@ -770,7 +837,7 @@ def phase_worker(output, phase):
             )
         measurements.sample("after_final_query")
         report["fingerprint_cache_final_before_close"] = backend.fingerprint_cache.stats()
-        report["storage_final"] = storage(service.path, ids)
+        report["storage_final"] = service_storage(service, ids)
         report["b_index_status"] = index_status(service, ids["B"])
         report["watch_final"] = watch_summary(watcher, probe, sources)
         reads_b = ledger.snapshot()["B"]
@@ -867,6 +934,7 @@ def markdown(report):
         ("发现（冷进程）", cold, "discovery"),
         ("A 元数据概览", cold, "a_overview"),
         ("首次 A 结构请求", cold, "first_a_structure"),
+        ("A 单文件函数体修改后重建", cold, "a_body_only_rebuild"),
         ("A 单文件编辑后重建", cold, "a_single_file_rebuild"),
         ("约 3 MiB 文件第 1 页", cold, "large_file_page_one"),
         ("约 3 MiB 文件第 2 页", cold, "large_file_page_two"),
@@ -925,8 +993,9 @@ def markdown(report):
             "",
             f"SQLite 实际文件 {sizes.get('database_file_bytes', 'unavailable')} 字节，"
             f"分配 {sizes.get('database_allocated_bytes', 'unavailable')} 字节。",
-            "DB 配置 64 MiB，managed_peak_config 128 MiB；当前 DELETE journal 的 3 倍"
-            "保留策略把有效页上限降至约 42.66 MiB。这不是进程 RSS 上限，也不是实测磁盘峰值。",
+            f"DB 配置 {report['database_config_bytes'] // MIB} MiB，managed_peak_config "
+            f"{report['managed_peak_config'] // MIB} MiB；有效页上限由主库额度和日志的 3 倍"
+            "保留策略共同决定。这不是进程 RSS 上限，也不是实测磁盘峰值。",
             f"空闲 watch 非递归目录 {watch.get('nonrecursive_directory_count', 'unavailable')}；"
             f"进程 FD {idle.get('process_fd_count', 'unavailable')}；"
             f"当前 RSS {idle.get('current_rss_bytes', 'unavailable')} 字节；"
@@ -941,7 +1010,8 @@ def markdown(report):
             "分页响应有界不等于物理读取 20,000 字节。",
             "",
             "测量边界：直接调用 registry / LiveQueries / LiveIndexService / WatchCoordinator，"
-            "使用与 Runtime 相同的 DB / managed peak 配置及默认 10 秒请求等待；registry 仅内存。"
+            f"使用 {fixture.get('storage_profile', 'legacy')} DB / managed peak 配置"
+            "及默认 10 秒请求等待；registry 仅内存。"
             "不含完整 WorkspaceRuntime 控制通道、desktop、隧道、MCP 网络、模型调用、"
             "真实企业源码、依赖解析质量、目录海量压力、CPU/磁盘峰值或配额边界验收。",
             "Scanner 计数为解码后返回的完整文本字节，不是内核物理 I/O；采样 CPU 包含本进程"
@@ -967,6 +1037,7 @@ def main():
         help="Python definitions per file in both A and B (1 or 50; default 50)",
     )
     parser.add_argument("--repeats", type=bounded_int(1, 5), default=3)
+    parser.add_argument("--storage-profile", choices=tuple(STORAGE_PROFILES), default="runtime")
     parser.add_argument("--phase-timeout", type=bounded_int(30, 180), default=120)
     parser.add_argument("--_worker", choices=("cold", "restart"), help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -976,7 +1047,10 @@ def main():
         return phase_worker(output_path(args.output, worker=True), args._worker)
     output = output_path(args.output)
     before = provenance()
-    fixture = make_fixture(output, args.definitions_a, args.repeats, args.definitions_per_file)
+    fixture = make_fixture(
+        output, args.definitions_a, args.repeats, args.definitions_per_file, args.storage_profile
+    )
+    database_bytes, peak_bytes = STORAGE_PROFILES[args.storage_profile]
     report = {
         "schema": 1,
         "synthetic": True,
@@ -984,14 +1058,17 @@ def main():
         "created_at": datetime.now(UTC).isoformat(),
         "output": output.relative_to(REPO).as_posix(),
         "fixture": fixture,
-        "managed_peak_config": MANAGED_PEAK_BYTES,
-        "database_config_bytes": DATABASE_BYTES,
+        "managed_peak_config": peak_bytes,
+        "database_config_bytes": database_bytes,
         "phase_timeout_seconds": args.phase_timeout,
         "measurement_boundaries": {
             "cold": "new OS process and empty application database; OS file cache not cleared",
             "steady": "same live context and unchanged source; three requests by default",
             "restart": "second OS process; retained fact DB; one offline fixture edit",
-            "components": "in-memory registry, LiveQueries, LiveIndexService, WatchCoordinator",
+            "components": (
+                "in-memory registry, LiveQueries, LiveIndexService, "
+                "ProjectIndexService for runtime profile, WatchCoordinator"
+            ),
             "excluded": "desktop, tunnel, MCP transport, model, business and enterprise workload",
             "managed_peak": "configured DB/journal reservation, not measured peak or RSS limit",
             "text_reads": "Scanner decoded text bytes, not physical disk I/O",
