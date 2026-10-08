@@ -184,6 +184,8 @@ def build_mcp(
         when this server's watcher is not ready. A completely offline tunnel cannot answer;
         request failure does not distinguish an offline client from other transport failures.
         Mirror-only servers cannot certify live synchronization. Includes enforced filters.
+        execution_enabled and execution_projects report actual local development grants
+        within this connection; execution_gate describes platform readiness, not permission.
         """
         authorize(check_source=False)
         projects = store.list_projects()["projects"]
@@ -198,6 +200,7 @@ def build_mcp(
         )
         visible = {p["project_id"] for p in projects}
         write_projects = [p for p in status.get("write_projects", []) if p in visible]
+        execution_projects = [p for p in status.get("execution_projects", []) if p in visible]
         return {
             "server_reachable": True,
             "source_mode": store.source_mode,
@@ -220,8 +223,9 @@ def build_mcp(
             "write_available": bool(status.get("write_available", False)),
             "write_projects": write_projects,
             "execution_available": bool(status.get("execution_available", False)),
-            "execution_enabled": bool(status.get("execution_enabled", False)),
-            "execution_projects": [p for p in status.get("execution_projects", []) if p in visible],
+            "execution_enabled": bool(status.get("execution_enabled", False))
+            and bool(execution_projects),
+            "execution_projects": execution_projects,
             "execution_gate": status.get("execution_gate", "closed"),
             "execution_limits": status.get("execution_limits", {}),
             "recovery_required": bool(status.get("recovery_required", False)),
