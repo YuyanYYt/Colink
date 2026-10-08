@@ -1,6 +1,9 @@
 # 更新记录
 
-## 未发布 · 0.5.0b5 build 22 · 2026-10-09 · macOS 终端进程监控修复
+## 公开预发行 · 0.5.0b5 build 22 · 2026-10-09 · macOS 终端进程监控修复
+
+- 发布 Apple Silicon macOS 14+ 的 DMG / ZIP、自带 Skill 备用包及 SHA-256 清单；
+  源码和当前能力边界见 [发行说明](docs/RELEASE_0.5.0b5.md)。
 
 - 修复服务启动时子进程 `exec` 导致 `EXECUTION_SCOPE_IDENTITY_CHANGED`、
   `process_observation_failed` 并被终止的问题。macOS 在同一进程执行 `exec` 后会增加

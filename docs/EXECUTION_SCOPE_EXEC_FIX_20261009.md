@@ -47,7 +47,7 @@
 `.artifacts/validation/process-scope-build22-20261009/Colink.installed-probe-pyc.app`；
 随后从已签名的最终包重新安装，并验证正常连接前后签名和文件树均有效。
 被替换的 build 21 应用已移至
-`/Users/yuyan/.Trash/Colink.previous-build21-20261009-process-scope.app`，可恢复。
+`~/.Trash/Colink.previous-build21-20261009-process-scope.app`，可恢复。
 
 用户要求先清理旧测试再继续回归。本轮按清单删除 14 个已结束的 pytest 生成目录，
 合计约 3,261 MiB；清单保存在

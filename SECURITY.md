@@ -1,7 +1,7 @@
 # Security and privacy
 
-The public download remains 0.5.0b2. Maintenance source 0.5.0b5 adds compact modes,
-direct host terminals and fixed read-only database commands, and configurable local storage.
+The public prerelease is 0.5.0b5 build 22. It adds compact modes, direct host terminals,
+fixed read-only database commands, and configurable local storage.
 Host terminals require the default-off project development grant. They are NOT sandboxed. Actual source, native, webpage and installed
 application evidence are recorded separately; no production security audit is claimed.
 The legacy mirror protocol and existing databases retain their historical semantics.
@@ -21,7 +21,7 @@ Local authorization and ChatGPT's action approval policy are separate. Original 
 read tools remain read-only. Development status/output/list operations that renew a
 service lease or acknowledge log cleanup are annotated as effects, not read-only.
 
-## Native host terminal (build 17)
+## Native host terminal (introduced in build 17)
 
 - terminal_start/input require the current exact project development grant. Revoke and
   local-control disconnect stop owned sessions; every queued launch revalidates its grant.
@@ -38,13 +38,13 @@ service lease or acknowledge log cleanup are annotated as effects, not read-only
   outcomes are not rerun. Only opaque start receipts are persisted; command/stdin are not.
 - Connection profiles, credentials and old provisioning recovery records are preserved
   but are not read or modified by this terminal runtime.
-- This implementation has static/build checks only in this change; runtime/PTY/DB/revocation
-  testing is reserved for the user. Do not infer acceptance from existing supervisor tests.
+- Build 22 passed a full local regression and installed-app process supervision probe.
+  These do not establish production security or validate every user's database and web flow.
 
 ## Optional isolated execution_plan runner (unchanged scope)
 
 - Only the currently validated Darwin 27 implementation is enabled. Other systems
-  keep terminal execution unavailable. A private libproc ABI mismatch fails closed;
+  keep this isolated execution path unavailable. A private libproc ABI mismatch fails closed;
   there is no fallback to parent PID tracking. Host terminal execution is a separate explicit path.
 - Each job uses validated temporary input and a capacity-limited APFS disk. Original
   project writes are performed only through the existing write coordinator.

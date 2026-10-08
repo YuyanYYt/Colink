@@ -93,8 +93,8 @@ Spring JdbcTemplate 校验实际库名与随机有限账号，再完成建表、
 
 ## 本机迁移和安装
 
-用户选定运行数据目录：`/Users/yuyan/工作/CoLink-data`。
-旧目录：`/Users/yuyan/Library/Application Support/Colink`。
+用户选定运行数据目录：`~/工作/CoLink-data`。
+旧目录：`~/Library/Application Support/Colink`。
 
 只读预检发现 93 个应用状态文件、67,768,971 字节，其中包含 SQLite 临时 WAL/SHM。
 首次迁移因 SQLite 最后一个连接关闭时辅助文件消失而失败，安装流程恢复原应用；

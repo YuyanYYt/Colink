@@ -59,7 +59,7 @@ execution_available 表示当前平台与运行时可用，execution_enabled 和
 没有返回私有控制令牌或目录。此验收是实际工具调用，不声称已修改用户网页的旧回答。
 
 验收后被替换的 build 20 应用副本移入
-`/Users/yuyan/.Trash/Colink.previous-build20-20261008-mcp-status.app`，可恢复；旧副本
+`~/.Trash/Colink.previous-build20-20261008-mcp-status.app`，可恢复；旧副本
 签名仅有运行时新增 Python 字节码，未修改副本内容。build 19 首选恢复锚点/归档、
 用户项目、当前数据库、配置、凭据和本轮全部生成物保留。
 

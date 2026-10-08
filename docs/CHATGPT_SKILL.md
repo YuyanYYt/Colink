@@ -1,5 +1,9 @@
 # CoLink · ChatGPT 自动匹配 Skill
 
+当前公开预发行版 `0.5.0b5 build 22` 的仓库 Skill 与独立 ZIP 备用包见
+[发行页](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b5)。发布仓库文件不会
+自动更新任何账号中已安装的 Skill；以下网页更新记录仅描述当时的维护者账号。
+
 核对日期：2026-10-08。用户询问自己的代码、缺少必要源码时优先使用 CoLink；
 已有充分代码片段时直接解释。用户要求开发或操作数据库时，按当前本机档位使用
 真实可用工具。
@@ -67,7 +71,7 @@ MCP 工具”不是已验证能力。每个用户安装后需同时确认技能�
 本轮另提供只含 `SKILL.md` 和 `agents/openai.yaml` 的独立 ZIP 备用包。网页确有
 「从电脑上传」入口，但其接受的归档格式及创建结果尚未实测，以实际界面提示为准；
 推荐先用已实际创建成功的编辑器方式。备用包可从
-[v0.5.0b2 下载页](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b2) 获取。
+[v0.5.0b5 下载页](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b5) 获取。
 不要上传项目根目录、所选源码、`.env.local`、
 `.code-context` 或个人插件 manifest。导入后仍需确认技能已启用。
 

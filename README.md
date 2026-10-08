@@ -10,17 +10,17 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b2">下载 macOS 安装包</a> ·
+  <a href="https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b5">下载 macOS 安装包</a> ·
   <a href="docs/INSTALL.md">安装与使用</a> ·
   <a href="docs/AGENT_INSTALL.md">让 Agent 帮你安装</a> ·
   <a href="https://github.com/YuyanYYt/Colink/releases">历史版本</a>
 </p>
 
-**公开发行：0.5.0 Beta 2（`0.5.0b2`） · 维护源码：`0.5.0b5`** · macOS 14+ · Apple Silicon · [MIT](LICENSE)
+**公开预发行：0.5.0 Beta 5（`0.5.0b5`，build 22）** · macOS 14+ · Apple Silicon · [MIT](LICENSE)
 
-公开下载仍是 Beta 2；本次维护版增加网页会话开发能力，实施与验收见
-[开发方案](docs/WEB_SESSION_DEVELOPMENT_PLAN.md)。首版运行保护目前只支持已验证的
-macOS 27；其他系统保留读取与写入能力，运行入口关闭。
+本版增加本机开发终端、固定数据库只读工具和局部代码索引更新。原生终端按当前
+macOS 用户权限运行；可选隔离执行器目前只在已验证的 Darwin 27 上开放。
+更新内容和验证边界见 [Beta 5 发行说明](docs/RELEASE_0.5.0b5.md)。
 
 CoLink 把你选定的本机项目接入 MCP。你可以在 ChatGPT 网页端询问项目结构、查找
 函数、理解跨文件依赖；需要改代码时，在本机打开写入开关，让 AI 精准编辑、创建
@@ -49,7 +49,7 @@ CoLink 把你选定的本机项目接入 MCP。你可以在 ChatGPT 网页端询
 关系来自静态分析，动态调用、外部库内部实现等可能无法确定，工具会标明不确定项。
 Skill 是否自动匹配由客户端决定，不保证每轮触发。
 
-本地维护版的结构索引按项目使用独立 SQLite，只保留当前一版；每项目磁盘上限
+本版的结构索引按项目使用独立 SQLite，只保留当前一版；每项目磁盘上限
 500 MiB，按需分配。最多同时打开 4 个项目索引，关闭连接后缓存保留在磁盘；
 详细容量、关系复用与性能复测见 [安装版索引修复](docs/LIVE_INDEX_RUNTIME_FIX_20261008.md)。
 
@@ -57,7 +57,7 @@ Skill 是否自动匹配由客户端决定，不保证每轮触发。
 
 ### 1. 安装应用
 
-打开 [0.5.0 Beta 2 下载页](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b2)，
+打开 [0.5.0 Beta 5 下载页](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b5)，
 下载 `Colink-macos-arm64.dmg`，将 `Colink.app` 拖入“应用程序”，然后打开 **CoLink**。
 也可以下载 ZIP 安装。
 
@@ -92,12 +92,10 @@ ChatGPT 中添加对应的私有 MCP 连接。首次配置步骤见
 并明确告诉 AI 要改什么。关闭连接、退出或重启后，写入和运行权限都会关闭。更新旧版后，应在 ChatGPT
 原连接页刷新工具并新建对话。写入使用方法见 [读取与写入指南](docs/LIVE_USAGE.md)。
 
-运行项目时选择 **开发**，在同一个授权窗口选择准确项目与开发端口。网页先查询环境
-和端口，再规划作业；通过 **数据库连接** 识别项目配置并授权具体库。
-空项目先调用 `database_environment` 获取本机数据库环境；本机保存的服务连接可供
-`database_prepare` 为新项目准备配置，具体库仍须独立授权。项目级手动连接表单已移除。
-新服务建议前端 43117、后端 43118，启动前仍检查实际占用。数据库和虚拟环境的完整
-中文步骤见 [开发环境指南](docs/DEVELOPMENT_ENVIRONMENT_GUIDE.md)。
+运行项目时选择 **开发**，为准确项目开启本机开发授权。网页可先查询环境和端口，
+再通过 `terminal_*` 运行命令或数据库 CLI。终端以当前 macOS 用户权限运行，
+项目 ID 决定授权入口和初始目录，并不隔离文件、网络或数据库。只读/写入档只有
+固定数据库读取；本版没有数据库连接页、聊天卡片或逐库授权入口。
 
 ### 让 Agent 协助安装
 
@@ -138,7 +136,7 @@ uv run colink live --root examples/sample_project --project sample \
 
 | 版本 | 主要变化 |
 | --- | --- |
-| **0.5.0 Beta 5 · 维护源码** | 只读 / 写入 / 开发三档、精简数据库窗口、项目连接配置解析与目标授权、自定义运行数据目录；验收见维护记录 |
+| [**0.5.0 Beta 5 · 公开预发行**](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b5) | 只读 / 写入 / 开发三档、原生终端、固定数据库只读、局部索引和自定义运行数据目录；见 [发行说明](docs/RELEASE_0.5.0b5.md) |
 | **0.5.0 Beta 4 · 维护源码** | 网页独立开发作业、原生隔离与有界存储、环境/端口/数据库引导、受控移动与本地 Git；公开发行状态和实际验收另行记录 |
 | **0.5.0 Beta 2 · 公开发行** | 改善无 Git 项目发现和同名项目区分；发布直读、多项目及受控写入安装包；移除主动代码回退，代码历史交给项目 Git 管理 |
 | 0.5.0 Beta 1 | 原文件按需直读、多项目授权、默认关闭的精准编辑与文件/目录创建、任务 Diff；后续源码补充单文件删除 |
@@ -182,7 +180,7 @@ CoLink 使用 [MIT 许可证](LICENSE)。这是每位用户独立运行的开源
 
 ## 软件恢复锚点
 
-当前首选：`anchor/colink-0.5.0b5-build19-verified`（本机 `0.5.0b5 · build 19`，安装版源码 `79ad2ae`）。
+当前首选：`anchor/colink-0.5.0b5-build19-verified`（恢复基准为 `0.5.0b5 · build 19`，对应源码 `79ad2ae`；当前发布版为 build 22）。
 恢复前保留当前改动并检查运行数据兼容性，具体步骤和归档记录见
 [build 19 恢复说明](docs/RECOVERY_0.5.0b5_BUILD19.md)。2026-10-08 用户明确改选本机新版，
 旧 CoLink 恢复标签已删除；历史文档仅保留当时记录。

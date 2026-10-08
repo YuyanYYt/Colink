@@ -111,7 +111,7 @@ Resolver、BindingReads、ReadMap、ParsedFile、Symbol、Reference、Build 均�
 原始证据为 `local-bounded/installed-local-publication.json`。
 
 验收后唯一清理对象为被替换的旧应用副本，移到
-`/Users/yuyan/.Trash/Colink.previous-build19-20261008-local-index.app`，可恢复。
+`~/.Trash/Colink.previous-build19-20261008-local-index.app`，可恢复。
 旧副本的签名检查仅报告运行时新增的 Python `__pycache__/*.pyc`；移入废纸篓前未
 修改副本内容，新安装版严格签名检查通过。正式恢复仍使用保留的 build 19 归档。
 build 19 首选恢复标签及归档、当前 SQLite、旧共享库、配置/凭据、源码和本轮所有
