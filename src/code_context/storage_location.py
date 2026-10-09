@@ -380,14 +380,37 @@ def _rebind_state(source, target, entries):
                     "STORAGE_PROFILE_INVALID: original configuration retained"
                 ) from None
         elif relative.name == "recovery.sqlite3":
+            from code_context.local_control import private_directory
+            from code_context.recovery_identity import stable_object_identity
+
+            old_objects = private_directory(source / relative.parent / "objects")
+            new_objects = private_directory(path.parent / "objects")
             with sqlite3.connect(path) as db:
+                has_bindings = db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='object_identities' AND type='table'"
+                ).fetchone()
+                bindings = (
+                    dict(db.execute("SELECT * FROM object_identities")) if has_bindings else {}
+                )
                 for sha, size, identity in db.execute(
                     "SELECT sha256,size,identity FROM objects"
                 ).fetchall():
                     old = source / relative.parent / "objects" / sha
                     new = path.parent / "objects" / sha
+                    old_info = old.lstat()
+                    old_raw = tuple(json.loads(identity))
+                    stable = bindings.get(sha)
+                    stable_matches = (
+                        stable is not None
+                        and len(old_raw) == 3
+                        and all(type(value) is int and value > 0 for value in old_raw)
+                        and old_raw[1:] == _identity(old_info)[1:]
+                        and tuple(json.loads(stable))
+                        == stable_object_identity(old_objects, old_info)
+                    )
                     if (
-                        tuple(json.loads(identity)) != _identity(old.lstat())
+                        (stable is not None and not stable_matches)
+                        or (old_raw != _identity(old_info) and not stable_matches)
                         or new.stat().st_size != size
                     ):
                         raise StorageLocationError(
@@ -402,6 +425,14 @@ def _rebind_state(source, target, entries):
                         "UPDATE objects SET identity=? WHERE sha256=?",
                         (json.dumps(_identity(new.stat())), sha),
                     )
+                    if has_bindings:
+                        db.execute(
+                            "INSERT OR REPLACE INTO object_identities VALUES(?,?)",
+                            (
+                                sha,
+                                json.dumps(stable_object_identity(new_objects, new.stat())),
+                            ),
+                        )
         elif relative.name == "cache.json" and (path.parent / "cache.sparsebundle").is_dir():
             from code_context.execution_cache import _persistent_identity
 

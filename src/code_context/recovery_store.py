@@ -115,6 +115,8 @@ class RecoveryStore:
         max_peak_bytes=128 * MIB,
         max_metadata_bytes=16 * MIB,
         min_free_bytes=16 * MIB,
+        legacy_device=None,
+        identity_backup_dir=None,
     ):
         if (
             any(
@@ -186,6 +188,16 @@ class RecoveryStore:
                     ) from None
                 if schema is None or schema[0] != "1":
                     raise RecoveryError("RECOVERY_SCHEMA_INVALID: preserve unknown database")
+                if self.db.execute("PRAGMA integrity_check(1)").fetchone()[0] != "ok":
+                    raise RecoveryError("RECOVERY_CORRUPT: preserve recovery materials")
+                # Repair backups precede every schema/PRAGMA write. The lease
+                # and pinned state directory are already held at this point.
+                from code_context.recovery_identity import refresh_object_identities
+
+                self.db.execute("PRAGMA foreign_keys=ON")
+                self.identity_upgrade = refresh_object_identities(
+                    self, legacy_device=legacy_device, backup_dir=identity_backup_dir
+                )
             self.db.execute("PRAGMA page_size=4096")
             self.db.execute("PRAGMA auto_vacuum=FULL")
             self.db.execute("PRAGMA journal_mode=DELETE")
@@ -200,6 +212,12 @@ class RecoveryStore:
                 raise RecoveryError("RECOVERY_SCHEMA_INVALID: required storage layout missing")
             if self.db.execute("PRAGMA integrity_check(1)").fetchone()[0] != "ok":
                 raise RecoveryError("RECOVERY_CORRUPT: preserve recovery materials")
+            if new_database:
+                from code_context.recovery_identity import refresh_object_identities
+
+                self.identity_upgrade = refresh_object_identities(
+                    self, legacy_device=legacy_device, backup_dir=identity_backup_dir
+                )
             self.reserve()
         except BaseException:
             self.close()
@@ -372,6 +390,22 @@ class RecoveryStore:
                         with self.transaction() as db:
                             db.execute(
                                 "UPDATE objects SET identity=? WHERE sha256=?", (identity, sha)
+                            )
+                            from code_context.recovery_identity import stable_object_identity
+
+                            db.execute(
+                                "CREATE TABLE IF NOT EXISTS object_identities ("
+                                "sha256 TEXT PRIMARY KEY REFERENCES objects(sha256) "
+                                "ON DELETE CASCADE, stable_identity TEXT NOT NULL)"
+                            )
+                            db.execute(
+                                "INSERT INTO object_identities VALUES(?,?)",
+                                (
+                                    sha,
+                                    encode_metadata(
+                                        stable_object_identity(self.objects, os.fstat(fd))
+                                    ),
+                                ),
                             )
                         with os.fdopen(fd, "w+b", closefd=False) as stream:
                             stream.write(raw)

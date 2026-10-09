@@ -19,6 +19,7 @@ from code_context.fingerprint_cache import FingerprintCache, SourceFingerprints
 from code_context.models import content_hash
 from code_context.policy import MAX_FILE_BYTES, MAX_FILES, validate_path
 from code_context.scanner import ScanError, Scanner, _identity, _version
+from code_context.source_identity import stable_source_identities
 from code_context.storage import MirrorError
 
 MAX_BATCH_PARENT_FDS = 128
@@ -132,13 +133,17 @@ class SourceAccess:
             with self.scanner._root_fd() as fd:
                 self.root_identity = _identity(os.fstat(fd))
                 self.ancestor_identity = self._ancestors()
+                persistent = stable_source_identities(
+                    self.scanner.root, fd, self.root_identity, self.ancestor_identity
+                )
         except (OSError, ValueError, ScanError):
             raise SourceError(
                 "SOURCE_UNAVAILABLE: source must be a real authorized directory"
             ) from None
         self.root = self.scanner.root
-        raw = repr((str(self.root), self.root_identity, self.ancestor_identity)).encode()
-        self.source_id = hashlib.sha256(raw).hexdigest()
+        raw = repr(("volume-v1", str(self.root), *persistent)).encode()
+        self.stable_id = hashlib.sha256(raw).hexdigest()
+        self.source_id = self.stable_id
         self.lock = threading.RLock()
         self.metrics = {"body_reads": 0, "metadata_walks": 0}
         self.metrics.update(
@@ -152,6 +157,22 @@ class SourceAccess:
         self._fingerprints = SourceFingerprints(FingerprintCache(max_entries=4096), self.source_id)
         self._fingerprint_batches = threading.local()
         self._ignore_cache = None
+
+    def legacy_source_id(self, device=None):
+        root, ancestors = self.root_identity, self.ancestor_identity
+        if device is not None:
+            # An explicit local upgrade can prove a single-volume legacy binding.
+            # Mixed-volume old bindings need independent local reauthorization.
+            if type(device) is not int or device < 1 or any(p[0] != root[0] for p in ancestors):
+                raise SourceError("LEGACY_VOLUME_BINDING_UNAVAILABLE: reauthorize locally")
+            root = (device, *root[1:])
+            ancestors = tuple((device, *p[1:]) for p in ancestors)
+        return hashlib.sha256(repr((str(self.root), root, ancestors)).encode()).hexdigest()
+
+    def retain_source_id(self, source_id):
+        """Registry-validated logical IDs keep recovery/index references intact."""
+        self.source_id = source_id
+        self._fingerprints = SourceFingerprints(self._fingerprints.cache, source_id)
 
     def attach_fingerprint_cache(self, cache: FingerprintCache):
         """Use a backend-owned metadata budget; never transfer or retain bodies.

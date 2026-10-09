@@ -63,6 +63,20 @@ def parser() -> argparse.ArgumentParser:
     control.add_argument("--data-dir", type=Path, required=True)
     control.add_argument("--action", required=True)
 
+    upgrade = commands.add_parser(
+        "registry-upgrade-identity", help="本机修复重启后的旧目录身份；保留原登记备份"
+    )
+    upgrade.add_argument("--root", type=Path, required=True)
+    upgrade.add_argument("--data-dir", type=Path, required=True)
+    upgrade.add_argument("--legacy-device", type=int, required=True)
+
+    recovery_upgrade = commands.add_parser(
+        "recovery-upgrade-identity", help="本机核验重启后的恢复文件身份并备份原数据库"
+    )
+    recovery_upgrade.add_argument("--root", type=Path, required=True)
+    recovery_upgrade.add_argument("--legacy-device", type=int, required=True)
+    recovery_upgrade.add_argument("--backup-dir", type=Path, required=True)
+
     for name in ("desktop-status", "desktop-run", "desktop-control", "desktop-select"):
         command = commands.add_parser(name, help="CoLink 菜单栏应用的本机生命周期接口")
         command.add_argument("--workspace", type=Path, default=Path.cwd())
@@ -154,6 +168,16 @@ def main(argv: list[str] | None = None) -> int:
                 build_mcp(runtime.backend, status_provider=runtime.backend.mcp_status).run(
                     transport="stdio"
                 )
+            return 0
+        if args.command == "registry-upgrade-identity":
+            from code_context.project_registry import upgrade_legacy_registry_identity
+
+            emit(upgrade_legacy_registry_identity(args.root, args.data_dir, args.legacy_device))
+            return 0
+        if args.command == "recovery-upgrade-identity":
+            from code_context.recovery_identity import upgrade_recovery_identity
+
+            emit(upgrade_recovery_identity(args.root, args.legacy_device, args.backup_dir))
             return 0
         if args.command == "desktop-setup":
             from code_context.onboarding import configure_desktop
