@@ -228,6 +228,97 @@ private final class LocalControlOperation: @unchecked Sendable {
     }
 }
 
+private final class LocalStatusTimeout: @unchecked Sendable {
+    private let item: DispatchWorkItem
+    init(_ action: @escaping () -> Void) { item = DispatchWorkItem(block: action) }
+    func schedule() { DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 12, execute: item) }
+    func cancel() { item.cancel() }
+}
+
+// Frames are bounded before they reach the main queue. This is the private
+// desktop-run pipe, not a new listener or a general command channel.
+struct DesktopStatusDecoder {
+    static let maximumFrameBytes = 65536
+    private var buffer = Data()
+
+    enum FrameError: Error { case invalid }
+
+    mutating func append(_ chunk: Data) throws -> [Data] {
+        guard !chunk.isEmpty, chunk.count <= Self.maximumFrameBytes else { throw FrameError.invalid }
+        buffer.append(chunk)
+        var frames: [Data] = []
+        while let newline = buffer.firstIndex(of: 10) {
+            let size = buffer.distance(from: buffer.startIndex, to: newline)
+            guard size > 0, size <= Self.maximumFrameBytes, frames.count < 16 else { throw FrameError.invalid }
+            frames.append(Data(buffer[..<newline]))
+            buffer.removeSubrange(...newline)
+        }
+        guard buffer.count <= Self.maximumFrameBytes else { throw FrameError.invalid }
+        return frames
+    }
+}
+
+struct DesktopStatusResponse {
+    let epoch: Int
+    let sequence: Int
+    let status: [String: Any]
+
+    init?(_ data: Data) {
+        guard let frame = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(frame.keys) == Set(["type", "epoch", "seq", "status"]),
+              frame["type"] as? String == "status",
+              let epoch = Self.counter(frame["epoch"]), let sequence = Self.counter(frame["seq"]),
+              let status = frame["status"] as? [String: Any] else { return nil }
+        self.epoch = epoch
+        self.sequence = sequence
+        self.status = status
+    }
+
+    private static func counter(_ value: Any?) -> Int? {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(),
+              !["f", "d"].contains(String(cString: number.objCType)),
+              number.int64Value > 0, number.int64Value <= 9007199254740991 else { return nil }
+        return Int(number.int64Value)
+    }
+}
+
+private final class DesktopStatusStream: @unchecked Sendable {
+    private let handle: FileHandle
+    private let lock = NSLock()
+    private var decoder = DesktopStatusDecoder()
+    private var closed = false
+
+    init(_ handle: FileHandle, onFrame: @escaping (Data) -> Void, onFailure: @escaping () -> Void) {
+        self.handle = handle
+        handle.readabilityHandler = { [weak self] readable in
+            guard let self else { return }
+            self.lock.lock()
+            guard !self.closed else { self.lock.unlock(); return }
+            do {
+                guard let chunk = try readable.read(upToCount: DesktopStatusDecoder.maximumFrameBytes),
+                      !chunk.isEmpty else { throw DesktopStatusDecoder.FrameError.invalid }
+                let frames = try self.decoder.append(chunk)
+                self.lock.unlock()
+                for frame in frames { onFrame(frame) }
+            } catch {
+                self.closed = true
+                readable.readabilityHandler = nil
+                self.lock.unlock()
+                onFailure()
+            }
+        }
+    }
+
+    func close() {
+        lock.lock()
+        closed = true
+        handle.readabilityHandler = nil
+        lock.unlock()
+        try? handle.close()
+    }
+}
+
 enum CodeAccessMode: String, CaseIterable, Identifiable {
     case readOnly, write, development
     var id: String { rawValue }
@@ -247,6 +338,9 @@ final class ConnectionController: ObservableObject {
     @Published var revision = 0
     @Published var fileCount = 0
     @Published var isReady = false
+    @Published private(set) var powerState = "closed"
+    @Published private(set) var warmRemaining: Double = 0
+    @Published private(set) var busyReasons: [String] = []
     @Published var errorText: String?
     @Published var checking = false
     @Published var configuring = false
@@ -284,11 +378,19 @@ final class ConnectionController: ObservableObject {
     var didStop: (() -> Void)?
     private var connection: Process?
     private var controlPipe: Pipe?
+    private var statusStream: DesktopStatusStream?
+    private var connectionEpoch = 0
+    private var statusSequence = 0
+    private var pendingStatus: (epoch: Int, sequence: Int)?
+    private var statusTimeout: DispatchWorkItem?
+    private var statusOperation: LocalControlOperation?
+    private var statusOperationTimeout: LocalStatusTimeout?
     private var requestedStop = false
     private var stateEpoch = 0
     private var localOperation: LocalControlOperation?
     private var acknowledgedWriteProjectIDs: Set<String> = []
     private var timer: Timer?
+    private var panelVisible = false
     private let queue = DispatchQueue(label: "Colink.status", qos: .utility)
 
     var ownsConnection: Bool { connection?.isRunning == true }
@@ -430,11 +532,47 @@ final class ConnectionController: ObservableObject {
     init(configuration: RuntimeConfiguration) {
         self.configuration = configuration
         root = Self.savedRoot(for: configuration)
-        // Do not restore a running intent: every application launch is idle.
+        // One launch inspection can discover an external owner. Closed state
+        // installs no refresh timer and never restores a running intent.
+        refresh()
+    }
+
+    func panelDidShow() {
+        guard !panelVisible else { return }
+        panelVisible = true
+        refresh()
+    }
+
+    func panelDidHide() { panelVisible = false }
+
+    private func updateStatusTimer() {
+        let connected = (ownsConnection && !requestedStop && phase != .stopping) || phase == .external
+        guard connected else {
+            timer?.invalidate()
+            timer = nil
+            return
+        }
+        guard timer == nil else { return }
+        // Preserve the existing confirmation cadence, including hidden panels.
+        // Owned connections reuse desktop-run rather than launch a status CLI.
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
-        refresh()
+    }
+
+    private func cancelPendingStatus() {
+        statusTimeout?.cancel()
+        statusTimeout = nil
+        pendingStatus = nil
+        checking = false
+    }
+
+    private func cancelStatusRefresh() {
+        cancelPendingStatus()
+        statusOperationTimeout?.cancel()
+        statusOperationTimeout = nil
+        statusOperation?.cancel()
+        statusOperation = nil
     }
 
     private static func savedRoot(for configuration: RuntimeConfiguration) -> String {
@@ -474,8 +612,56 @@ final class ConnectionController: ObservableObject {
     }
 
     func refresh() {
-        guard !checking, !projectBusy, !storageChanging else { return }
+        guard !checking, !projectBusy, !storageChanging, phase != .stopping else { return }
         guard isConfigured || configuration.isLive else { phase = .unconfigured; return }
+        if ownsConnection {
+            requestOwnedStatus()
+            return
+        }
+        inspectStatusOnce()
+    }
+
+    private func requestOwnedStatus() {
+        guard let process = connection, process.isRunning, !requestedStop,
+              let handle = controlPipe?.fileHandleForWriting else { return }
+        statusSequence += 1
+        let epoch = stateEpoch
+        let sequence = statusSequence
+        let generation = connectionEpoch
+        guard let payload = try? JSONSerialization.data(withJSONObject: [
+            "type": "status", "epoch": epoch, "seq": sequence
+        ]) else { failOwnedStatus(); return }
+        checking = true
+        pendingStatus = (epoch, sequence)
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, self.connection === process, self.connectionEpoch == generation,
+                  self.pendingStatus?.epoch == epoch, self.pendingStatus?.sequence == sequence else { return }
+            self.failOwnedStatus()
+        }
+        statusTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 12, execute: timeout)
+        do { try handle.write(contentsOf: payload + Data([10])) }
+        catch { failOwnedStatus() }
+    }
+
+    private func acceptStatusFrame(_ data: Data, process: Process, generation: Int) {
+        guard connection === process, connectionEpoch == generation, !requestedStop,
+              phase != .stopping else { return }
+        guard let frame = DesktopStatusResponse(data),
+              frame.epoch <= stateEpoch, frame.sequence <= statusSequence else { failOwnedStatus(); return }
+        // An action may supersede a read while the supervisor is answering it.
+        guard pendingStatus?.epoch == frame.epoch, pendingStatus?.sequence == frame.sequence else { return }
+        cancelPendingStatus()
+        applyStatusResult(frame.status)
+    }
+
+    private func failOwnedStatus() {
+        guard ownsConnection, !requestedStop else { return }
+        errorText = "连接状态无法确认，正在关闭本次连接。"
+        stop()
+    }
+
+    private func inspectStatusOnce() {
         checking = true
         let selected = root
         let epoch = stateEpoch
@@ -485,66 +671,82 @@ final class ConnectionController: ObservableObject {
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
         process.standardInput = FileHandle.nullDevice
+        let operation = LocalControlOperation(process)
+        statusOperation = operation
+        let timeout = LocalStatusTimeout { operation.cancel() }
+        statusOperationTimeout = timeout
         queue.async { [weak self] in
             var result: [String: Any]?
             do {
-                try process.run()
-                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 12) {
-                    if process.isRunning { process.terminate() }
+                guard try operation.run() else { return }
+                timeout.schedule()
+                var data = Data()
+                while let chunk = try output.fileHandleForReading.read(upToCount: 65537), !chunk.isEmpty {
+                    data.append(chunk)
+                    if data.count > 65536 {
+                        operation.cancel()
+                        try? output.fileHandleForReading.close()
+                        break
+                    }
                 }
-                let data = output.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
                 if process.terminationStatus == 0, data.count <= 65536 {
                     result = try JSONSerialization.jsonObject(with: data) as? [String: Any]
                 }
             } catch { }
+            timeout.cancel()
+            try? output.fileHandleForReading.close()
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self, self.statusOperation === operation else { return }
+                self.statusOperation = nil
+                self.statusOperationTimeout = nil
                 self.checking = false
-                guard self.root == selected, self.stateEpoch == epoch else { self.refresh(); return }
-                guard let result else {
-                    let hadWriteAuthorization = !self.acknowledgedWriteProjectIDs.isEmpty
-                    self.isReady = false
-                    self.clearWriteAuthorization()
-                    self.writeAvailable = false
-                    if self.ownsConnection && hadWriteAuthorization {
-                        self.stop()
-                        return
-                    }
-                    if self.ownsConnection && self.phase != .stopping {
-                        self.phase = .failed
-                        self.errorText = "文件夹暂时不可用。请关闭后重新选择。"
-                    }
-                    if !self.ownsConnection && self.phase != .preparing {
-                        self.phase = .failed
-                        self.errorText = "请确认应用所需的项目和所选文件夹仍在原位置。"
-                    }
-                    return
-                }
-                self.revision = result["revision"] as? Int ?? 0
-                self.fileCount = result["tracked_files"] as? Int ?? 0
-                self.isReady = result["ready"] as? Bool ?? false
-                if !self.isReady && self.ownsConnection && !self.acknowledgedWriteProjectIDs.isEmpty {
-                    self.stop()
-                    return
-                }
-                self.applyWorkspaceStatus(result)
-                if self.ownsConnection {
-                    if self.phase != .stopping { self.phase = self.isReady ? .running : .starting }
-                } else if result["external_active"] as? Bool == true || result["supervised"] as? Bool == true {
-                    self.phase = .external
-                } else if self.phase == .external {
-                    self.phase = .stopped
-                } else if !self.isConfigured {
-                    self.phase = .unconfigured
-                }
+                guard self.root == selected, self.stateEpoch == epoch else { return }
+                self.applyStatusResult(result)
             }
         }
+    }
+
+    private func applyStatusResult(_ result: [String: Any]?) {
+        guard let result else {
+            isReady = false
+            clearWriteAuthorization()
+            writeAvailable = false
+            if ownsConnection { failOwnedStatus(); return }
+            if phase != .preparing {
+                phase = .failed
+                errorText = "请确认应用所需的项目和所选文件夹仍在原位置。"
+            }
+            updateStatusTimer()
+            return
+        }
+        revision = result["revision"] as? Int ?? 0
+        fileCount = result["tracked_files"] as? Int ?? 0
+        isReady = result["ready"] as? Bool ?? false
+        if !isReady && ownsConnection && !acknowledgedWriteProjectIDs.isEmpty {
+            stop()
+            return
+        }
+        applyWorkspaceStatus(result)
+        if ownsConnection {
+            if phase != .stopping { phase = isReady ? .running : .starting }
+        } else if result["external_active"] as? Bool == true || result["supervised"] as? Bool == true {
+            phase = .external
+        } else if phase == .external {
+            phase = .stopped
+        } else if !isConfigured {
+            phase = .unconfigured
+        }
+        updateStatusTimer()
     }
 
     private func applyWorkspaceStatus(_ result: [String: Any]) {
         guard configuration.isLive else { return }
         let workspace = result["workspace_status"] as? [String: Any] ?? [:]
+        let state = workspace["power_state"] as? String ?? "closed"
+        powerState = ["idle", "warm", "busy", "closed"].contains(state) ? state : "closed"
+        warmRemaining = min(300, max(0, workspace["warm_remaining"] as? Double ?? 0))
+        busyReasons = workspace["busy_reasons"] as? [String] ?? []
         projects = (workspace["projects"] as? [[String: Any]] ?? []).compactMap(WorkspaceProject.init)
         executionAvailable = workspace["execution_available"] as? Bool == true
         let executionGrants = Set(workspace["execution_projects"] as? [String] ?? [])
@@ -584,6 +786,7 @@ final class ConnectionController: ObservableObject {
         guard configuration.isLive, !projectBusy else { return }
         projectBusy = true
         projectError = nil
+        cancelStatusRefresh()
         stateEpoch += 1
         let epoch = stateEpoch
         let input = payload == nil ? nil : Pipe()
@@ -653,6 +856,25 @@ final class ConnectionController: ObservableObject {
         acknowledgedExecutionProjectIDs = []
         writeEnabled = false
         acknowledgedWriteProjectIDs = []
+    }
+
+    private func clearDynamicStatus() {
+        isReady = false
+        revision = 0
+        fileCount = 0
+        clearWriteAuthorization()
+        writeAvailable = false
+        executionAvailable = false
+        pendingPortReleases = []
+        projects = []
+        activeTask = nil
+        recentTask = nil
+        hasActiveTask = false
+        recoveryRequired = false
+        localActions = []
+        powerState = "closed"
+        warmRemaining = 0
+        busyReasons = []
     }
 
     func recoverWrite() {
@@ -747,6 +969,7 @@ final class ConnectionController: ObservableObject {
         guard canChangeStorage else { return }
         storageChanging = true
         storageError = nil
+        cancelStatusRefresh()
         stateEpoch += 1
         hidePanel?()
         NSApplication.shared.activate(ignoringOtherApps: true)
@@ -792,24 +1015,15 @@ final class ConnectionController: ObservableObject {
     }
 
     private func applySelection(_ selectedRoot: String) {
+        cancelStatusRefresh()
         stateEpoch += 1
         root = selectedRoot
-        revision = 0
-        fileCount = 0
-        clearWriteAuthorization()
-        writeAvailable = false
-        executionAvailable = false
-        pendingPortReleases = []
-        activeTask = nil
-        recentTask = nil
-        hasActiveTask = false
-        recoveryRequired = false
-        localActions = []
-        projects = []
+        clearDynamicStatus()
         errorText = nil
         projectError = nil
         setupError = nil
         phase = isConfigured ? .stopped : .unconfigured
+        updateStatusTimer()
     }
 
     func start() {
@@ -827,7 +1041,11 @@ final class ConnectionController: ObservableObject {
             guard alert.runModal() == .alertFirstButtonReturn else { return }
         }
         requestedStop = false
+        cancelStatusRefresh()
         stateEpoch += 1
+        connectionEpoch += 1
+        let generation = connectionEpoch
+        statusSequence = 0
         clearWriteAuthorization()
         writeAvailable = false
         errorText = nil
@@ -837,45 +1055,64 @@ final class ConnectionController: ObservableObject {
             "--client", configuration.client, "--app-pid", String(ProcessInfo.processInfo.processIdentifier)
         ] + modeArguments)
         let pipe = Pipe()
+        let output = Pipe()
         process.standardInput = pipe
-        process.standardOutput = FileHandle.nullDevice
+        process.standardOutput = output
         process.standardError = FileHandle.nullDevice
         process.terminationHandler = { [weak self] finished in
             DispatchQueue.main.async {
-                guard let self, self.connection === finished else { return }
+                guard let self, self.connection === finished, self.connectionEpoch == generation else { return }
                 let stoppedIntentionally = self.requestedStop
+                self.cancelStatusRefresh()
+                self.statusStream?.close()
+                self.statusStream = nil
                 try? self.controlPipe?.fileHandleForWriting.close()
                 self.controlPipe = nil
                 self.connection = nil
-                self.isReady = false
-                self.clearWriteAuthorization()
-                self.writeAvailable = false
+                self.stateEpoch += 1
+                self.clearDynamicStatus()
                 self.phase = finished.terminationStatus == 0 ? .stopped : .failed
+                if self.phase == .failed { self.powerState = "failed" }
                 if self.phase == .failed {
                     self.errorText = stoppedIntentionally
                         ? "连接尚未完全关闭。请先检查后再启动。"
                         : "无法连接。请检查文件夹、网络及连接配置后重试。"
                 }
-                self.refresh()
+                self.updateStatusTimer()
                 self.didStop?()
             }
         }
         connection = process
         controlPipe = pipe
+        statusStream = DesktopStatusStream(output.fileHandleForReading, onFrame: { [weak self] frame in
+            DispatchQueue.main.async { self?.acceptStatusFrame(frame, process: process, generation: generation) }
+        }, onFailure: { [weak self] in
+            DispatchQueue.main.async {
+                guard let self, self.connection === process, self.connectionEpoch == generation else { return }
+                self.failOwnedStatus()
+            }
+        })
         do {
             try process.run()
             phase = .starting
+            updateStatusTimer()
             refresh()
         } catch {
+            cancelStatusRefresh()
+            statusStream?.close()
+            statusStream = nil
+            try? controlPipe?.fileHandleForWriting.close()
             connection = nil
             controlPipe = nil
             phase = .failed
+            updateStatusTimer()
             errorText = "无法启动本机运行环境。请确认项目目录没有移动。"
         }
     }
 
     func stop() {
         requestedStop = true
+        cancelStatusRefresh()
         stateEpoch += 1
         clearWriteAuthorization()
         writeAvailable = false
@@ -883,6 +1120,7 @@ final class ConnectionController: ObservableObject {
         localOperation = nil
         projectBusy = false
         // No persistent run flag, auto-start registration, or restart timer exists.
+        updateStatusTimer()
         guard ownsConnection else { return }
         phase = .stopping
         isReady = false
@@ -901,6 +1139,8 @@ final class ConnectionController: ObservableObject {
             try? handle.close()
         }
         controlPipe = nil
+        statusStream?.close()
+        statusStream = nil
     }
 
     func openChat() {

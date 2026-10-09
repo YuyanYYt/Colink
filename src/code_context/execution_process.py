@@ -99,11 +99,14 @@ class ProcessManager:
         max_cpu_cores=4.0,
         cpu_window_seconds=30.0,
         clock=None,
+        on_activity=None,
     ):
         if sys.platform not in {"linux", "darwin"}:
             raise ProcessError("EXECUTION_PLATFORM_UNSUPPORTED")
         if (
             not callable(sandbox_check)
+            or on_activity is not None
+            and not callable(on_activity)
             or type(max_services) is not int
             or not 1 <= max_services <= 2
             or type(max_finite) is not int
@@ -158,6 +161,7 @@ class ProcessManager:
             "cpu_accounting": "sampled_live_processes; exited_between_samples_can_be_missed",
         }
         self._clock = clock or time.monotonic
+        self.on_activity = on_activity
         self._condition = threading.Condition(threading.RLock())
         self._jobs = {}
         self._summaries = deque()
@@ -285,7 +289,33 @@ class ProcessManager:
                 del self._jobs[retired]
             self._jobs[job_id] = job
             self._condition.notify_all()
-            return self._snapshot_locked(job)
+            snapshot = self._snapshot_locked(job)
+        self._notify_activity()
+        return snapshot
+
+    def active_count(self):
+        """Read actual lifecycle occupancy without collecting logs or renewing leases."""
+        with self._condition:
+            return sum(
+                job.state not in TERMINAL_STATES
+                or not job.cleanup_verified
+                or not job.observed_tree_stopped
+                or not job.callback_done
+                or job.callback_error
+                for job in self._jobs.values()
+            )
+
+    def _notify_activity(self):
+        # An observer only wakes its scheduler. It must read active_count again
+        # rather than applying possibly reordered state/count notifications.
+        # Never invoke external observers under the process manager lock.
+        callback = self.on_activity
+        if callback is not None:
+            try:
+                callback()
+            except Exception:
+                # Cache scheduling is advisory and cannot change process policy.
+                pass
 
     def _snapshot_locked(self, job):
         return {
@@ -350,6 +380,7 @@ class ProcessManager:
                 raise ProcessError("EXECUTION_OUTPUT_NOT_ACKNOWLEDGEABLE")
             job.output.clear()
             job.reclaimed = "acknowledged"
+            self._condition.notify_all()
             return self._snapshot_locked(job)
 
     def _summary_bytes(self):
@@ -503,7 +534,14 @@ class ProcessManager:
                     )
                 )
                 if job is None:
-                    self._condition.wait(0.1)
+                    # Retention and active/queued jobs keep their existing
+                    # cadence. Once all work and reclamation have ended, only
+                    # submit, completion, acknowledgement or close can wake us.
+                    timed_work = self._summaries or any(
+                        value.state not in TERMINAL_STATES or value.output.retained_bytes
+                        for value in self._jobs.values()
+                    )
+                    self._condition.wait(0.1 if timed_work else None)
                     continue
                 job.state = "starting"
                 job.worker = threading.Thread(
@@ -578,6 +616,7 @@ class ProcessManager:
         with self._condition:
             job.callback_done = True
             self._condition.notify_all()
+        self._notify_activity()
 
     def _run(self, job):
         final = None

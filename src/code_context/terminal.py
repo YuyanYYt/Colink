@@ -20,23 +20,34 @@ from code_context.source_access import SourceError
 
 
 class HostTerminal:
-    def __init__(self, root, source_for, authorize, on_change, tools):
+    def __init__(self, root, source_for, authorize, on_change, tools, *, on_activity=None):
         self.state = private_directory(root)
         self.source_for, self.authorize, self.on_change = source_for, authorize, on_change
         self.tools = tools
+        self.on_activity = on_activity
         self.epoch = secrets.token_hex(16)
         self.secret = secrets.token_bytes(32)
         self.lock = threading.RLock()
+        self.condition = threading.Condition(self.lock)
         self.jobs = {}
+        self.active_jobs = set()
         self.closed = False
         self.manager = ProcessManager(
-            sandbox_check=self._approved, scope_root=self.state.root / "scope"
+            sandbox_check=self._approved,
+            scope_root=self.state.root / "scope",
+            on_activity=self._activity_changed,
         )
         self.stop = threading.Event()
         self.monitor = threading.Thread(
             target=self._monitor, name="host-terminal-grants", daemon=True
         )
         self.monitor.start()
+
+    def _activity_changed(self):
+        with self.condition:
+            self.condition.notify_all()
+        if self.on_activity is not None:
+            self.on_activity()
 
     def _approved(self, argv, cwd, env):
         # The process manager checks again immediately before dispatch.
@@ -199,6 +210,8 @@ class HostTerminal:
                 {"epoch": self.epoch, "job_id": job_id, "fingerprint": fingerprint},
             )
             self.jobs[job_id] = job
+            self.active_jobs.add(job_id)
+            self.condition.notify_all()
             try:
                 self.manager.submit(
                     job_id,
@@ -213,6 +226,8 @@ class HostTerminal:
                 )
             except ProcessError:
                 job["failed"] = True
+                self.active_jobs.discard(job_id)
+                self.condition.notify_all()
                 raise SourceError(
                     "TERMINAL_START_FAILED: reuse request ID; do not blindly repeat commands"
                 ) from None
@@ -220,6 +235,8 @@ class HostTerminal:
 
     def _exited(self, project_id, job_id):
         with self.lock:
+            self.active_jobs.discard(job_id)
+            self.condition.notify_all()
             if job_id in self.jobs:
                 for field in ("argv", "env"):
                     self.jobs[job_id].pop(field, None)
@@ -305,6 +322,7 @@ class HostTerminal:
     def revoke(self):
         with self.lock:
             ids = tuple(self.jobs)
+            self.condition.notify_all()
         for job_id in ids:
             try:
                 self.manager.cancel(job_id)
@@ -312,9 +330,16 @@ class HostTerminal:
                 pass
 
     def _monitor(self):
-        while not self.stop.wait(0.25):
-            with self.lock:
-                jobs = tuple(self.jobs.items())
+        while True:
+            with self.condition:
+                while not self.stop.is_set() and not self.active_jobs:
+                    self.condition.wait()
+                if self.stop.is_set():
+                    return
+                self.condition.wait(0.25)
+                if self.stop.is_set():
+                    return
+                jobs = tuple((job_id, self.jobs[job_id]) for job_id in self.active_jobs)
             for job_id, job in jobs:
                 try:
                     if self.manager.snapshot(job_id)["state"] in TERMINAL_STATES:
@@ -329,7 +354,9 @@ class HostTerminal:
                     continue
 
     def close(self):
-        self.closed = True
-        self.stop.set()
+        with self.condition:
+            self.closed = True
+            self.stop.set()
+            self.condition.notify_all()
         self.monitor.join(timeout=1)
         return self.manager.close()

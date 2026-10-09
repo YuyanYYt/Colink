@@ -353,6 +353,7 @@ class LiveIndexService:
                 "INDEX_STORAGE_UNAVAILABLE: cannot own the dedicated fact cache"
             ) from None
         self._owns_executor = executor is None
+        self.on_activity = None
         self._executor = executor or ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="colink-live-index"
         )
@@ -634,6 +635,8 @@ class LiveIndexService:
             if not self._closed and self._cached(project_id) is None:
                 state = self._states.pop(project_id, {})
                 self._remember(project_id, state.get("reason") or "BUILD_CANCELLED")
+        if self.on_activity is not None:
+            self.on_activity()
 
     def query(
         self,

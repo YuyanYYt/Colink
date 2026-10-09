@@ -22,6 +22,92 @@ from code_context.client import SyncError
 from code_context.scanner import Scanner
 from code_context.tunnel import _read_private, load_profile, prepare_profile, tunnel_status
 
+_CONTROL_FRAME_BYTES = 4096
+_STATUS_FRAME_BYTES = 65536
+_CONTROL_COUNTER_MAX = (1 << 53) - 1
+
+
+def _control_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate control field")
+        value[key] = item
+    return value
+
+
+class _DesktopControlReader:
+    def __init__(self, stream):
+        self.stream = stream
+        self.buffer = bytearray()
+
+    def readline(self):
+        limit = _CONTROL_FRAME_BYTES + 1
+        while True:
+            newline = self.buffer.find(b"\n")
+            if newline >= 0 or len(self.buffer) >= limit:
+                size = min(newline + 1 if newline >= 0 else limit, limit)
+                line = bytes(self.buffer[:size])
+                del self.buffer[:size]
+                return line
+            chunk = self.stream.read(limit - len(self.buffer))
+            if not chunk:
+                line = bytes(self.buffer)
+                self.buffer.clear()
+                return line
+            self.buffer.extend(chunk)
+
+
+def _desktop_control_pipe(workspace, root, mode, stopped, stream, output):
+    """Bounded local status frames on the already-owned native pipe.
+
+    This pipe cannot grant permissions or run commands. Invalid input, EOF, or
+    output failure retains the existing fail-closed whole-group stop behavior.
+    Counters are echoed so the native owner can discard obsolete responses.
+    """
+    last_epoch = last_sequence = 0
+    reader = _DesktopControlReader(stream)
+    try:
+        while not stopped.is_set():
+            line = reader.readline()
+            if not line or line.strip() == b"stop":
+                break
+            if len(line) > _CONTROL_FRAME_BYTES or not line.endswith(b"\n"):
+                break
+            request = json.loads(line, object_pairs_hook=_control_object)
+            if (
+                not isinstance(request, dict)
+                or set(request) != {"type", "epoch", "seq"}
+                or request["type"] != "status"
+                or type(request["epoch"]) is not int
+                or not last_epoch <= request["epoch"] <= _CONTROL_COUNTER_MAX
+                or request["epoch"] <= 0
+                or type(request["seq"]) is not int
+                or not last_sequence < request["seq"] <= _CONTROL_COUNTER_MAX
+            ):
+                break
+            last_epoch, last_sequence = request["epoch"], request["seq"]
+            status = desktop_status(workspace, root, mode)
+            frame = json.dumps(
+                {"type": "status", "epoch": last_epoch, "seq": last_sequence, "status": status},
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            if len(frame) > _STATUS_FRAME_BYTES:
+                break
+            remaining = memoryview(frame + b"\n")
+            while remaining:
+                written = output.write(remaining)
+                if not written:
+                    raise OSError("desktop output unavailable")
+                remaining = remaining[written:]
+            output.flush()
+    except Exception:
+        pass  # Never echo input, source text, or a credential in a rejection.
+    finally:
+        stopped.set()
+
 
 @dataclass(frozen=True)
 class DesktopBinding:
@@ -258,15 +344,16 @@ def run_desktop(workspace: Path, root: Path, client: str, app_pid: int = 0, mode
 
         previous = {s: signal.signal(s, on_signal) for s in (signal.SIGINT, signal.SIGTERM)}
 
-        def control_pipe():
-            # Closing the native app also closes this pipe. No reconnect loop exists.
-            while True:
-                line = sys.stdin.readline()
-                if not line or line.strip() == "stop":
-                    stopped.set()
-                    return
-
-        threading.Thread(target=control_pipe, name="desktop-control", daemon=True).start()
+        # Raw duplicated handles keep a signal-triggered shutdown from racing
+        # CPython's buffered stdin lock or retrying a failed stdout flush.
+        control_input = os.fdopen(os.dup(sys.stdin.fileno()), "rb", buffering=0)
+        control_output = os.fdopen(os.dup(sys.stdout.fileno()), "wb", buffering=0)
+        threading.Thread(
+            target=_desktop_control_pipe,
+            args=(workspace, root, mode, stopped, control_input, control_output),
+            name="desktop-control",
+            daemon=True,
+        ).start()
         record = {"app_pid": app_pid, "root": str(binding.root), "profile": str(binding.profile)}
         child = None
         exit_code = 0
@@ -315,6 +402,8 @@ def run_desktop(workspace: Path, root: Path, client: str, app_pid: int = 0, mode
             else:
                 _record_runtime(directory, **record, phase="stopped", exit_code=exit_code)
             finally:
+                control_input.close()
+                control_output.close()
                 for requested_signal, handler in previous.items():
                     signal.signal(requested_signal, handler)
         return exit_code

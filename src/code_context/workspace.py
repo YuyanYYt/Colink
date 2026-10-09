@@ -6,6 +6,7 @@ import stat
 import threading
 from pathlib import Path
 
+from code_context.energy_idle import EnergyIdle
 from code_context.execution_coordinator import ExecutionCoordinator
 from code_context.execution_gate import native_gate
 from code_context.execution_git import GitCoordinator
@@ -51,6 +52,7 @@ class WorkspaceRuntime:
         self.execution = None
         self.git = None
         self.ports = None
+        self.energy = None
         self.closed = False
         with self.state.root_fd() as directory:
             fd = os.open(
@@ -144,6 +146,11 @@ class WorkspaceRuntime:
                 self.execution.authorize,
             )
             self.ports = PortsCoordinator(self.backend.source, self.execution, self._control_alive)
+            self.energy = EnergyIdle(self._energy_busy, self._trim_idle, self.watcher.set_active)
+            self.backend.index_service.on_activity = self.energy.changed
+            self.terminal.on_activity = self.energy.changed
+            self.execution.on_activity = self.energy.changed
+            self.execution.manager.on_activity = self.energy.changed
             self.backend.workspace_runtime = self
         except BaseException:
             self.close()
@@ -180,6 +187,18 @@ class WorkspaceRuntime:
     def _on_change(self, project_id):
         self.backend.contexts.invalidate_project(project_id)
         self.backend.index_service.invalidate(project_id)
+
+    def _energy_busy(self):
+        reasons = []
+        if self.terminal.manager.active_count() or self.execution.active_count():
+            reasons.append("jobs")
+        if self.backend.index_service.active_count():
+            reasons.append("index")
+        return reasons
+
+    def _trim_idle(self):
+        self.backend.index_service.trim_idle()
+        self.backend.fingerprint_cache.clear()
 
     def _local_only(self):
         if not self._control_alive() or threading.current_thread() is not self.control.thread:
@@ -281,6 +300,7 @@ class WorkspaceRuntime:
         return {
             "state": "stopped" if self.closed else "live_read",
             "source_mode": "live",
+            **(self.energy.status() if self.energy is not None else {}),
             **writes,
             **self.execution.status(),
             "pending_port_releases": self.ports.pending_confirmations()
@@ -305,6 +325,12 @@ class WorkspaceRuntime:
         }
 
     def handle_control(self, action, parameters):
+        if self.energy is None or action == "status":
+            return self._handle_control(action, parameters)
+        with self.energy.request():
+            return self._handle_control(action, parameters)
+
+    def _handle_control(self, action, parameters):
         if self.closed:
             raise SourceError("WORKSPACE_STOPPED: restart locally")
         if action == "status" and not parameters:
@@ -372,6 +398,8 @@ class WorkspaceRuntime:
 
     def close(self):
         self.closed = True
+        if self.energy is not None:
+            self.energy.close()
         try:
             try:
                 if self.terminal is not None:

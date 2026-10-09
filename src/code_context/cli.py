@@ -7,19 +7,27 @@ import sqlite3
 import sys
 from pathlib import Path
 
-import uvicorn
-
 from code_context import __version__
-from code_context.client import RetryableSyncError, SyncClient, SyncError, read_local_status
 from code_context.execution_defaults import DEFAULT_HTTP_PORT
-from code_context.models import FileChange, SyncBatch
-from code_context.scanner import ScanError, Scanner
-from code_context.server import build_mcp, create_app
-from code_context.storage import MirrorError, MirrorStore
 
 
 def emit(value):
     print(json.dumps(value, ensure_ascii=False, indent=2), flush=True)
+
+
+def _handled_errors():
+    """Keep the CLI's error boundary without importing unused command modules."""
+    errors = [ValueError, OSError, sqlite3.Error]
+    for module_name, names in (
+        ("code_context.client", ("SyncError", "RetryableSyncError")),
+        ("code_context.scanner", ("ScanError",)),
+    ):
+        module = sys.modules.get(module_name)
+        for name in names:
+            error = getattr(module, name, None)
+            if isinstance(error, type) and issubclass(error, BaseException):
+                errors.append(error)
+    return tuple(errors)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -160,6 +168,7 @@ def main(argv: list[str] | None = None) -> int:
             emit(control_request(args.data_dir, args.action, parameters))
             return 0
         if args.command == "workspace":
+            from code_context.server import build_mcp
             from code_context.workspace import WorkspaceRuntime
 
             os.environ.pop("CONTROL_PLANE_API_KEY", None)
@@ -180,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
             emit(upgrade_recovery_identity(args.root, args.legacy_device, args.backup_dir))
             return 0
         if args.command == "desktop-setup":
+            from code_context.client import SyncError
             from code_context.onboarding import configure_desktop
 
             payload = sys.stdin.read(65537)
@@ -237,6 +247,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "local-status":
                 emit(read_local_mirror_status(args.data_dir))
                 return 0
+            from code_context.server import build_mcp
+
             # This server does not need model/control-plane credentials, even when
             # it was started by a tunnel client which inherited them.
             os.environ.pop("CONTROL_PLANE_API_KEY", None)
@@ -255,6 +267,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "live":
             from code_context.live import LiveQueries
+            from code_context.server import build_mcp
             from code_context.source_access import SourceAccess
 
             os.environ.pop("CONTROL_PLANE_API_KEY", None)
@@ -279,10 +292,18 @@ def main(argv: list[str] | None = None) -> int:
             emit((run_demo if args.command == "demo" else run_local_demo)(args.output_dir))
             return 0
         if args.command in {"serve", "mcp"}:
+            from code_context.storage import MirrorStore
+
             store = MirrorStore(args.data_dir / "server" / "mirror.sqlite3")
             if args.command == "mcp":
+                from code_context.server import build_mcp
+
                 build_mcp(store).run(transport="stdio")
             else:
+                import uvicorn
+
+                from code_context.server import create_app
+
                 app = create_app(
                     store,
                     os.getenv("CODE_CONTEXT_READ_TOKEN", ""),
@@ -292,8 +313,12 @@ def main(argv: list[str] | None = None) -> int:
                 uvicorn.run(app, host=args.host, port=args.port, access_log=False)
             return 0
         if args.command == "status":
+            from code_context.client import read_local_status
+
             emit(read_local_status(args.root, args.project, args.server, args.data_dir))
             return 0
+        from code_context.scanner import Scanner
+
         scanner = Scanner(args.root, excluded_roots=(args.data_dir.expanduser().resolve(),))
         if args.command == "scan":
             scanned = scanner.scan()
@@ -309,6 +334,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "snapshot":
             import uuid
+
+            from code_context.models import FileChange, SyncBatch
+            from code_context.storage import MirrorError, MirrorStore
 
             store = MirrorStore(args.data_dir / "server" / "mirror.sqlite3")
             scanned = scanner.scan()
@@ -343,6 +371,8 @@ def main(argv: list[str] | None = None) -> int:
                 result = {"project_id": args.project, "revision": revision}
             emit({**result, "changed_files": len(changes), "skipped": scanned.skipped})
             return 0
+        from code_context.client import SyncClient
+
         client = SyncClient(
             args.root,
             args.project,
@@ -369,7 +399,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("已停止；本地待同步队列已保留。", file=sys.stderr)
         return 130
-    except (ValueError, SyncError, RetryableSyncError, ScanError, OSError, sqlite3.Error) as exc:
+    except _handled_errors() as exc:
         # All user-facing errors deliberately avoid echoing HTTP headers or rejected content.
         print(f"错误：{exc}", file=sys.stderr)
         return 1

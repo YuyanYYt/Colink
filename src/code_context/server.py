@@ -66,7 +66,11 @@ class CodeMCPServer(MCPServer):
                     tool.fn_metadata.arg_model.model_validate(arguments, strict=True)
                 except ValidationError:
                     raise ToolError("INVALID_WRITE_REQUEST: use the declared field types") from None
-        return await super().call_tool(name, arguments, context)
+        energy = getattr(self, "_energy_idle", None)
+        if energy is None or name == "connection_status":
+            return await super().call_tool(name, arguments, context)
+        with energy.request():
+            return await super().call_tool(name, arguments, context)
 
 
 def build_mcp(
@@ -157,6 +161,8 @@ def build_mcp(
             "No command execution or source editing."
         ),
     )
+    runtime = getattr(store, "workspace_runtime", None)
+    mcp._energy_idle = getattr(runtime, "energy", None)
     annotations = ToolAnnotations(
         read_only_hint=True,
         destructive_hint=False,

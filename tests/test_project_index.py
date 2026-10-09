@@ -170,3 +170,51 @@ def test_pool_exclusive_owner_and_close_are_recoverable(tmp_path, pool_factory):
     with pytest.raises(SourceError, match="INDEX_CLOSED"):
         pool.query(backend_for(tmp_path, ("a",)), "a", None, "symbol_search", query="value")
     assert pool_factory(data_dir=pool.root).status("a")["status"] == "not_requested"
+
+
+def test_idle_trim_keeps_database_owner_executor_and_reopens_current_source(tmp_path, pool_factory):
+    backend = backend_for(tmp_path, ("a",))
+    pool = pool_factory()
+    backend.index_service = pool
+    query(backend, "a")
+    path = pool.path_for("a")
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert pool.trim_idle() == 1
+    assert not pool._closed and not pool._entries
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+    with pytest.raises(SourceError, match="INDEX_STORAGE_UNAVAILABLE"):
+        ProjectIndexService(pool.root)
+    (backend.sources["a"].root / "main.py").write_text("def changed(): return 7\n")
+    result = backend.code_query("a", None, "symbol_search", query="changed", exact=True)
+    assert result["total"] == 1
+    assert pool.status("a")["stats"]["parsed_files"] == 1
+
+
+def test_idle_trim_never_closes_leased_or_producing_index(tmp_path, pool_factory, monkeypatch):
+    backend = backend_for(tmp_path, ("a",))
+    pool = pool_factory(wait_seconds=0.01)
+    backend.index_service = pool
+    started, release, completed = Event(), Event(), Event()
+    original = LiveIndexService._extract
+
+    def extract(self, *args):
+        started.set()
+        assert release.wait(5)
+        return original(self, *args)
+
+    monkeypatch.setattr(LiveIndexService, "_extract", extract)
+    pool.on_activity = completed.set
+    try:
+        result = backend.code_query("a", None, "symbol_search", query="value")
+        assert result["index_not_ready"] and started.wait(3)
+        completed.clear()
+        assert pool.active_count() > 0 and pool.trim_idle() == 0
+        release.set()
+        assert completed.wait(3)
+        query(backend, "a")
+        with pool._lease("a"):
+            assert pool.trim_idle() == 0
+        assert pool.trim_idle() == 1
+        assert pool.path_for("a").is_file()
+    finally:
+        release.set()
