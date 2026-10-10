@@ -246,6 +246,79 @@ print("Native status frame checks passed")
     assert "Native status frame checks passed" in result.stdout
 
 
+@pytest.mark.skipif(shutil.which("xcrun") is None, reason="native pipe reads require macOS")
+def test_native_status_stream_delivers_small_frames_before_process_exit(tmp_path):
+    runtime = (WORKSPACE / "macos/CodeConnect/Runtime.swift").read_text()
+    stream = (
+        "struct DesktopStatusDecoder"
+        + runtime.split("struct DesktopStatusDecoder", 1)[1].split("enum CodeAccessMode", 1)[0]
+    )
+    main = tmp_path / "main.swift"
+    main.write_text(
+        "import Foundation\nimport CoreFoundation\nimport Darwin\n"
+        + stream
+        + r"""
+final class Receipts: @unchecked Sendable {
+    let lock = NSLock()
+    var frames: [Data] = []
+    let delivered = DispatchSemaphore(value: 0)
+    func append(_ frame: Data) {
+        lock.lock(); frames.append(frame); lock.unlock()
+        delivered.signal()
+    }
+}
+let process = Process()
+process.executableURL = URL(fileURLWithPath: "/bin/cat")
+let input = Pipe(), output = Pipe()
+process.standardInput = input
+process.standardOutput = output
+process.standardError = FileHandle.nullDevice
+let receipts = Receipts()
+private let reader = DesktopStatusStream(output.fileHandleForReading,
+    onFrame: { receipts.append($0) }, onFailure: {})
+try process.run()
+let first = Data(#"{"type":"status","epoch":1,"seq":1,"status":{"ready":false}}"#.utf8)
+let second = Data(#"{"type":"status","epoch":1,"seq":2,"status":{"ready":true}}"#.utf8)
+try input.fileHandleForWriting.write(contentsOf: first.prefix(10))
+try input.fileHandleForWriting.write(contentsOf: first.dropFirst(10) + Data([10]))
+let firstBeforeEOF = receipts.delivered.wait(timeout: .now() + 2) == .success
+let runningAfterFirst = process.isRunning
+try input.fileHandleForWriting.write(contentsOf: second + Data([10]))
+let secondBeforeEOF = receipts.delivered.wait(timeout: .now() + 2) == .success
+let runningAfterSecond = process.isRunning
+try input.fileHandleForWriting.close()
+process.waitUntilExit()
+reader.close()
+assert(firstBeforeEOF && secondBeforeEOF, "status waited for a full buffer or EOF")
+assert(runningAfterFirst && runningAfterSecond)
+receipts.lock.lock()
+assert(receipts.frames == [first, second])
+receipts.lock.unlock()
+assert(process.terminationStatus == 0)
+print("Small live status frames delivered before EOF")
+""",
+        encoding="utf-8",
+    )
+    binary = tmp_path / "live-status-pipe"
+    subprocess.run(
+        [
+            "xcrun",
+            "swiftc",
+            "-module-cache-path",
+            str(WORKSPACE / "swift-module-cache"),
+            str(main),
+            "-o",
+            str(binary),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert "Small live status frames delivered before EOF" in result.stdout
+
+
 @pytest.mark.skipif(
     shutil.which("xcrun") is None, reason="native Swift presentation requires macOS"
 )

@@ -3,6 +3,7 @@ import Foundation
 import SwiftUI
 import Security
 import CryptoKit
+import Darwin
 
 struct RuntimeConfiguration {
     let workspace: String
@@ -296,8 +297,19 @@ private final class DesktopStatusStream: @unchecked Sendable {
             self.lock.lock()
             guard !self.closed else { self.lock.unlock(); return }
             do {
-                guard let chunk = try readable.read(upToCount: DesktopStatusDecoder.maximumFrameBytes),
-                      !chunk.isEmpty else { throw DesktopStatusDecoder.FrameError.invalid }
+                // Foundation read(upToCount:) can fill the requested length
+                // across pipe writes. A small status must be delivered while
+                // the supervisor is still running, without waiting for EOF.
+                var chunk = Data(count: DesktopStatusDecoder.maximumFrameBytes)
+                let count = chunk.withUnsafeMutableBytes {
+                    Darwin.read(readable.fileDescriptor, $0.baseAddress, $0.count)
+                }
+                if count < 0 && [EINTR, EAGAIN, EWOULDBLOCK].contains(errno) {
+                    self.lock.unlock()
+                    return
+                }
+                guard count > 0 else { throw DesktopStatusDecoder.FrameError.invalid }
+                chunk.count = count
                 let frames = try self.decoder.append(chunk)
                 self.lock.unlock()
                 for frame in frames { onFrame(frame) }
