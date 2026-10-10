@@ -18,8 +18,9 @@
 
 **公开预发行：0.5.0 Beta 5（`0.5.0b5`，build 22）** · macOS 14+ · Apple Silicon · [MIT](LICENSE)
 
-本机维护版 M1：`0.5.0b6 / build 26`，新增 Live 联合结构查询并优化定向检索；
-见 [M1 接口与验证边界](docs/CODE_INTELLIGENCE_M1.md)。本机升级未发布到 GitHub。
+本机维护版 M2：`0.5.0b7 / build 27`，包含 M1 联合结构查询及按请求 Python 数据流；
+见 [M1 接口](docs/CODE_INTELLIGENCE_M1.md)与 [M2 边界](docs/CODE_INTELLIGENCE_M2.md)。
+本机升级未发布到 GitHub。
 
 本版增加本机开发终端、固定数据库只读工具和局部代码索引更新。原生终端按当前
 macOS 用户权限运行；可选隔离执行器目前只在已验证的 Darwin 27 上开放。

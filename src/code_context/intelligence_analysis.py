@@ -562,9 +562,13 @@ def bound_analysis_result(result: dict, max_chars: int) -> dict:
             removed += len(json.dumps(values.pop(), ensure_ascii=False)) + 2
         _reason(result, "max_chars")
         if key in {"symbols", "candidates"}:
-            result["has_more"] = result["offset"] + len(values) < result["total"]
-            result["next_offset"] = result["offset"] + len(values) if result["has_more"] else None
-            if not values and result["has_more"]:
+            container["has_more"] = container["offset"] + len(values) < container["total"]
+            container["next_offset"] = (
+                container["offset"] + len(values)
+                if container["has_more"] and not container.get("value_selection_candidates")
+                else None
+            )
+            if not values and container["has_more"]:
                 raise ValueError("one symbol exceeds response budget; choose a larger max_chars")
         if isinstance(result.get("symbols"), list) and isinstance(result.get("ownership"), list):
             visible = {s["symbol_id"] for s in result["symbols"]}

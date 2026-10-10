@@ -766,7 +766,29 @@ class LiveIndexService:
                     bound_analysis_result,
                 )
 
-                view = analyze_structure(facts, project_id, 1, max_chars=max_chars, **parameters)
+                if parameters.get("mode") in {
+                    "data_origin",
+                    "data_impact",
+                    "data_path",
+                    "combined",
+                }:
+                    from code_context.live_dataflow import analyze_live_dataflow
+
+                    view = analyze_live_dataflow(
+                        facts,
+                        project_id,
+                        1,
+                        source=source,
+                        observe=lambda path, sha: self._observe(
+                            backend, source, project_id, handle, path, sha
+                        ),
+                        max_chars=max_chars,
+                        **parameters,
+                    )
+                else:
+                    view = analyze_structure(
+                        facts, project_id, 1, max_chars=max_chars, **parameters
+                    )
                 if base["index_partial"] and view.get("analysis_status") == "ready":
                     view["analysis_status"] = "partial"
                 result = bound_analysis_result({**view, **base}, max_chars)

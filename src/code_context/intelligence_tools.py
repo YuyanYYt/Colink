@@ -11,6 +11,7 @@ from code_context.intelligence_analysis import (
     bound_analysis_result,
 )
 from code_context.intelligence_queries import bound_result
+from code_context.live_dataflow import FlowSelector
 from code_context.storage import MirrorError
 
 CODE_TOOL_NAMES = frozenset(
@@ -35,10 +36,10 @@ def register_analysis_tool(mcp, store, authorize, display_name, annotations):
     @mcp.tool(annotations=annotations, structured_output=True)
     def analyze_code(
         project_id: str,
-        mode: StructureMode,
-        selector: AnalysisSelector,
+        mode: StructureMode | Literal["data_origin", "data_impact", "data_path", "combined"],
+        selector: AnalysisSelector | FlowSelector,
         snapshot: str | None = None,
-        target: AnalysisSelector | None = None,
+        target: AnalysisSelector | FlowSelector | None = None,
         include: list[StructureInclude] | None = None,
         direction: Literal["outgoing", "incoming", "both"] = "both",
         max_depth: int = 1,
@@ -56,6 +57,12 @@ def register_analysis_tool(mcp, store, authorize, display_name, annotations):
         call_path requires a target and follows directed static calls, maximum five hops.
         Absence of a static path is not proof of absence of runtime behavior. Budgeted results
         expose partial coverage and continuation, never execute source or change permissions.
+        Python value modes add value={kind:parameter,name} or {kind:return,line?,column?}
+        or {kind:occurrence,line,column}; columns use one-based UTF-8 byte offsets.
+        data_path needs a target value. combined returns typed structure and may-flow edges.
+        Values and contexts are local to one request; select saved source positions to continue.
+        Loops, exceptions, recursion, dynamic calls and unknown side effects report partial
+        coverage. Analysis never imports the project and is not a runtime execution trace.
         """
         authorize(project_id)
         try:
