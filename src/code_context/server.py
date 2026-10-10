@@ -23,7 +23,12 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from code_context import __version__
 from code_context.execution_tools import EXECUTION_TOOL_NAMES, register_execution_tools
-from code_context.intelligence_tools import CODE_TOOL_NAMES, register_code_tools
+from code_context.intelligence_tools import (
+    ADVANCED_CODE_TOOL_NAMES,
+    CODE_TOOL_NAMES,
+    register_analysis_tool,
+    register_code_tools,
+)
 from code_context.models import FileChange, SyncBatch, validate_project
 from code_context.policy import (
     EXCLUDED_DIRS,
@@ -45,6 +50,7 @@ READ_TOOL_NAMES = CODE_TOOL_NAMES | {
     "search_code",
     "get_diff",
 }
+LIVE_READ_TOOL_NAMES = READ_TOOL_NAMES | ADVANCED_CODE_TOOL_NAMES
 
 
 class CodeMCPServer(MCPServer):
@@ -56,16 +62,26 @@ class CodeMCPServer(MCPServer):
                 "CoLink tool definitions changed; refresh this connection's tools "
                 "and start a fresh analysis with repo_overview"
             )
-        if name in WRITE_TOOL_NAMES | EXECUTION_TOOL_NAMES:
+        if name in WRITE_TOOL_NAMES | EXECUTION_TOOL_NAMES | ADVANCED_CODE_TOOL_NAMES:
             tool = self._tool_manager.get_tool(name)
             if tool is not None:
                 allowed = tool.parameters.get("properties", {})
                 if set(arguments) - set(allowed):
-                    raise ToolError("INVALID_WRITE_REQUEST: unknown fields are not accepted")
+                    code = (
+                        "INVALID_ANALYSIS_REQUEST"
+                        if name in ADVANCED_CODE_TOOL_NAMES
+                        else "INVALID_WRITE_REQUEST"
+                    )
+                    raise ToolError(f"{code}: unknown fields are not accepted")
                 try:
                     tool.fn_metadata.arg_model.model_validate(arguments, strict=True)
                 except ValidationError:
-                    raise ToolError("INVALID_WRITE_REQUEST: use the declared field types") from None
+                    code = (
+                        "INVALID_ANALYSIS_REQUEST"
+                        if name in ADVANCED_CODE_TOOL_NAMES
+                        else "INVALID_WRITE_REQUEST"
+                    )
+                    raise ToolError(f"{code}: use the declared field types") from None
         energy = getattr(self, "_energy_idle", None)
         if energy is None or name == "connection_status":
             return await super().call_tool(name, arguments, context)
@@ -408,6 +424,8 @@ def build_mcp(
             raise ToolError(str(exc)) from None
 
     register_code_tools(mcp, store, authorize, display_name, annotations)
+    if live_mode:
+        register_analysis_tool(mcp, store, authorize, display_name, annotations)
     if live_mode and getattr(store, "write_coordinator", None) is not None:
         register_write_tools(mcp, store.write_coordinator, authorize)
     if live_mode and getattr(store, "workspace_runtime", None) is not None:

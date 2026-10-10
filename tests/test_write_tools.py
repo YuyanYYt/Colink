@@ -5,7 +5,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from code_context.live import LiveQueries
 from code_context.recovery_store import RecoveryStore
-from code_context.server import READ_TOOL_NAMES, build_mcp
+from code_context.server import LIVE_READ_TOOL_NAMES, READ_TOOL_NAMES, build_mcp
 from code_context.source_access import SourceAccess
 from code_context.write_coordinator import WriteCoordinator
 from code_context.write_tools import WRITE_TOOL_NAMES
@@ -36,9 +36,9 @@ def test_original_fifteen_and_seven_task_tools_without_undo_or_local_grant(parts
 
     async def inspect():
         tools = {t.name: t for t in await mcp.list_tools()}
-        assert set(tools) == READ_TOOL_NAMES | WRITE_TOOL_NAMES
-        assert len(READ_TOOL_NAMES) == 15 and len(tools) == 24
-        assert all(tools[n].annotations.read_only_hint for n in READ_TOOL_NAMES)
+        assert set(tools) == LIVE_READ_TOOL_NAMES | WRITE_TOOL_NAMES
+        assert len(READ_TOOL_NAMES) == 15 and len(tools) == 25
+        assert all(tools[n].annotations.read_only_hint for n in LIVE_READ_TOOL_NAMES)
         assert tools["write_task_status"].annotations.read_only_hint
         assert tools["move_path_status"].annotations.read_only_hint
         for name in WRITE_TOOL_NAMES - {"write_task_status", "move_path_status"}:

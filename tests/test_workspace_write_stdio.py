@@ -10,7 +10,7 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 
 from code_context.execution_tools import EXECUTION_TOOL_NAMES
 from code_context.local_control import control_request
-from code_context.server import READ_TOOL_NAMES
+from code_context.server import LIVE_READ_TOOL_NAMES
 from code_context.workspace import initialize_workspace
 from code_context.write_tools import WRITE_TOOL_NAMES
 
@@ -46,7 +46,7 @@ def test_workspace_stdio_default_off_three_round_edits_diff_without_undo():
                 assert "user-saved Git checkpoints" in initialized.instructions
                 assert "Rollback the whole task" not in initialized.instructions
                 tools = {tool.name: tool for tool in (await session.list_tools()).tools}
-                assert set(tools) == READ_TOOL_NAMES | WRITE_TOOL_NAMES | EXECUTION_TOOL_NAMES
+                assert set(tools) == LIVE_READ_TOOL_NAMES | WRITE_TOOL_NAMES | EXECUTION_TOOL_NAMES
 
                 async def call(name, **arguments):
                     result = await session.call_tool(name, {"project_id": pid, **arguments})

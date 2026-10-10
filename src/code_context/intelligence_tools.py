@@ -4,6 +4,12 @@ from typing import Any, Literal
 
 from mcp.server.mcpserver.exceptions import ToolError
 
+from code_context.intelligence_analysis import (
+    AnalysisSelector,
+    StructureInclude,
+    StructureMode,
+    bound_analysis_result,
+)
 from code_context.intelligence_queries import bound_result
 from code_context.storage import MirrorError
 
@@ -20,6 +26,61 @@ CODE_TOOL_NAMES = frozenset(
         "get_impact_analysis",
     }
 )
+ADVANCED_CODE_TOOL_NAMES = frozenset({"analyze_code"})
+
+
+def register_analysis_tool(mcp, store, authorize, display_name, annotations):
+    """Register only against Live sources; legacy snapshot tools remain unchanged."""
+
+    @mcp.tool(annotations=annotations, structured_output=True)
+    def analyze_code(
+        project_id: str,
+        mode: StructureMode,
+        selector: AnalysisSelector,
+        snapshot: str | None = None,
+        target: AnalysisSelector | None = None,
+        include: list[StructureInclude] | None = None,
+        direction: Literal["outgoing", "incoming", "both"] = "both",
+        max_depth: int = 1,
+        max_nodes: int = 50,
+        max_edges: int = 100,
+        max_chars: int = 12_000,
+        max_ms: int = 3000,
+        offset: int = 0,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """Analyze one saved file or exact symbol in a single validated Live context.
+        File modes select {path}; symbol modes select {symbol_id} or {path, qualname}.
+        Repeated definitions return candidates rather than a guessed symbol. Context views
+        optionally include ownership, calls and dependencies; symbol pages use next_offset.
+        call_path requires a target and follows directed static calls, maximum five hops.
+        Absence of a static path is not proof of absence of runtime behavior. Budgeted results
+        expose partial coverage and continuation, never execute source or change permissions.
+        """
+        authorize(project_id)
+        try:
+            result = store.code_query(
+                project_id,
+                snapshot,
+                "analyze_code",
+                mode=mode,
+                selector=selector.model_dump(exclude_none=True),
+                target=target.model_dump(exclude_none=True) if target is not None else None,
+                include=include,
+                direction=direction,
+                max_depth=max_depth,
+                max_nodes=max_nodes,
+                max_edges=max_edges,
+                max_chars=max_chars,
+                max_ms=max_ms,
+                offset=offset,
+                limit=limit,
+            )
+            return bound_analysis_result(
+                {**result, "display_name": display_name(project_id)}, max_chars
+            )
+        except (MirrorError, ValueError) as exc:
+            raise ToolError(str(exc)) from None
 
 
 def register_code_tools(mcp, store, authorize, display_name, annotations):

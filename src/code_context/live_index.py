@@ -41,6 +41,7 @@ from code_context.intelligence_models import PARSER_VERSION, ParsedFile
 from code_context.intelligence_queries import QUERIES, _symbol, bound_result
 from code_context.intelligence_resolver import Resolver
 from code_context.intelligence_roots import PythonSourceRoots, read_root_configuration
+from code_context.live_analysis import AnalysisFacts
 from code_context.models import validate_project
 from code_context.policy import MAX_FILES
 from code_context.read_context import ContextError
@@ -663,10 +664,16 @@ class LiveIndexService:
             )
             operation = "symbol_graph"
         operation = aliases.get(operation, operation)
-        if operation not in QUERIES:
+        advanced = operation == "analyze_code"
+        if operation not in QUERIES and not advanced:
             raise SourceError("INVALID_INDEX_OPERATION: unknown structure query")
         if type(max_chars) is not int or not 1000 <= max_chars <= 50_000:
             raise SourceError("INVALID_RESPONSE_BUDGET: max_chars must be between 1000 and 50000")
+        if advanced and (
+            type(parameters.get("max_ms", 3000)) is not int
+            or not 100 <= parameters.get("max_ms", 3000) <= 10_000
+        ):
+            raise SourceError("INVALID_ANALYSIS_BUDGET: max_ms must be between 100 and 10000")
         try:
             source = self._source(backend, project_id)
             # LiveQueries already validates the entry context. Direct callers
@@ -735,7 +742,16 @@ class LiveIndexService:
                     "source_mode": "live",
                     "index_partial": stats["partial"],
                 }
-                if operation == "read_symbol":
+                if advanced:
+                    facts = AnalysisFacts(
+                        self,
+                        project_id,
+                        source.source_id,
+                        manifest,
+                        self._states.get(project_id, {}).get("epoch", 0),
+                        parameters.get("max_ms", 3000),
+                    )
+                elif operation == "read_symbol":
                     result = self._read_symbol(
                         backend, source, project_id, handle, base, max_chars, **parameters
                     )
@@ -744,10 +760,22 @@ class LiveIndexService:
                         {**QUERIES[operation](self._db, project_id, 1, **parameters), **base},
                         max_chars,
                     )
+            if advanced:
+                from code_context.intelligence_analysis import (
+                    analyze_structure,
+                    bound_analysis_result,
+                )
+
+                view = analyze_structure(facts, project_id, 1, max_chars=max_chars, **parameters)
+                if base["index_partial"] and view.get("analysis_status") == "ready":
+                    view["analysis_status"] = "partial"
+                result = bound_analysis_result({**view, **base}, max_chars)
             self._guard(backend, source, project_id, handle, manifest)
             with self._lock:
                 if self._closed or self._states.get(project_id, {}).get("status") == "dirty":
                     raise SourceError("LIVE_INDEX_CHANGED: index invalidated during query")
+                if advanced:
+                    facts.validate()
                 self._db.execute(
                     "UPDATE li_projects SET last_used=? WHERE project_id=?",
                     (time.time(), project_id),

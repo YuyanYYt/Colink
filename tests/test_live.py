@@ -146,7 +146,8 @@ def test_live_mcp_keeps_read_annotations_and_explains_contexts(backend):
             backend, project_names={"a": "A", "b": "B"}, status_provider=backend.mcp_status
         )
         tools = await mcp.list_tools()
-        assert len(tools) == 15
+        assert len(tools) == 16
+        assert "analyze_code" in {tool.name for tool in tools}
         assert all(tool.annotations.read_only_hint for tool in tools)
         overview = next(tool for tool in tools if tool.name == "repo_overview")
         assert "not an immutable historical" in overview.description

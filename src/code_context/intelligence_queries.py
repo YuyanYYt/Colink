@@ -1,7 +1,9 @@
 """Bounded SELECT-only queries over a pinned code-intelligence snapshot."""
 
 import json
+import sqlite3
 from collections import defaultdict, deque
+from itertools import islice
 
 from code_context.fact_payloads import FactCacheError, decode_fact
 from code_context.intelligence_models import CLASS_KINDS, Relation, module_id
@@ -230,6 +232,152 @@ def find_references(
     }
 
 
+def _query_chunks(db, values, *, reserved: int = 2, width: int = 1):
+    """Keep queries within SQLite's variable limit, including older mirror runtimes."""
+    getlimit = getattr(db, "getlimit", None)
+    limit = getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) if getlimit else 999
+    size = min(256, (limit - reserved) // width)
+    if size < 1:
+        raise ValueError("SQLite variable limit is too small for an intelligence query")
+    for start in range(0, len(values), size):
+        yield values[start : start + size]
+
+
+def _symbol_payloads(db, project_id: str, revision: int, identifiers: list[str]) -> dict:
+    found = {}
+    for chunk in _query_chunks(db, identifiers):
+        marks = ",".join("?" for _ in chunk)
+        rows = db.execute(
+            "SELECT symbol_id, data FROM ci_symbols WHERE project_id=? AND revision=? "
+            f"AND symbol_id IN ({marks})",
+            [project_id, revision, *chunk],
+        )
+        found.update((row["symbol_id"], row["data"]) for row in rows)
+    return found
+
+
+def _symbol_frontier(db, project_id, revision, frontier, kinds, direction, row_limit, *, live):
+    """Read each BFS layer with an independent row limit for every frontier node.
+
+    Both directions use their existing endpoint indexes. A self edge occurs in
+    only the outgoing branch, while separate call sites remain separate rows.
+    Rowid preserves the existing insertion order when source/line/kind tie.
+    """
+    result = defaultdict(list)
+    kind_marks = ",".join("?" for _ in kinds)
+    if not live:
+        # The immutable mirror predates partial endpoint indexes. Its broad
+        # OR scan orders equal source/line/kind keys by the chosen index, which
+        # affects historical pagination/budgets. Keep that read unchanged.
+        columns = []
+        if direction in {"outgoing", "both"}:
+            columns.append("source_symbol_id=?")
+        if direction in {"incoming", "both"}:
+            columns.append("target_symbol_id=?")
+        for identifier in frontier:
+            result[identifier] = db.execute(
+                "SELECT data,source_symbol_id,target_symbol_id FROM ci_relations "
+                f"WHERE project_id=? AND revision=? AND kind IN ({kind_marks}) "
+                f"AND ({' OR '.join(columns)}) ORDER BY source_path,line,kind LIMIT ?",
+                [project_id, revision, *kinds, *([identifier] * len(columns)), row_limit],
+            ).fetchall()
+        return result
+    # Limit each indexed direction before ranking locations/rowids. Ranking
+    # every high-fanout match would still allocate a large temporary graph and
+    # sort rows which cannot fit in an endpoint's result. The first K rows of
+    # a merged order must occur in the first K rows of either direction.
+    columns = "r.source_path, r.line, r.kind"
+    reserved = (3 + len(kinds)) * (2 if direction == "both" else 1) + 1
+    for chunk in _query_chunks(db, frontier, reserved=reserved, width=2):
+        if len(chunk) == 1 and direction != "both":
+            column, index = (
+                ("source_symbol_id", "ci_relation_source")
+                if direction == "outgoing"
+                else ("target_symbol_id", "ci_relation_target")
+            )
+            result[chunk[0]] = db.execute(
+                "SELECT data,source_symbol_id,target_symbol_id FROM ci_relations "
+                f"INDEXED BY {index} WHERE project_id=? AND revision=? "
+                f"AND kind IN ({kind_marks}) AND {column}=? AND {column} IS NOT NULL "
+                "ORDER BY source_path,line,kind,rowid LIMIT ?",
+                [project_id, revision, *kinds, chunk[0], row_limit],
+            ).fetchall()
+            continue
+        values = ",".join("(?,?)" for _ in chunk)
+        args = [item for ordinal, identifier in enumerate(chunk) for item in (identifier, ordinal)]
+        branches = []
+        single = len(chunk) == 1
+        for column, index in (
+            ("source_symbol_id", "ci_relation_source"),
+            ("target_symbol_id", "ci_relation_target"),
+        ):
+            if column == "source_symbol_id" and direction == "incoming":
+                continue
+            if column == "target_symbol_id" and direction == "outgoing":
+                continue
+            self_filter = (
+                " AND (candidate.source_symbol_id IS NULL "
+                "OR candidate.source_symbol_id<>f.identifier)"
+                if direction == "both" and column == "target_symbol_id"
+                else ""
+            )
+            candidate = (
+                f"FROM frontier f CROSS JOIN ci_relations candidate INDEXED BY {index} "
+                f"WHERE candidate.{column}=f.identifier "
+                "AND candidate.project_id=? AND candidate.revision=? "
+                f"AND candidate.{column} IS NOT NULL "
+                f"AND candidate.kind IN ({kind_marks}){self_filter} "
+                "ORDER BY candidate.source_path,candidate.line,candidate.kind,candidate.rowid "
+                "LIMIT ?"
+            )
+            if single:
+                # A single endpoint already has its own limit. Avoid ranking
+                # and refetching its bounded rows, particularly for a large
+                # number of calls from one method in a small source project.
+                branches.append(
+                    "SELECT * FROM (SELECT f.identifier,candidate.data,"
+                    "candidate.source_symbol_id,candidate.target_symbol_id,"
+                    "candidate.source_path,candidate.line,candidate.kind,"
+                    f"candidate.rowid AS fact_order {candidate})"
+                )
+            else:
+                # Candidate locations remain outside the outer query's row
+                # scope; correlate their indexed reads with this frontier.
+                candidate = candidate.replace("FROM frontier f CROSS JOIN ", "FROM ")
+                branches.append(
+                    f"SELECT f.identifier, f.ordinal, r.rowid AS fact_order, {columns} "
+                    "FROM frontier f CROSS JOIN ci_relations r WHERE r.rowid IN "
+                    f"(SELECT candidate.rowid {candidate})"
+                )
+            args.extend([project_id, revision, *kinds, row_limit])
+        # A frontier-wide LIMIT would silently omit later nodes' neighbors.
+        if single and len(branches) == 1:
+            sql = f"WITH frontier(identifier,ordinal) AS (VALUES {values}) {branches[0]}"
+        elif single:
+            sql = (
+                f"WITH frontier(identifier,ordinal) AS (VALUES {values}) "
+                "SELECT identifier,data,source_symbol_id,target_symbol_id "
+                f"FROM ({' UNION ALL '.join(branches)}) "
+                "ORDER BY source_path,line,kind,fact_order LIMIT ?"
+            )
+        else:
+            sql = (
+                f"WITH frontier(identifier,ordinal) AS (VALUES {values}), "
+                f"matches AS ({' UNION ALL '.join(branches)}), ranked AS "
+                "(SELECT *, ROW_NUMBER() OVER (PARTITION BY ordinal "
+                "ORDER BY source_path,line,kind,fact_order) AS position FROM matches) "
+                "SELECT ranked.identifier,r.data,r.source_symbol_id,r.target_symbol_id "
+                "FROM ranked CROSS JOIN ci_relations r "
+                "WHERE ranked.position<=? AND r.rowid=ranked.fact_order "
+                "ORDER BY ranked.ordinal,ranked.position"
+            )
+        if not single or len(branches) > 1:
+            args.append(row_limit)
+        for row in db.execute(sql, args):
+            result[row["identifier"]].append(row)
+    return result
+
+
 def symbol_graph(
     db,
     project_id: str,
@@ -254,49 +402,82 @@ def symbol_graph(
         if graph == "call"
         else {"INHERITANCE", "IMPLEMENTS", "CONTAINS", "TYPE_REFERENCE", "INSTANTIATION"}
     )
-    placeholders = ",".join("?" for _ in kinds)
-    queue, nodes, edges, seen = deque([(symbol_id, 0)]), {symbol_id: root}, [], set()
+    frontier, nodes, edges, seen = [symbol_id], {symbol_id: root}, [], set()
+    mode = getattr(db, "source_mode", None)
+    live = (
+        mode == "live"
+        if mode is not None
+        else db.execute(
+            "SELECT 1 FROM pragma_table_info('ci_relations') WHERE name='source_id'"
+        ).fetchone()
+        is not None
+    )
     truncated = False
-    while queue:
-        current, level = queue.popleft()
-        if level >= depth:
-            continue
-        clauses = []
-        if direction in {"outgoing", "both"}:
-            clauses.append("source_symbol_id=?")
-        if direction in {"incoming", "both"}:
-            clauses.append("target_symbol_id=?")
-        rows = db.execute(
-            "SELECT data FROM ci_relations WHERE project_id=? AND revision=? "
-            f"AND kind IN ({placeholders}) AND ({' OR '.join(clauses)}) "
-            "ORDER BY source_path, line, kind LIMIT ?",
-            [project_id, revision, *sorted(kinds), *([current] * len(clauses)), max_edges + 1],
-        ).fetchall()
-        for row in rows:
-            relation = decode_relation(row["data"])
-            key = row["data"]
-            if key in seen:
-                continue
-            seen.add(key)
-            if len(edges) >= max_edges:
-                truncated = True
+    for _level in range(depth):
+        if not frontier:
+            break
+        next_frontier = []
+        # Bound a high-fanout window to at most 8 * 2 * (max_edges + 1)
+        # candidate locations, and stop before querying later full-budget groups.
+        for start in range(0, len(frontier), 8):
+            group = frontier[start : start + 8]
+            adjacency = _symbol_frontier(
+                db, project_id, revision, group, sorted(kinds), direction, max_edges + 1, live=live
+            )
+            # Load small groups of endpoint payloads; do not deserialize a
+            # whole project or decode relations past a node's limit.
+            entries = ((current, row) for current in group for row in adjacency[current])
+            stopped = set()
+            while block := list(islice(entries, 128)):
+                identifiers = {
+                    row[column]
+                    for current, row in block
+                    for column in ("source_symbol_id", "target_symbol_id")
+                    if row[column] is not None
+                    and row[column] not in nodes
+                    and current not in stopped
+                }
+                payloads = _symbol_payloads(db, project_id, revision, sorted(identifiers))
+                for current, row in block:
+                    if current in stopped:
+                        continue
+                    relation = decode_relation(row["data"])
+                    key = row["data"]
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    if len(edges) >= max_edges:
+                        truncated = True
+                        stopped.add(current)
+                        break
+                    endpoints = {relation["source_symbol_id"], relation["target_symbol_id"]} - {
+                        None
+                    }
+                    added = []
+                    for endpoint in sorted(endpoints - nodes.keys()):
+                        # Legacy payloads remain authoritative if a scalar
+                        # column disagrees; source guards handle corrupt caches.
+                        if endpoint not in identifiers and endpoint not in payloads:
+                            payloads.update(_symbol_payloads(db, project_id, revision, [endpoint]))
+                        if endpoint in payloads:
+                            added.append((endpoint, json.loads(payloads[endpoint])))
+                    if len(nodes) + len(added) > max_nodes:
+                        truncated = True
+                        continue
+                    for endpoint, item in added:
+                        nodes[endpoint] = item
+                        next_frontier.append(endpoint)
+                    edges.append(relation)
+                if len(edges) >= max_edges and truncated:
+                    break
+            # Once the edge budget is exhausted and its truncation is known,
+            # no later node can change the result. Source pre/post guards still
+            # validate every participating file outside this query function.
+            if len(edges) >= max_edges and truncated:
                 break
-            endpoints = {relation["source_symbol_id"], relation["target_symbol_id"]} - {None}
-            added = []
-            for endpoint in sorted(endpoints - nodes.keys()):
-                found = db.execute(
-                    "SELECT data FROM ci_symbols WHERE project_id=? AND revision=? AND symbol_id=?",
-                    (project_id, revision, endpoint),
-                ).fetchone()
-                if found:
-                    added.append((endpoint, json.loads(found["data"])))
-            if len(nodes) + len(added) > max_nodes:
-                truncated = True
-                continue
-            for endpoint, item in added:
-                nodes[endpoint] = item
-                queue.append((endpoint, level + 1))
-            edges.append(relation)
+        frontier = next_frontier
+        if len(edges) >= max_edges and truncated:
+            break
     return {
         "graph": graph,
         "root": symbol_id,
@@ -309,15 +490,9 @@ def symbol_graph(
     }
 
 
-def _file_edges(db, project_id: str, revision: int) -> dict[tuple[str, str], dict]:
+def _aggregate_file_edges(rows) -> dict[tuple[str, str], dict]:
     edges = {}
-    for row in db.execute(
-        "SELECT data FROM ci_relations WHERE project_id=? AND revision=? "
-        "AND target_path IS NOT NULL AND (source_path<>target_path OR kind='IMPORT') "
-        "AND resolution='resolved' "
-        "AND kind<>'CONTAINS' ORDER BY source_path, target_path, line",
-        (project_id, revision),
-    ):
+    for row in rows:
         relation = decode_relation(row["data"])
         key = relation["source_path"], relation["target_path"]
         if key not in edges:
@@ -347,6 +522,61 @@ def _file_edges(db, project_id: str, revision: int) -> dict[tuple[str, str], dic
     return edges
 
 
+def _file_edges(db, project_id: str, revision: int) -> dict[tuple[str, str], dict]:
+    """The full graph is still required by architecture/SCC queries."""
+    return _aggregate_file_edges(
+        db.execute(
+            "SELECT data FROM ci_relations WHERE project_id=? AND revision=? "
+            "AND target_path IS NOT NULL AND (source_path<>target_path OR kind='IMPORT') "
+            "AND resolution='resolved' "
+            "AND kind<>'CONTAINS' ORDER BY source_path, target_path, line",
+            (project_id, revision),
+        )
+    )
+
+
+def _file_frontier(db, project_id, revision, frontier, direction):
+    """Aggregate only complete file pairs incident to this bounded BFS layer."""
+    result = {}
+    branches_count = 2 if direction == "both" else 1
+    for chunk in _query_chunks(db, frontier, reserved=2 * branches_count):
+        values = ",".join("(?)" for _ in chunk)
+        args = list(chunk)
+        branches = []
+        for column in ("source_path", "target_path"):
+            if column == "source_path" and direction == "incoming":
+                continue
+            if column == "target_path" and direction == "outgoing":
+                continue
+            # Only the source-path index is guaranteed in the legacy schema.
+            # Incoming reads can use the optional target-path index when present.
+            index = " INDEXED BY ci_relation_file" if column == "source_path" else ""
+            duplicate_filter = (
+                " AND NOT EXISTS (SELECT 1 FROM frontier s WHERE s.path=r.source_path)"
+                if direction == "both" and column == "target_path"
+                else ""
+            )
+            branches.append(
+                "SELECT r.data, r.source_path, r.target_path, r.line, r.rowid AS fact_order "
+                f"FROM ci_relations r{index} "
+                f"WHERE r.{column} IN (SELECT path FROM frontier) "
+                "AND r.project_id=? AND r.revision=? AND r.target_path IS NOT NULL "
+                "AND (r.source_path<>r.target_path OR r.kind='IMPORT') "
+                f"AND r.resolution='resolved' AND r.kind<>'CONTAINS'{duplicate_filter}"
+            )
+            args.extend([project_id, revision])
+        rows = db.execute(
+            f"WITH frontier(path) AS (VALUES {values}) "
+            f"SELECT data FROM ({' UNION ALL '.join(branches)}) "
+            "ORDER BY source_path,target_path,line,fact_order",
+            args,
+        )
+        # A pair encountered in two chunks is complete in either chunk, so
+        # overwrite rather than add its evidence counts twice.
+        result.update(_aggregate_file_edges(rows))
+    return {key: result[key] for key in sorted(result)}
+
+
 def file_dependencies(
     db,
     project_id: str,
@@ -372,37 +602,39 @@ def file_dependencies(
         is None
     ):
         raise ValueError("file is not in this code context")
-    all_edges = _file_edges(db, project_id, revision)
-    adjacency = defaultdict(list)
-    for key, edge in all_edges.items():
-        if edge["type_only"] and not include_type_only:
-            continue
-        if direction in {"outgoing", "both"}:
-            adjacency[key[0]].append((key[1], key))
-        if direction in {"incoming", "both"}:
-            adjacency[key[1]].append((key[0], key))
-    nodes, selected, queue = {path: {"path": path, "distance": 0}}, {}, deque([path])
+    nodes, selected, frontier = {path: {"path": path, "distance": 0}}, {}, [path]
     chains, truncated = [], False
     parents = {}
-    while queue:
-        current = queue.popleft()
-        if nodes[current]["distance"] >= depth:
-            continue
-        for target, key in adjacency[current]:
-            if key in selected:
+    for _level in range(depth):
+        if not frontier:
+            break
+        all_edges = _file_frontier(db, project_id, revision, frontier, direction)
+        adjacency = defaultdict(list)
+        for key, edge in all_edges.items():
+            if edge["type_only"] and not include_type_only:
                 continue
-            if len(selected) >= max_edges or (target not in nodes and len(nodes) >= max_nodes):
-                truncated = True
-                continue
-            selected[key] = all_edges[key]
-            if target not in nodes:
-                nodes[target] = {"path": target, "distance": nodes[current]["distance"] + 1}
-                parents[target] = current
-                queue.append(target)
-                chain = [target]
-                while chain[-1] in parents:
-                    chain.append(parents[chain[-1]])
-                chains.append(list(reversed(chain)))
+            if direction in {"outgoing", "both"}:
+                adjacency[key[0]].append((key[1], key))
+            if direction in {"incoming", "both"}:
+                adjacency[key[1]].append((key[0], key))
+        next_frontier = []
+        for current in frontier:
+            for target, key in adjacency[current]:
+                if key in selected:
+                    continue
+                if len(selected) >= max_edges or (target not in nodes and len(nodes) >= max_nodes):
+                    truncated = True
+                    continue
+                selected[key] = all_edges[key]
+                if target not in nodes:
+                    nodes[target] = {"path": target, "distance": nodes[current]["distance"] + 1}
+                    parents[target] = current
+                    next_frontier.append(target)
+                    chain = [target]
+                    while chain[-1] in parents:
+                        chain.append(parents[chain[-1]])
+                    chains.append(list(reversed(chain)))
+        frontier = next_frontier
     return {
         "path": path,
         "direction": direction,
