@@ -4,6 +4,7 @@ from typing import Any, Literal
 
 from mcp.server.mcpserver.exceptions import ToolError
 
+from code_context.analysis_diff import bound_diff_result
 from code_context.intelligence_analysis import (
     AnalysisSelector,
     StructureInclude,
@@ -28,6 +29,9 @@ CODE_TOOL_NAMES = frozenset(
     }
 )
 ADVANCED_CODE_TOOL_NAMES = frozenset({"analyze_code"})
+LEGACY_ANALYSIS_TOOL_NAMES = frozenset(
+    {"get_call_graph", "get_class_graph", "get_file_dependencies", "get_diff"}
+)
 
 
 def register_analysis_tool(mcp, store, authorize, display_name, annotations):
@@ -36,8 +40,9 @@ def register_analysis_tool(mcp, store, authorize, display_name, annotations):
     @mcp.tool(annotations=annotations, structured_output=True)
     def analyze_code(
         project_id: str,
-        mode: StructureMode | Literal["data_origin", "data_impact", "data_path", "combined"],
-        selector: AnalysisSelector | FlowSelector,
+        mode: StructureMode
+        | Literal["data_origin", "data_impact", "data_path", "combined", "diff"],
+        selector: AnalysisSelector | FlowSelector | None = None,
         snapshot: str | None = None,
         target: AnalysisSelector | FlowSelector | None = None,
         include: list[StructureInclude] | None = None,
@@ -49,12 +54,17 @@ def register_analysis_tool(mcp, store, authorize, display_name, annotations):
         max_ms: int = 3000,
         offset: int = 0,
         limit: int = 20,
+        include_type_only: bool = True,
+        baseline: Literal["previous", "empty"] = "previous",
+        detail: Literal["summary", "patch"] = "summary",
     ) -> dict[str, Any]:
         """Analyze one saved file or exact symbol in a single validated Live context.
         File modes select {path}; symbol modes select {symbol_id} or {path, qualname}.
         Repeated definitions return candidates rather than a guessed symbol. Context views
         optionally include ownership, calls and dependencies; symbol pages use next_offset.
         call_path requires a target and follows directed static calls, maximum five hops.
+        call_graph keeps outgoing, incoming or both directions; file_dependencies can
+        exclude type-only edges with include_type_only=false.
         Absence of a static path is not proof of absence of runtime behavior. Budgeted results
         expose partial coverage and continuation, never execute source or change permissions.
         Python value modes add value={kind:parameter,name} or {kind:return,line?,column?}
@@ -63,9 +73,42 @@ def register_analysis_tool(mcp, store, authorize, display_name, annotations):
         Values and contexts are local to one request; select saved source positions to continue.
         Loops, exceptions, recursion, dynamic calls and unknown side effects report partial
         coverage. Analysis never imports the project and is not a runtime execution trace.
+        diff uses an optional {path} selector, baseline=previous or explicit empty,
+        detail=summary or patch and offset/limit. It compares a retained write task's
+        original files with verified current source, without building the code index.
+        NO_TASK_BASELINE means history is unavailable, not zero changes. For arbitrary
+        Git history use the project's Git tools/terminal. Source reads, reference search
+        and reverse-dependency impact retain their dedicated tools and distinct semantics.
         """
         authorize(project_id)
         try:
+            if mode == "diff":
+                if target is not None or include is not None or isinstance(selector, FlowSelector):
+                    raise ValueError("diff accepts only an optional path selector")
+                if selector is not None and (
+                    selector.symbol_id is not None or selector.qualname is not None
+                ):
+                    raise ValueError("diff accepts only an optional path selector")
+                result = store.get_recent_diff(
+                    project_id,
+                    snapshot,
+                    selector.path if selector is not None else None,
+                    baseline=baseline,
+                    detail=detail,
+                    offset=offset,
+                    limit=limit,
+                    max_chars=max_chars,
+                )
+                return bound_diff_result(
+                    {**result, "mode": mode, "display_name": display_name(project_id)}, max_chars
+                )
+            if selector is None:
+                raise ValueError("this analysis mode requires a selector")
+            if baseline != "previous" or detail != "summary":
+                raise ValueError("baseline and detail are only supported by diff")
+            options = {}
+            if mode not in {"data_origin", "data_impact", "data_path", "combined"}:
+                options["include_type_only"] = include_type_only
             result = store.code_query(
                 project_id,
                 snapshot,
@@ -82,6 +125,7 @@ def register_analysis_tool(mcp, store, authorize, display_name, annotations):
                 max_ms=max_ms,
                 offset=offset,
                 limit=limit,
+                **options,
             )
             return bound_analysis_result(
                 {**result, "display_name": display_name(project_id)}, max_chars

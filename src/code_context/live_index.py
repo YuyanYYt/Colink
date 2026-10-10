@@ -355,6 +355,7 @@ class LiveIndexService:
             ) from None
         self._owns_executor = executor is None
         self.on_activity = None
+        self.dataflow_ast_cache = None
         self._executor = executor or ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="colink-live-index"
         )
@@ -517,6 +518,8 @@ class LiveIndexService:
 
     def invalidate(self, project_id: str):
         """Watcher/coordinator hint only; no reads, builds or context substitution."""
+        if self.dataflow_ast_cache is not None:
+            self.dataflow_ast_cache.evict_project(project_id)
         with self._lock:
             state = self._states.get(project_id)
             if state is None and not self._closed and self._cached(project_id) is not None:
@@ -1586,6 +1589,10 @@ class LiveIndexService:
                 return
             self._closed = True
             tasks = list(self._tasks.values())
+            projects = list(self._states)
+        if self.dataflow_ast_cache is not None:
+            for project in projects:
+                self.dataflow_ast_cache.evict_project(project)
         if self._owns_executor:
             self._executor.shutdown(wait=True, cancel_futures=True)
         else:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import time
 from typing import Literal
@@ -58,6 +59,7 @@ class FlowSources:
         self.source, self.observe = source, observe
         self.sources = {}
         self.relations_partial = False
+        self.ast_cache = getattr(facts.service, "dataflow_ast_cache", None)
 
     def load_symbol(self, identifier):
         try:
@@ -112,6 +114,22 @@ class FlowSources:
             return result
         except AnalysisBudgetExceeded:
             raise DataflowBudgetExceeded from None
+
+    def load_ast(self, path, text, check):
+        # Reuse can only follow this request's real, indexed-source read. Cache
+        # hits never substitute for its SHA, fingerprint or final live guard.
+        if path not in self.sources or self.sources[path] != text:
+            raise ValueError("dataflow AST requires current validated source")
+        if self.ast_cache is None:
+            return ast.parse(text, filename="<CoLink Python data flow>")
+        return self.ast_cache.parse(
+            project_id=self.project_id,
+            source_id=self.source.source_id,
+            source_identity=self.source.stable_id,
+            path=path,
+            text=text,
+            check=check,
+        )
 
 
 def _resolved(db, project_id, revision, selector, *, offset, limit):
@@ -214,6 +232,7 @@ def analyze_live_dataflow(
         load_symbol=provider.load_symbol,
         load_source=provider.load_source,
         load_relations=provider.load_relations,
+        load_ast=provider.load_ast,
         max_depth=max_depth,
         max_nodes=max_nodes,
         max_edges=max_edges,

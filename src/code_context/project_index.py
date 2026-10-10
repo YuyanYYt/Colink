@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from threading import Condition
 
+from code_context.dataflow_ast_cache import DataflowAstCache
 from code_context.intelligence_index import MAX_SNAPSHOT_PARSE_BYTES
 from code_context.live_index import (
     _APPLICATION_ID,
@@ -65,6 +66,7 @@ class ProjectIndexService:
         self._entries = OrderedDict()
         self._closed = False
         self.on_activity = None
+        self.dataflow_ast_cache = DataflowAstCache()
         self._ownership = os.open(
             self.root / "project-index.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600
         )
@@ -137,6 +139,7 @@ class ProjectIndexService:
                     **self._options,
                 )
                 entry["service"].on_activity = self._changed
+                entry["service"].dataflow_ast_cache = self.dataflow_ast_cache
             yield entry["service"]
         finally:
             with self._condition:
@@ -192,6 +195,7 @@ class ProjectIndexService:
 
     def invalidate(self, project_id):
         self.path_for(project_id)
+        self.dataflow_ast_cache.evict_project(project_id)
         with self._condition:
             if self._closed:
                 return
@@ -272,6 +276,7 @@ class ProjectIndexService:
             if self._closed:
                 return
             self._closed = True
+            self.dataflow_ast_cache.close()
             while any(entry["users"] for entry in self._entries.values()):
                 self._condition.wait()
             services = [

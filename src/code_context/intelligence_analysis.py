@@ -27,6 +27,7 @@ StructureMode = Literal[
     "symbol_context",
     "callers",
     "callees",
+    "call_graph",
     "call_path",
     "class_relations",
     "file_dependencies",
@@ -617,12 +618,15 @@ def _analyze_structure(
     max_ms=3000,
     offset=0,
     limit=20,
+    include_type_only=True,
 ):
     """Compute one bounded view inside the caller's single validated read context."""
     if not isinstance(mode, str) or mode not in STRUCTURE_MODES:
         raise ValueError("unsupported structure analysis mode")
     if direction not in {"outgoing", "incoming", "both"}:
         raise ValueError("invalid analysis direction")
+    if type(include_type_only) is not bool:
+        raise ValueError("include_type_only must be a boolean")
     for name, value, low, high in (
         ("max_depth", max_depth, 1, 5),
         ("max_nodes", max_nodes, 1, 200),
@@ -684,6 +688,7 @@ def _analyze_structure(
                 depth=max_depth,
                 max_nodes=max_nodes,
                 max_edges=max_edges,
+                include_type_only=include_type_only,
             )
         )
     else:
@@ -790,6 +795,7 @@ def analyze_structure(
     max_ms=3000,
     offset=0,
     limit=20,
+    include_type_only=True,
 ):
     """Query entry point; budget exhaustion discards unfinished composite results."""
     try:
@@ -809,6 +815,7 @@ def analyze_structure(
             max_ms=max_ms,
             offset=offset,
             limit=limit,
+            include_type_only=include_type_only,
         )
     except AnalysisBudgetExceeded:
         return bound_analysis_result(

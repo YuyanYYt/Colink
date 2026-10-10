@@ -126,10 +126,13 @@ def _functions(tree: ast.AST, prefix: str = "") -> Iterable[tuple[str, ast.AST]]
 
 
 class _Analysis:
-    def __init__(self, load_symbol, load_source, load_relations, max_depth: int, max_ms: int):
+    def __init__(
+        self, load_symbol, load_source, load_relations, max_depth: int, max_ms: int, load_ast=None
+    ):
         self.load_symbol: Callable[[str], dict] = load_symbol
         self.load_source: Callable[[str], str] = load_source
         self.load_relations: Callable[..., Iterable[dict]] = load_relations
+        self.load_ast = load_ast
         self.max_depth = max_depth
         self.deadline = time.monotonic() + max_ms / 1000
         self.nodes: dict[str, dict] = {}
@@ -258,7 +261,11 @@ class _Analysis:
                 self.diagnostic("SOURCE_PARSE_BUDGET")
                 return None
             try:
-                tree = ast.parse(text, filename="<CoLink Python data flow>")
+                tree = (
+                    ast.parse(text, filename="<CoLink Python data flow>")
+                    if self.load_ast is None
+                    else self.load_ast(path, text, self.check)
+                )
                 count = 0
                 for _ in ast.walk(tree):
                     count += 1
@@ -1078,6 +1085,7 @@ def analyze_dataflow(
     load_symbol: Callable[[str], dict],
     load_source: Callable[[str], str],
     load_relations: Callable[..., Iterable[dict]],
+    load_ast: Callable[[str, str, Callable[[], None]], ast.Module] | None = None,
     max_depth: int = 1,
     max_nodes: int = 50,
     max_edges: int = 100,
@@ -1107,7 +1115,7 @@ def analyze_dataflow(
     identifier = selector.get("symbol_id")
     if not isinstance(identifier, str):
         raise ValueError("data-flow selector requires a resolved symbol_id")
-    analysis = _Analysis(load_symbol, load_source, load_relations, max_depth, max_ms)
+    analysis = _Analysis(load_symbol, load_source, load_relations, max_depth, max_ms, load_ast)
     frame = None
     try:
         frame = analysis.frame(identifier, "root", 0, ())

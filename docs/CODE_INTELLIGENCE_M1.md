@@ -20,9 +20,11 @@
 | file_context | path | 分页符号、归属、可选调用及文件依赖 |
 | symbol_context | symbol_id 或 path + qualname | 精确符号、祖先/后代归属及可选关系 |
 | callers / callees | 精确符号 | 入向/出向静态调用 |
+| call_graph | 精确符号 | outgoing / incoming / both，多层调用图 |
 | call_path | 精确符号 + target | 有向最短静态调用路径，最多十条等长路径 |
 | class_relations | 精确类型符号 | 继承、实现、归属、类型引用及实例化 |
 | file_dependencies | path | 指定方向的文件依赖 |
+| diff | 可省略或仅 path | 写入任务起点与当前文件的 summary / patch 比较 |
 
 示例参数：
 
@@ -36,7 +38,12 @@
 ```
 
 重复定义返回 analysis_status=ambiguous 和分页候选，客户端选 symbol_id 后继续。
-禁止额外字段与类型自动转换，不凭名字猜测定义。旧工具及历史镜像工具集合兼容。
+禁止额外字段与类型自动转换，不凭名字猜测定义。build 32 起 Live 默认不再列出
+get_call_graph、get_class_graph、get_file_dependencies 和 get_diff；旧名字仍可调用，
+需要时可用 --legacy-analysis-tools 恢复发现。历史镜像工具集合保持原样。
+file_dependencies 保留 include_type_only 选项；diff 的历史基准和分页语义复用原入口，
+不经过结构索引。精确符号查找、源码读取、引用和反向依赖影响保留专用工具。
+完整默认 Live 集合从 46 个降为 42 个，细节见 [统一代码分析入口](CODE_ANALYSIS_ENTRYPOINT.md)。
 
 默认深度 1、节点 50、边 100、输出 12,000 字符、计算预算 3,000 毫秒；上限为深度
 5、节点 200、边 500、输出 50,000 字符、计算预算 10,000 毫秒。节点、边在组合
