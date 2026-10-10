@@ -1,8 +1,30 @@
-# CoLink · ChatGPT 自动匹配 Skill
+# CoLink · ChatGPT 代码智能 Skill
 
-当前公开预发行版 `0.5.0b5 build 22` 的仓库 Skill 与独立 ZIP 备用包见
-[发行页](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b5)。发布仓库文件不会
-自动更新任何账号中已安装的 Skill；以下网页更新记录仅描述当时的维护者账号。
+## 2026-10-11 · 本机代码智能包
+
+本机插件上传包更新为 `1.0.4`，替换用户提供的图标和展示说明，捆绑重新编写的
+`colink-code-context`。定位从只读分析扩展为代码智能：分析和编写代码时，都按需
+利用真实源码、项目结构、引用、调用、依赖、数据传播和改动影响。
+
+Skill 主文档及参考文件不列具体编程语言，不固定应用版本或分析覆盖清单。
+按当前实际工具 schema 和结果判断支持范围；新增分析能力沿用此判断方式，
+未覆盖的部分用相关源码补足并说明限制。保留隐式匹配声明、本机三档授权、
+写入校验、幂等重试及恢复边界。Skill 不自行开启连接或权限。
+
+新版在 `dist/chatgpt-plugin/` 提供完整插件 `code-connect-1.0.4.zip` 和独立 Skill
+`colink-code-context-1.0.4.zip`。独立包包含主文档、两个按需加载的参考文件、
+`agents/openai.yaml` 和图标；完整插件额外含已有个人连接映射及展示元数据，
+仅用于维护者自己的现有插件更新，不作为公共模板。
+
+本次只更新本机资源和上传包，未上传 ChatGPT 网页，也未重新验收导入、自动匹配或
+实际工具调用。下面保留历史网页证据，其日期和验证范围不代表本次新版已安装。
+
+## 历史网页更新
+
+公开预发行 `0.5.0b5 build 22` 当时的仓库 Skill 与独立 ZIP 备用包仍见
+[发行页](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b5)。它们与本次本机
+新版分别维护。发布仓库文件不会自动更新任何账号中已安装的 Skill；以下网页更新
+记录仅描述当时的维护者账号。
 
 核对日期：2026-10-08。用户询问自己的代码、缺少必要源码时优先使用 CoLink；
 已有充分代码片段时直接解释。用户要求开发或操作数据库时，按当前本机档位使用
@@ -53,13 +75,20 @@
 
 - 核心文件：[SKILL.md](../integrations/skills/colink-code-context/SKILL.md)。
 - 可选 UI/自动调用声明：[agents/openai.yaml](../integrations/skills/colink-code-context/agents/openai.yaml)。
+- 按需查询细节：[references/code-intelligence.md](../integrations/skills/colink-code-context/references/code-intelligence.md)。
+- 写入、终端与数据库：[references/write-and-run.md](../integrations/skills/colink-code-context/references/write-and-run.md)。
+- 随附图标：[assets/logo.png](../integrations/skills/colink-code-context/assets/logo.png)。
 - 保持已有 Colink 连接可用；Skill 本身不启动应用、不创建隧道、不配置密钥。
 
 公共 Skill 不写维护者的私有 MCP URL/依赖。它只能使用当前对话已经可用的 Colink
 工具，不会自动授权或开启一个未启用的连接；“只安装这个文件就能自动带入所有
 MCP 工具”不是已验证能力。每个用户安装后需同时确认技能与原 Colink 工具在该对话可用。
 
-编辑器方式：
+新版含支持文件，更新时应保留完整 Skill 目录及引用资源。可上传新版独立 Skill ZIP，
+或随完整插件包更新；实际导入结果以网页界面为准。若编辑器只接受主正文，不能仅
+粘贴 `SKILL.md` 就宣称完整安装了引用文件和图标。
+
+以下是先前仅主文档版本已使用的编辑器方式：
 
 1. 名称填写 `colink-code-context`。
 2. 描述使用 `SKILL.md` 顶部的 `description` 值，正文使用 frontmatter 之后的内容。
@@ -68,9 +97,9 @@ MCP 工具”不是已验证能力。每个用户安装后需同时确认技能�
    不手动 `@` 选择技能，检查是否出现技能使用和 Colink 工具调用。
 5. 再用已贴出充分代码、一般语法、外部教程等反例检查不会无关读取。
 
-本轮另提供只含 `SKILL.md` 和 `agents/openai.yaml` 的独立 ZIP 备用包。网页确有
+历史发行另提供只含 `SKILL.md` 和 `agents/openai.yaml` 的独立 ZIP 备用包。网页确有
 「从电脑上传」入口，但其接受的归档格式及创建结果尚未实测，以实际界面提示为准；
-推荐先用已实际创建成功的编辑器方式。备用包可从
+当时已实际创建成功的是编辑器方式。该历史备用包可从
 [v0.5.0b5 下载页](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b5) 获取。
 不要上传项目根目录、所选源码、`.env.local`、
 `.code-context` 或个人插件 manifest。导入后仍需确认技能已启用。
@@ -107,7 +136,7 @@ MCP 工具”不是已验证能力。每个用户安装后需同时确认技能�
 不等于已经完成公开提交或自动导入 Skill。
 见 [插件 Skill 构建规范](https://developers.openai.com/plugins/build/skills)。
 
-## 本轮证据边界
+## 历史网页证据边界
 
 - 已通过网页编辑器创建并安装；生成策略显示 `allow_implicit_invocation: true`。
 - 普通新对话未 `@` 选择 Skill 或 Colink，能读到样例及后续单行更新；差异只返回摘要。
