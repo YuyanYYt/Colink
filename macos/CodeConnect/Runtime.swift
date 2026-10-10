@@ -135,30 +135,48 @@ struct WorkspaceProject: Identifiable {
     }
 }
 
-struct SavedProjectStorage: Identifiable {
+struct SavedWorkspaceStorage: Identifiable {
     let id: String
     let name: String
     let sourcePath: String
     let sourceExists: Bool
-    let indexDirectory: String
-    let indexExists: Bool
-    let indexBytes: Int64
+    let workspaceDirectory: String
+    let workspaceBytes: Int64
+    let workspaceAllocatedBytes: Int64
+    let projectCount: Int
+    let projectNames: [String]
     let runtimeDirectory: String
+    let indexBytes: Int64
+    let legacyIndexBytes: Int64
 
     init?(_ value: [String: Any]) {
         guard let id = value["id"] as? String,
               let name = value["display_name"] as? String,
               let source = value["source_path"] as? String,
-              let index = value["index_directory"] as? String,
+              let workspace = value["workspace_directory"] as? String,
               let runtime = value["runtime_directory"] as? String else { return nil }
         self.id = id
         self.name = name
         self.sourcePath = source
         self.sourceExists = value["source_exists"] as? Bool ?? false
-        self.indexDirectory = index
-        self.indexExists = value["index_exists"] as? Bool ?? false
-        self.indexBytes = (value["index_bytes"] as? NSNumber)?.int64Value ?? 0
+        self.workspaceDirectory = workspace
+        self.workspaceBytes = (value["workspace_bytes"] as? NSNumber)?.int64Value ?? 0
+        self.workspaceAllocatedBytes =
+            (value["workspace_allocated_bytes"] as? NSNumber)?.int64Value ?? 0
+        self.projectCount = (value["project_count"] as? NSNumber)?.intValue ?? 0
+        self.projectNames = (value["project_names"] as? [String] ?? []).filter { !$0.isEmpty }
         self.runtimeDirectory = runtime
+        self.indexBytes = (value["index_bytes"] as? NSNumber)?.int64Value ?? 0
+        self.legacyIndexBytes = (value["legacy_index_bytes"] as? NSNumber)?.int64Value ?? 0
+    }
+
+    var projectNamesSummary: String {
+        let visible = Array(projectNames.prefix(10))
+        guard !visible.isEmpty else { return "未登记项目" }
+        let summary = visible.joined(separator: "、")
+        let total = max(projectCount, projectNames.count)
+        let remaining = max(0, total - visible.count)
+        return remaining == 0 ? summary : "\(summary) 等 \(total) 个"
     }
 }
 
@@ -394,14 +412,14 @@ final class ConnectionController: ObservableObject {
     @Published var storageError: String?
     @Published var storageExpanded = false
     @Published var showingProjectStorage = false
-    @Published var savedProjectStorage: [SavedProjectStorage] = []
-    @Published var storagePageOffset = 0
-    @Published var storageNextOffset: Int?
-    @Published var storageTotal = 0
+    @Published var savedWorkspaceStorage: [SavedWorkspaceStorage] = []
+    @Published var workspacePageOffset = 0
+    @Published var workspaceNextOffset: Int?
+    @Published var workspaceTotal = 0
     @Published var storageMetadataUnavailable = 0
-    @Published var indexCleanupMessage: String?
-    @Published var pendingIndexCleanup: SavedProjectStorage?
-    @Published var showingIndexCleanupConfirmation = false
+    @Published var workspaceCleanupMessage: String?
+    @Published var pendingWorkspaceCleanup: SavedWorkspaceStorage?
+    @Published var showingWorkspaceCleanupConfirmation = false
     @Published var projects: [WorkspaceProject] = []
     @Published var writeEnabled = false
     @Published var writeAvailable = false
@@ -896,58 +914,73 @@ final class ConnectionController: ObservableObject {
         control("register", parameters: ["relative_root": relativeRoot, "display_name": displayName])
     }
 
-    func loadProjectStorage(offset: Int = 0) {
+    func loadProjectWorkspaces(offset: Int = 0, clearMessage: Bool = true) {
+        if clearMessage { workspaceCleanupMessage = nil }
         guard !projectBusy else { return }
         let process = command(["project-storage", "--workspace", configuration.workspace,
+                               "--view", "workspaces",
                                "--offset", String(offset), "--limit", "10"])
         runLocalProcess(process) { [weak self] result in
             guard let self, let result else { return }
-            self.savedProjectStorage = (result["projects"] as? [[String: Any]] ?? [])
-                .compactMap(SavedProjectStorage.init)
-            self.storagePageOffset = result["offset"] as? Int ?? 0
-            self.storageNextOffset = result["next_offset"] as? Int
-            self.storageTotal = result["total"] as? Int ?? 0
+            self.savedWorkspaceStorage = (result["workspaces"] as? [[String: Any]] ?? [])
+                .compactMap(SavedWorkspaceStorage.init)
+            self.workspacePageOffset = result["offset"] as? Int ?? 0
+            self.workspaceNextOffset = result["next_offset"] as? Int
+            self.workspaceTotal = result["total_workspaces"] as? Int
+                ?? (result["total"] as? Int ?? 0)
             self.storageMetadataUnavailable = result["unavailable_metadata"] as? Int ?? 0
         }
     }
 
-    func revealProjectIndex(_ project: SavedProjectStorage) {
-        let path = project.indexDirectory
-        guard project.indexExists,
-              path.hasPrefix(configuration.workspace + "/.code-context/") else { return }
+    func revealProjectWorkspace(_ workspace: SavedWorkspaceStorage) {
+        let path = URL(fileURLWithPath: workspace.workspaceDirectory).standardizedFileURL.path
+        let dataRoot = URL(fileURLWithPath: configuration.workspace)
+            .appendingPathComponent(".code-context", isDirectory: true)
+            .standardizedFileURL.path
+        guard path.hasPrefix(dataRoot + "/") else { return }
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
     }
 
-    func trashProjectIndex(_ project: SavedProjectStorage) {
+    func trashProjectWorkspace(_ workspace: SavedWorkspaceStorage) {
         guard !ownsConnection, phase != .external, !projectBusy else { return }
-        indexCleanupMessage = nil
-        let process = command(["project-storage-trash", "--workspace", configuration.workspace,
-                               "--entry-id", project.id, "--stage-for-native-trash"])
+        workspaceCleanupMessage = nil
+        let process = command(["project-workspace-trash", "--workspace", configuration.workspace,
+                               "--workspace-id", workspace.id, "--stage-for-native-trash"])
         runLocalProcess(process) { [weak self] result in
             guard let self else { return }
             if result?["cleared"] as? Bool == true {
                 if let path = result?["trash_path"] as? String,
                    result?["native_trash_pending"] as? Bool == true {
                     let url = URL(fileURLWithPath: path).standardizedFileURL
-                    if url.path.hasPrefix(self.configuration.workspace + "/.code-context/retired-indexes/") {
+                    let retiredRoot = URL(fileURLWithPath: self.configuration.workspace)
+                        .appendingPathComponent(".code-context/retired-workspaces", isDirectory: true)
+                        .standardizedFileURL.path
+                    if url.path.hasPrefix(retiredRoot + "/") {
                         do {
                             try FileManager.default.trashItem(at: url, resultingItemURL: nil)
-                            self.indexCleanupMessage = "索引已移到废纸篓，可恢复。"
+                            self.workspaceCleanupMessage =
+                                "已将“\(workspace.name)”工作区移到废纸篓，可按需恢复。"
                         } catch {
-                            self.indexCleanupMessage = "索引已停用并保留在：\(url.path)。可在 Finder 中清理或恢复。"
+                            self.workspaceCleanupMessage =
+                                "“\(workspace.name)”工作区已停用并保留在：\(url.path)。可在 Finder 中恢复。"
                         }
                     } else {
-                        self.indexCleanupMessage = "清理位置未通过核验，数据已保留。"
+                        self.workspaceCleanupMessage =
+                            "“\(workspace.name)”工作区的清理位置未通过核验，数据已保留。"
                     }
                 } else {
-                    self.indexCleanupMessage = "索引已移到废纸篓，可恢复。"
+                    self.workspaceCleanupMessage = result?["recoverable"] as? Bool == true
+                        ? "已移除“\(workspace.name)”工作区，可在废纸篓中恢复。"
+                        : "已移除“\(workspace.name)”工作区。"
                 }
             } else if result?["already_empty"] as? Bool == true {
-                self.indexCleanupMessage = "该项目已经没有索引。"
+                self.workspaceCleanupMessage = "“\(workspace.name)”工作区已经不存在。"
             } else {
-                self.indexCleanupMessage = "未清理，请关闭对应项目的连接后重试；原数据已保留。"
+                let detail = result?["error"] as? String
+                self.workspaceCleanupMessage = detail.map { "工作区未清理：\($0)" }
+                    ?? "未清理，请关闭连接后重试；工作区数据已保留。"
             }
-            self.loadProjectStorage(offset: self.storagePageOffset)
+            self.loadProjectWorkspaces(offset: self.workspacePageOffset, clearMessage: false)
         }
     }
 

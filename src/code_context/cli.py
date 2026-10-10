@@ -105,6 +105,19 @@ def parser() -> argparse.ArgumentParser:
     storage_list.add_argument("--workspace", type=Path, required=True)
     storage_list.add_argument("--offset", type=int, default=0)
     storage_list.add_argument("--limit", type=int, default=10)
+    storage_list.add_argument("--view", choices=("projects", "workspaces"), default="projects")
+    workspace_trash = commands.add_parser(
+        "project-workspace-trash", help="本机将完整停用工作区及项目登记移到废纸篓"
+    )
+    workspace_trash.add_argument("--workspace", type=Path, required=True)
+    workspace_trash.add_argument("--workspace-id", required=True)
+    workspace_trash.add_argument("--stage-for-native-trash", action="store_true")
+    index_migration = commands.add_parser(
+        "project-index-migrate", help="显式离线迁移旧共享索引，不启动或执行项目"
+    )
+    index_migration.add_argument("--workspace", type=Path, required=True)
+    index_migration.add_argument("--workspace-id", required=True)
+    index_migration.add_argument("--stage-for-native-trash", action="store_true")
     storage_trash = commands.add_parser(
         "project-storage-trash", help="本机将一个停用项目的索引移到废纸篓"
     )
@@ -204,7 +217,33 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "project-storage":
             from code_context.project_storage import project_storage
 
-            emit(project_storage(args.workspace, offset=args.offset, limit=args.limit))
+            emit(
+                project_storage(
+                    args.workspace, offset=args.offset, limit=args.limit, view=args.view
+                )
+            )
+            return 0
+        if args.command == "project-workspace-trash":
+            from code_context.project_storage import trash_project_workspace
+
+            emit(
+                trash_project_workspace(
+                    args.workspace,
+                    args.workspace_id,
+                    stage_for_native_trash=args.stage_for_native_trash,
+                )
+            )
+            return 0
+        if args.command == "project-index-migrate":
+            from code_context.project_index_migration import migrate_project_indexes
+
+            emit(
+                migrate_project_indexes(
+                    args.workspace,
+                    args.workspace_id,
+                    stage_for_native_trash=args.stage_for_native_trash,
+                )
+            )
             return 0
         if args.command == "project-storage-trash":
             from code_context.project_storage import trash_project_index
