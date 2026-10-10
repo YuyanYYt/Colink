@@ -99,6 +99,13 @@ def parser() -> argparse.ArgumentParser:
     setup = commands.add_parser("desktop-setup", help="通过标准输入保存首次连接设置，不联网或启动")
     setup.add_argument("--workspace", type=Path, default=Path.cwd())
 
+    storage_list = commands.add_parser(
+        "project-storage", help="本机查看已保存项目和索引目录，不启动连接"
+    )
+    storage_list.add_argument("--workspace", type=Path, required=True)
+    storage_list.add_argument("--offset", type=int, default=0)
+    storage_list.add_argument("--limit", type=int, default=10)
+
     tunnel_init = commands.add_parser("tunnel-init", help="生成无凭据的官方隧道配置，不启动连接")
     tunnel_init.add_argument("--root", type=Path, required=True)
     tunnel_init.add_argument("--project", required=True)
@@ -187,6 +194,11 @@ def main(argv: list[str] | None = None) -> int:
             from code_context.recovery_identity import upgrade_recovery_identity
 
             emit(upgrade_recovery_identity(args.root, args.legacy_device, args.backup_dir))
+            return 0
+        if args.command == "project-storage":
+            from code_context.project_storage import project_storage
+
+            emit(project_storage(args.workspace, offset=args.offset, limit=args.limit))
             return 0
         if args.command == "desktop-setup":
             from code_context.client import SyncError

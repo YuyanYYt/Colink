@@ -135,6 +135,33 @@ struct WorkspaceProject: Identifiable {
     }
 }
 
+struct SavedProjectStorage: Identifiable {
+    let id: String
+    let name: String
+    let sourcePath: String
+    let sourceExists: Bool
+    let indexDirectory: String
+    let indexExists: Bool
+    let indexBytes: Int64
+    let runtimeDirectory: String
+
+    init?(_ value: [String: Any]) {
+        guard let id = value["id"] as? String,
+              let name = value["display_name"] as? String,
+              let source = value["source_path"] as? String,
+              let index = value["index_directory"] as? String,
+              let runtime = value["runtime_directory"] as? String else { return nil }
+        self.id = id
+        self.name = name
+        self.sourcePath = source
+        self.sourceExists = value["source_exists"] as? Bool ?? false
+        self.indexDirectory = index
+        self.indexExists = value["index_exists"] as? Bool ?? false
+        self.indexBytes = (value["index_bytes"] as? NSNumber)?.int64Value ?? 0
+        self.runtimeDirectory = runtime
+    }
+}
+
 struct WorkspaceWriteTask: Equatable {
     let id: String
     let projectID: String
@@ -366,6 +393,12 @@ final class ConnectionController: ObservableObject {
     @Published var storageChanging = false
     @Published var storageError: String?
     @Published var storageExpanded = false
+    @Published var showingProjectStorage = false
+    @Published var savedProjectStorage: [SavedProjectStorage] = []
+    @Published var storagePageOffset = 0
+    @Published var storageNextOffset: Int?
+    @Published var storageTotal = 0
+    @Published var storageMetadataUnavailable = 0
     @Published var projects: [WorkspaceProject] = []
     @Published var writeEnabled = false
     @Published var writeAvailable = false
@@ -858,6 +891,28 @@ final class ConnectionController: ObservableObject {
     func registerProject(relativeRoot: String, displayName: String) {
         guard canManageProjects else { return }
         control("register", parameters: ["relative_root": relativeRoot, "display_name": displayName])
+    }
+
+    func loadProjectStorage(offset: Int = 0) {
+        guard !projectBusy else { return }
+        let process = command(["project-storage", "--workspace", configuration.workspace,
+                               "--offset", String(offset), "--limit", "10"])
+        runLocalProcess(process) { [weak self] result in
+            guard let self, let result else { return }
+            self.savedProjectStorage = (result["projects"] as? [[String: Any]] ?? [])
+                .compactMap(SavedProjectStorage.init)
+            self.storagePageOffset = result["offset"] as? Int ?? 0
+            self.storageNextOffset = result["next_offset"] as? Int
+            self.storageTotal = result["total"] as? Int ?? 0
+            self.storageMetadataUnavailable = result["unavailable_metadata"] as? Int ?? 0
+        }
+    }
+
+    func revealProjectIndex(_ project: SavedProjectStorage) {
+        let path = project.indexDirectory
+        guard project.indexExists,
+              path.hasPrefix(configuration.workspace + "/.code-context/") else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
     }
 
     private func clearWriteAuthorization() {

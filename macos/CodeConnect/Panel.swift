@@ -391,6 +391,10 @@ private struct StorageSettingsView: View {
                             .disabled(!controller.canChangeStorage)
                             .help("关闭连接后可更改存储位置")
                         Button("打开文件夹") { controller.openStorage() }
+                        if controller.configuration.isLive {
+                            Button("项目数据") { controller.showingProjectStorage = true }
+                                .disabled(controller.projectBusy)
+                        }
                     }.font(.system(size: 12)).buttonStyle(.bordered).controlSize(.large)
                     if let error = controller.storageError {
                         Text(error).font(.system(size: 11)).foregroundStyle(.orange)
@@ -401,6 +405,83 @@ private struct StorageSettingsView: View {
         .background(PanelSheetBackground()).presentationBackground(.clear)
         .onAppear { controller.storageExpanded = false }
         .onDisappear { controller.storageExpanded = false }
+        .sheet(isPresented: $controller.showingProjectStorage) {
+            ProjectStorageView(controller: controller)
+        }
+    }
+}
+
+private struct ProjectStorageView: View {
+    @ObservedObject var controller: ConnectionController
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("项目数据").font(.system(size: 21, weight: .semibold, design: .rounded))
+                Spacer()
+                Button(controller.projectBusy ? "读取中…" : "刷新") {
+                    controller.loadProjectStorage(offset: controller.storagePageOffset)
+                }.disabled(controller.projectBusy)
+            }
+            Text("索引可重新生成。清理索引前请关闭连接；运行目录中的配置与任务恢复记录保留。")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    if controller.savedProjectStorage.isEmpty && !controller.projectBusy {
+                        Text("尚无已保存的项目索引。")
+                            .font(.system(size: 12)).foregroundStyle(.secondary)
+                    }
+                    ForEach(controller.savedProjectStorage) { project in
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack {
+                                Text(project.name).font(.system(size: 13, weight: .semibold))
+                                if !project.sourceExists {
+                                    Text("原目录不存在").font(.system(size: 10)).foregroundStyle(.orange)
+                                }
+                                Spacer()
+                                Text(project.indexExists
+                                     ? ByteCountFormatter.string(fromByteCount: project.indexBytes, countStyle: .file)
+                                     : "尚未建索引")
+                                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                            }
+                            Text(project.sourcePath).font(.system(size: 10))
+                                .foregroundStyle(.secondary).textSelection(.enabled)
+                                .lineLimit(2).truncationMode(.middle).help(project.sourcePath)
+                            Text("索引：\(project.indexDirectory)").font(.system(size: 10))
+                                .textSelection(.enabled).lineLimit(2).truncationMode(.middle)
+                                .help(project.indexDirectory)
+                            Text("运行目录：\(project.runtimeDirectory)").font(.system(size: 10))
+                                .foregroundStyle(.secondary).textSelection(.enabled)
+                                .lineLimit(2).truncationMode(.middle).help(project.runtimeDirectory)
+                            Button("打开索引文件夹") { controller.revealProjectIndex(project) }
+                                .font(.system(size: 11)).disabled(!project.indexExists)
+                        }
+                        Divider()
+                    }
+                }.padding(.vertical, 4)
+            }.frame(minHeight: 160, maxHeight: 350)
+            if controller.storageMetadataUnavailable > 0 {
+                Text("\(controller.storageMetadataUnavailable) 份登记暂不可读，已保留原数据。")
+                    .font(.system(size: 11)).foregroundStyle(.orange)
+            }
+            if let error = controller.projectError {
+                Text(error).font(.system(size: 11)).foregroundStyle(.orange)
+            }
+            HStack {
+                Text("共 \(controller.storageTotal) 个项目").font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Button("上一页") {
+                    controller.loadProjectStorage(offset: max(0, controller.storagePageOffset - 10))
+                }.disabled(controller.projectBusy || controller.storagePageOffset == 0)
+                Button("下一页") {
+                    if let offset = controller.storageNextOffset { controller.loadProjectStorage(offset: offset) }
+                }.disabled(controller.projectBusy || controller.storageNextOffset == nil)
+                Spacer()
+                Button("完成") { controller.showingProjectStorage = false }
+            }
+        }.padding(24).frame(width: 600).tint(accent)
+        .onAppear { controller.loadProjectStorage() }
     }
 }
 
