@@ -399,6 +399,9 @@ final class ConnectionController: ObservableObject {
     @Published var storageNextOffset: Int?
     @Published var storageTotal = 0
     @Published var storageMetadataUnavailable = 0
+    @Published var indexCleanupMessage: String?
+    @Published var pendingIndexCleanup: SavedProjectStorage?
+    @Published var showingIndexCleanupConfirmation = false
     @Published var projects: [WorkspaceProject] = []
     @Published var writeEnabled = false
     @Published var writeAvailable = false
@@ -913,6 +916,39 @@ final class ConnectionController: ObservableObject {
         guard project.indexExists,
               path.hasPrefix(configuration.workspace + "/.code-context/") else { return }
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+    }
+
+    func trashProjectIndex(_ project: SavedProjectStorage) {
+        guard !ownsConnection, phase != .external, !projectBusy else { return }
+        indexCleanupMessage = nil
+        let process = command(["project-storage-trash", "--workspace", configuration.workspace,
+                               "--entry-id", project.id, "--stage-for-native-trash"])
+        runLocalProcess(process) { [weak self] result in
+            guard let self else { return }
+            if result?["cleared"] as? Bool == true {
+                if let path = result?["trash_path"] as? String,
+                   result?["native_trash_pending"] as? Bool == true {
+                    let url = URL(fileURLWithPath: path).standardizedFileURL
+                    if url.path.hasPrefix(self.configuration.workspace + "/.code-context/retired-indexes/") {
+                        do {
+                            try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+                            self.indexCleanupMessage = "索引已移到废纸篓，可恢复。"
+                        } catch {
+                            self.indexCleanupMessage = "索引已停用并保留在：\(url.path)。可在 Finder 中清理或恢复。"
+                        }
+                    } else {
+                        self.indexCleanupMessage = "清理位置未通过核验，数据已保留。"
+                    }
+                } else {
+                    self.indexCleanupMessage = "索引已移到废纸篓，可恢复。"
+                }
+            } else if result?["already_empty"] as? Bool == true {
+                self.indexCleanupMessage = "该项目已经没有索引。"
+            } else {
+                self.indexCleanupMessage = "未清理，请关闭对应项目的连接后重试；原数据已保留。"
+            }
+            self.loadProjectStorage(offset: self.storagePageOffset)
+        }
     }
 
     private func clearWriteAuthorization() {

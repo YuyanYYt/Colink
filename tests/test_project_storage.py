@@ -1,5 +1,6 @@
 """Offline metadata stays useful after source deletion without touching data."""
 
+import fcntl
 import hashlib
 import json
 import os
@@ -8,8 +9,10 @@ from pathlib import Path
 
 import pytest
 
+import code_context.project_storage as storage_module
 from code_context.project_registry import ProjectRegistry
-from code_context.project_storage import project_storage
+from code_context.project_storage import project_storage, trash_project_index
+from code_context.source_access import SourceError
 
 
 def saved(tmp_path, name="Project", cache=True, schema=3):
@@ -138,3 +141,97 @@ def test_unprotected_registry_refused_without_changing_permissions(tmp_path, mod
     os.chmod(registry, mode)
     assert project_storage(storage)["unavailable_metadata"] == 1
     assert registry.stat().st_mode & 0o777 == mode
+
+
+@pytest.fixture
+def trash(tmp_path, monkeypatch):
+    directory = tmp_path / "Trash"
+    directory.mkdir(mode=0o700)
+    monkeypatch.setattr(storage_module, "_trash_directory", lambda: directory)
+    return directory
+
+
+def test_clear_deleted_project_moves_only_derived_index_to_recoverable_trash(tmp_path, trash):
+    storage, source, index, registry = saved(tmp_path)
+    row = project_storage(storage)["projects"][0]
+    registry_before = registry.read_bytes()
+    recovery = storage / ".code-context/write-recovery-v1/keep.db"
+    recovery.parent.mkdir(parents=True)
+    recovery.write_bytes(b"unfinished recovery must remain")
+    (source / "code.py").unlink()
+    source.rmdir()
+    result = trash_project_index(storage, row["id"])
+    assert result["cleared"] and result["recoverable"] and not index.exists()
+    assert Path(result["trash_path"]).is_relative_to(trash)
+    assert (
+        Path(result["trash_path"]) / "live-index.sqlite3"
+    ).read_bytes() == b"synthetic derived bytes"
+    assert registry.read_bytes() == registry_before
+    assert recovery.read_bytes() == b"unfinished recovery must remain"
+    assert project_storage(storage)["projects"][0]["index_exists"] is False
+    assert trash_project_index(storage, row["id"])["already_empty"]
+
+
+@pytest.mark.parametrize("lock_kind", ["runtime", "pool", "project"])
+def test_active_runtime_or_index_cannot_be_cleared(tmp_path, trash, lock_kind):
+    storage, _, index, _ = saved(tmp_path)
+    row = project_storage(storage)["projects"][0]
+    runtime = Path(row["runtime_directory"])
+    path = {
+        "runtime": runtime / "runtime.lock",
+        "pool": runtime / "index/project-index.lock",
+        "project": index / "live-index.lock",
+    }[lock_kind]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(SourceError, match="INDEX_IN_USE"):
+            trash_project_index(storage, row["id"])
+        assert index.is_dir() and not list(trash.iterdir())
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("extra", ["unknown-file", "symlink", "hardlink"])
+def test_unknown_or_linked_index_contents_are_preserved(tmp_path, trash, extra):
+    storage, _, index, _ = saved(tmp_path)
+    row = project_storage(storage)["projects"][0]
+    if extra == "unknown-file":
+        (index / "user-file.txt").write_text("user file")
+    elif extra == "symlink":
+        (index / "live-index.sqlite3").unlink()
+        (index / "live-index.sqlite3").symlink_to(tmp_path / "unrelated")
+    else:
+        os.link(index / "live-index.sqlite3", tmp_path / "linked-database")
+    with pytest.raises(SourceError):
+        trash_project_index(storage, row["id"])
+    assert index.is_dir() and not list(trash.iterdir())
+
+
+def test_unregistered_id_cannot_select_another_hashed_folder(tmp_path, trash):
+    storage, _, index, _ = saved(tmp_path)
+    row = project_storage(storage)["projects"][0]
+    fake = row["id"].split(":")[0] + ":p_" + "0" * 32
+    with pytest.raises(SourceError):
+        trash_project_index(storage, fake)
+    assert index.is_dir() and not list(trash.iterdir())
+
+
+def test_native_trash_staging_is_owned_recoverable_and_never_opens_user_trash(
+    tmp_path, monkeypatch
+):
+    storage, _, index, registry = saved(tmp_path)
+    row = project_storage(storage)["projects"][0]
+    before = registry.read_bytes()
+
+    def forbidden():
+        pytest.fail("native macOS trash must be handled by the app, not direct Python access")
+
+    monkeypatch.setattr(storage_module, "_trash_directory", forbidden)
+    result = trash_project_index(storage, row["id"], stage_for_native_trash=True)
+    staged = Path(result["trash_path"])
+    assert result["cleared"] and result["native_trash_pending"] and not index.exists()
+    assert staged.is_relative_to(storage / ".code-context/retired-indexes")
+    assert (staged / "live-index.sqlite3").read_bytes() == b"synthetic derived bytes"
+    assert registry.read_bytes() == before

@@ -4,11 +4,13 @@ This never initializes a project, opens a database, reads credentials or require
 the original source directory to exist. It does not delete any persisted data.
 """
 
+import fcntl
 import hashlib
 import json
 import os
 import re
 import stat
+import uuid
 from pathlib import Path, PurePosixPath
 
 from code_context.models import validate_project
@@ -174,3 +176,147 @@ def project_storage(workspace: Path, *, offset=0, limit=10):
         result["has_more"] = True
         result["next_offset"] = offset + len(page)
     return result
+
+
+def _directory_at(parent, name):
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+    info = os.fstat(fd)
+    if info.st_uid != os.getuid() or info.st_mode & 0o022:
+        os.close(fd)
+        raise ValueError("unsafe persisted directory")
+    return fd
+
+
+def _locked_at(parent, name):
+    fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent)
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_nlink != 1
+            or info.st_mode & 0o077
+        ):
+            raise ValueError("unsafe persisted lock")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SourceError(
+                "INDEX_IN_USE: stop this workspace connection before clearing"
+            ) from None
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _trash_directory():
+    path = Path.home() / ".Trash"
+    path.mkdir(mode=0o700, exist_ok=True)
+    return path
+
+
+def trash_project_index(workspace: Path, entry_id: str, *, stage_for_native_trash=False):
+    """Move one registered, inactive derived folder to Trash; preserve all other data."""
+    if not isinstance(entry_id, str) or len(entry_id) > 180 or entry_id.count(":") != 1:
+        raise SourceError("INVALID_STORAGE_PROJECT: choose a saved project")
+    key, project_id = entry_id.split(":")
+    if _KEY.fullmatch(key) is None:
+        raise SourceError("INVALID_STORAGE_PROJECT: choose a saved project")
+    try:
+        validate_project(project_id)
+        boundary = SourceAccess(workspace.expanduser())
+        relative = f".code-context/desktop/workspaces/{key}/live-v1"
+        registry = _registry(boundary, relative + "/registry/projects.json")
+        if registry.get("schema") not in {1, 2, 3} or not any(
+            item.get("project_id") == project_id for item in registry.get("projects", [])
+        ):
+            raise ValueError("project registration unavailable")
+        project_key = hashlib.sha256(project_id.encode()).hexdigest()
+        handles = []
+        with boundary.root_fd() as root_fd:
+            parent = os.dup(root_fd)
+            handles.append(parent)
+            try:
+                for part in PurePosixPath(relative).parts:
+                    parent = _directory_at(parent, part)
+                    handles.append(parent)
+                handles.append(_locked_at(parent, "runtime.lock"))
+                try:
+                    index = _directory_at(parent, "index")
+                except FileNotFoundError:
+                    return {"cleared": False, "already_empty": True, "project_id": project_id}
+                handles.append(index)
+                handles.append(_locked_at(index, "project-index.lock"))
+                try:
+                    projects = _directory_at(index, "projects")
+                    handles.append(projects)
+                    selected = _directory_at(projects, project_key)
+                    handles.append(selected)
+                except FileNotFoundError:
+                    return {"cleared": False, "already_empty": True, "project_id": project_id}
+                handles.append(_locked_at(selected, "live-index.lock"))
+                expected = {
+                    "live-index.lock",
+                    "live-index.sqlite3",
+                    "live-index.sqlite3-journal",
+                    "live-index.sqlite3-wal",
+                    "live-index.sqlite3-shm",
+                }
+                size = 0
+                for name in os.listdir(selected):
+                    info = os.stat(name, dir_fd=selected, follow_symlinks=False)
+                    if (
+                        name not in expected
+                        or not stat.S_ISREG(info.st_mode)
+                        or info.st_uid != os.getuid()
+                        or info.st_nlink != 1
+                    ):
+                        raise ValueError("unknown file in derived directory")
+                    size += info.st_size
+                if stage_for_native_trash:
+                    context = _directory_at(root_fd, ".code-context")
+                    handles.append(context)
+                    try:
+                        os.mkdir("retired-indexes", mode=0o700, dir_fd=context)
+                    except FileExistsError:
+                        pass
+                    trash = _directory_at(context, "retired-indexes")
+                    trash_path = boundary.root / ".code-context/retired-indexes"
+                else:
+                    trash_path = _trash_directory()
+                    trash = os.open(trash_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                handles.append(trash)
+                trash_info = os.fstat(trash)
+                if trash_info.st_uid != os.getuid() or trash_info.st_mode & 0o022:
+                    raise ValueError("unsafe trash directory")
+                if trash_info.st_dev != os.fstat(selected).st_dev:
+                    raise SourceError(
+                        "INDEX_TRASH_DIFFERENT_VOLUME: use Finder for this storage volume"
+                    )
+                current = os.stat(project_key, dir_fd=projects, follow_symlinks=False)
+                opened = os.fstat(selected)
+                if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+                    raise ValueError("derived directory changed")
+                destination = "CoLink-index-" + project_id[:12] + "-" + uuid.uuid4().hex[:12]
+                os.rename(project_key, destination, src_dir_fd=projects, dst_dir_fd=trash)
+                return {
+                    "cleared": True,
+                    "project_id": project_id,
+                    "index_bytes": size,
+                    "trash_path": str(trash_path / destination),
+                    "native_trash_pending": stage_for_native_trash,
+                    "recoverable": True,
+                    "source_configuration_recovery_unchanged": True,
+                }
+            finally:
+                for fd in reversed(handles):
+                    os.close(fd)
+    except SourceError:
+        raise
+    except BlockingIOError:
+        raise SourceError("INDEX_IN_USE: stop this workspace connection before clearing") from None
+    except (OSError, ValueError, TypeError, KeyError):
+        raise SourceError(
+            "INDEX_CLEAR_REFUSED: saved project or index ownership could not be verified"
+        ) from None

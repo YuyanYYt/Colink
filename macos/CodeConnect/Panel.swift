@@ -454,8 +454,17 @@ private struct ProjectStorageView: View {
                             Text("运行目录：\(project.runtimeDirectory)").font(.system(size: 10))
                                 .foregroundStyle(.secondary).textSelection(.enabled)
                                 .lineLimit(2).truncationMode(.middle).help(project.runtimeDirectory)
-                            Button("打开索引文件夹") { controller.revealProjectIndex(project) }
-                                .font(.system(size: 11)).disabled(!project.indexExists)
+                            HStack {
+                                Button("打开索引文件夹") { controller.revealProjectIndex(project) }
+                                    .disabled(!project.indexExists)
+                                Button("清理索引", role: .destructive) {
+                                    controller.pendingIndexCleanup = project
+                                    controller.showingIndexCleanupConfirmation = true
+                                }
+                                    .disabled(!project.indexExists || controller.projectBusy
+                                              || controller.ownsConnection || controller.phase == .external)
+                                    .help("关闭连接后清理该项目的可重建索引")
+                            }.font(.system(size: 11))
                         }
                         Divider()
                     }
@@ -467,6 +476,9 @@ private struct ProjectStorageView: View {
             }
             if let error = controller.projectError {
                 Text(error).font(.system(size: 11)).foregroundStyle(.orange)
+            }
+            if let message = controller.indexCleanupMessage {
+                Text(message).font(.system(size: 11)).foregroundStyle(.secondary)
             }
             HStack {
                 Text("共 \(controller.storageTotal) 个项目").font(.system(size: 11))
@@ -482,6 +494,15 @@ private struct ProjectStorageView: View {
             }
         }.padding(24).frame(width: 600).tint(accent)
         .onAppear { controller.loadProjectStorage() }
+        .alert("清理项目索引？", isPresented: $controller.showingIndexCleanupConfirmation) {
+            Button("取消", role: .cancel) { controller.pendingIndexCleanup = nil }
+            Button("移到废纸篓", role: .destructive) {
+                if let project = controller.pendingIndexCleanup { controller.trashProjectIndex(project) }
+                controller.pendingIndexCleanup = nil
+            }
+        } message: {
+            Text("\(controller.pendingIndexCleanup?.name ?? "")\n只清理可重建索引，源码、配置、项目登记与任务恢复记录保留。")
+        }
     }
 }
 

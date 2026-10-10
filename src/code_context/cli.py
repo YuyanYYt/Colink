@@ -105,6 +105,12 @@ def parser() -> argparse.ArgumentParser:
     storage_list.add_argument("--workspace", type=Path, required=True)
     storage_list.add_argument("--offset", type=int, default=0)
     storage_list.add_argument("--limit", type=int, default=10)
+    storage_trash = commands.add_parser(
+        "project-storage-trash", help="本机将一个停用项目的索引移到废纸篓"
+    )
+    storage_trash.add_argument("--workspace", type=Path, required=True)
+    storage_trash.add_argument("--entry-id", required=True)
+    storage_trash.add_argument("--stage-for-native-trash", action="store_true")
 
     tunnel_init = commands.add_parser("tunnel-init", help="生成无凭据的官方隧道配置，不启动连接")
     tunnel_init.add_argument("--root", type=Path, required=True)
@@ -199,6 +205,17 @@ def main(argv: list[str] | None = None) -> int:
             from code_context.project_storage import project_storage
 
             emit(project_storage(args.workspace, offset=args.offset, limit=args.limit))
+            return 0
+        if args.command == "project-storage-trash":
+            from code_context.project_storage import trash_project_index
+
+            emit(
+                trash_project_index(
+                    args.workspace,
+                    args.entry_id,
+                    stage_for_native_trash=args.stage_for_native_trash,
+                )
+            )
             return 0
         if args.command == "desktop-setup":
             from code_context.client import SyncError
