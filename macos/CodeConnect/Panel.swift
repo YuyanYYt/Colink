@@ -489,8 +489,6 @@ private struct ProjectStorageView: View {
             if let message = controller.workspaceCleanupMessage {
                 Text(message).font(.system(size: 11)).foregroundStyle(.secondary)
             }
-            Text("清理时，工作区会移到废纸篓，可按需恢复。")
-                .font(.system(size: 11)).foregroundStyle(.secondary)
             HStack {
                 Text("共 \(controller.workspaceTotal) 个工作区").font(.system(size: 11))
                     .foregroundStyle(.secondary)

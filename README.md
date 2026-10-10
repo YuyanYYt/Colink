@@ -18,7 +18,7 @@
 
 **公开预发行：0.5.0 Beta 5（`0.5.0b5`，build 22）** · macOS 14+ · Apple Silicon · [MIT](LICENSE)
 
-本机维护版：`0.5.0b7 / build 30`，包含 M1 联合结构查询、M2 Python 数据流与本机工作区清理；
+本机维护版：`0.5.0b7 / build 31`，包含 M1 联合结构查询、M2 Python 数据流与本机工作区清理；
 见 [M1 接口](docs/CODE_INTELLIGENCE_M1.md)与 [M2 边界](docs/CODE_INTELLIGENCE_M2.md)。
 本机升级未发布到 GitHub。
 
