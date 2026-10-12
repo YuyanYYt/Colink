@@ -2,19 +2,30 @@
 
 仅在当前工具确实提供相应模式时使用。以实际 schema 和结果中的覆盖信息为准；此文件描述选择方法，不承诺任意文件都能得到结构或数据图。
 
+## 统一源码读取
+
+当前 Live 的 `read_code` 顶层是 `project_id`、`request`、可选 `snapshot`、`max_chars` 和 `max_ms`；模式字段放在 request 内，不传旧接口的平铺字段。各模式严格禁止未知字段与类型转换。
+
+- `file`：准确 `path`，可选 `start_line`、`end_line`、`char_offset`；已知文件可直接读，不要求先建立索引或调用分析。
+- `symbol`：准确 `symbol_id` 或 `path` + `qualname`，两种选择器不混用。重复定义返回 candidates；先消歧，再读正文。符号页使用 line_offset/max_lines/char_offset，候选页使用 candidate_offset/candidate_limit。
+- `search`：`kind=text` 或 `kind=symbol`、`query`；按需加 path_prefix、limit 和 context_lines。定义搜索还支持 exact、symbol_kind、language。从 next_cursor 续页，复用同一 snapshot、查询与过滤条件，不推测 offset。
+- `batch`：items 最多五个显式文件范围，返回 items 与 next_cursor；续读保持原 items，使用返回的 item_index/start_line/char_offset 作为 request.cursor。
+
+默认总响应 20,000 字符、时间预算 3000 毫秒；max_chars 上限 50,000，max_ms 上限 10,000。所有模式和批量项目共享总响应预算，搜索还限制扫描字节；context_lines 也计入总量。附带的搜索 context 包含真实文件 sha256/size，原文覆盖必要范围且未截断时可用于写入校验。文件页按 next_start_line/next_char_offset，符号页按返回的定义相对位置续读。不要把截断正文当成完整定义。
+
 ## 联合结构入口
 
 `analyze_code` 在一个经校验的读取上下文内组合需要的结构证据：
 
 - `file_context`：`selector` 只传准确相对 `path`，按需分页文件中的定义。
 - 符号模式：`selector` 使用准确 `symbol_id`，或 `path` + `qualname`。两种形式不混用；名称搜索先消歧，重复定义返回候选时选择实际目标。
-- `symbol_context` 取得定义与归属；支持时用 `include` 选择 `ownership`、`calls`、`dependencies`。不因联合入口可用而请求全部内容。
+- `symbol_context` 取得定义与归属；支持时用 `include` 选择 `ownership`、`calls`、`dependencies`。所有非 diff 模式还可追加 `source`，只附带当前 selector 的准确文件或定义正文，不自动读取 target 或全图节点。不因联合入口可用而请求全部内容。
 - `callers` / `callees` 查看静态入向 / 出向调用；`call_path` 还需准确目标符号。路径有方向，选来源和目标时与用户问题对应。
 - `class_relations` 定位准确类型；`file_dependencies` 定位文件，再按问题选方向。
 
-同一轮的 `snapshot` 与其他源码查询一致。普通符号页按 `next_offset` 继续；模糊选择先取候选再选择，不把第一个同名结果当成正确目标。
+同一轮的 `snapshot` 与其他源码查询一致。普通符号页按 `next_offset` 继续；模糊选择先取候选再选择，不把第一个同名结果当成正确目标。关系与 `source` 共享 max_chars 和剩余 max_ms，附正文时 max_chars 至少 3000；source 部分或超时则定向续读，不声称正文与关系完整。计算预算不保证索引等待与必要安全校验的整条墙钟时间。
 
-旧连接只有分立工具时，用 `symbol_search`、`read_symbol`、`find_references`、调用 / 类型 / 文件图及架构工具完成必要查询，不声称已安装联合入口。结构工具没有覆盖的部分用文本搜索和实际源码说明。
+build 33 的 Live 已取消八个旧读取/图入口的注册，缓存旧名直接调用也失败；刷新连接工具。历史 Mirror 保留原 `symbol_search`、`read_symbol`、`search_code`、`read_file`、调用 / 类型 / 文件图及 Diff 工具，按旧快照语义使用，不声称具备 Live 联合入口。结构工具没有覆盖的部分用文本搜索和实际源码说明。`find_references` 不能用 callers 代替，反向文件影响不能用 data_impact 代替。
 
 ## 值与数据传播
 

@@ -58,17 +58,11 @@ def parser() -> argparse.ArgumentParser:
     live.add_argument("--root", type=Path, required=True)
     live.add_argument("--project", required=True)
     live.add_argument("--data-dir", type=Path, default=Path(".code-context/live"))
-    live.add_argument(
-        "--legacy-analysis-tools", action="store_true", help="额外列出旧版结构图/diff兼容入口"
-    )
 
     workspace = commands.add_parser("workspace", help="运行已本机授权的多项目直读 MCP")
     workspace.add_argument("--root", type=Path, required=True)
     workspace.add_argument("--project", default="workspace", help="连接标签，不替代项目 ID")
     workspace.add_argument("--data-dir", type=Path, default=Path(".code-context/workspace"))
-    workspace.add_argument(
-        "--legacy-analysis-tools", action="store_true", help="额外列出旧版结构图/diff兼容入口"
-    )
     initialize = commands.add_parser("workspace-init", help="本机登记选定目录并发现待确认子项目")
     initialize.add_argument("--root", type=Path, required=True)
     initialize.add_argument("--name")
@@ -209,7 +203,6 @@ def main(argv: list[str] | None = None) -> int:
                 build_mcp(
                     runtime.backend,
                     status_provider=runtime.backend.mcp_status,
-                    expose_legacy_analysis_tools=args.legacy_analysis_tools,
                 ).run(transport="stdio")
             return 0
         if args.command == "registry-upgrade-identity":
@@ -358,7 +351,6 @@ def main(argv: list[str] | None = None) -> int:
                     args.project,
                     project_names={args.project: source.root.name},
                     status_provider=backend.mcp_status,
-                    expose_legacy_analysis_tools=args.legacy_analysis_tools,
                 ).run(transport="stdio")
             finally:
                 backend.close()

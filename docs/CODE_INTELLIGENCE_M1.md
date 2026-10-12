@@ -1,7 +1,8 @@
 # M1：定向结构查询与联合入口
 
-目标安装版：CoLink 0.5.0b6 / build 26。本文件描述接口与验证方法；实际安装、网页
-结果和性能数值以本轮验收收据为准。M2 Python 数据流在下一版独立交付。
+M1 初次交付于 CoLink 0.5.0b6 / build 26；当前接口维护版为 0.5.0b7 / build 33。
+本文件描述接口与验证方法；实际安装、网页结果和性能数值以对应验收收据为准。
+M2 Python 数据流及其静态分析边界见 [M2 说明](CODE_INTELLIGENCE_M2.md)。
 
 ## 查询实现
 
@@ -17,8 +18,8 @@
 
 | 模式 | 选择器 | 内容 |
 | --- | --- | --- |
-| file_context | path | 分页符号、归属、可选调用及文件依赖 |
-| symbol_context | symbol_id 或 path + qualname | 精确符号、祖先/后代归属及可选关系 |
+| file_context | path | 分页符号、归属、可选调用、文件依赖与实际正文 |
+| symbol_context | symbol_id 或 path + qualname | 精确符号、祖先/后代归属及可选关系与实际正文 |
 | callers / callees | 精确符号 | 入向/出向静态调用 |
 | call_graph | 精确符号 | outgoing / incoming / both，多层调用图 |
 | call_path | 精确符号 + target | 有向最短静态调用路径，最多十条等长路径 |
@@ -33,17 +34,27 @@
   "project_id": "从 list_projects 返回的项目",
   "mode": "symbol_context",
   "selector": {"path": "service.py", "qualname": "Service.run"},
-  "include": ["ownership", "calls", "dependencies"]
+  "include": ["ownership", "calls", "source"]
 }
 ```
 
 重复定义返回 analysis_status=ambiguous 和分页候选，客户端选 symbol_id 后继续。
-禁止额外字段与类型自动转换，不凭名字猜测定义。build 32 起 Live 默认不再列出
-get_call_graph、get_class_graph、get_file_dependencies 和 get_diff；旧名字仍可调用，
-需要时可用 --legacy-analysis-tools 恢复发现。历史镜像工具集合保持原样。
+禁止额外字段与类型自动转换，不凭名字猜测定义。build 33 使用 `read_code` 定位与
+读取源码；`analyze_code` 用于必要的结构、数据传播和任务比较。八个被替代的旧
+Live 名字已取消注册，缓存旧 schema 的直接调用也会失败；CLI 兼容发现开关已移除。
+历史镜像十五工具保持原样。build 32 当时仅隐藏四个旧分析入口，仍可调用；当前
+删除是 build 33 的新行为，不能把历史验收当成已完成删除。
 file_dependencies 保留 include_type_only 选项；diff 的历史基准和分页语义复用原入口，
-不经过结构索引。精确符号查找、源码读取、引用和反向依赖影响保留专用工具。
-完整默认 Live 集合从 46 个降为 42 个，细节见 [统一代码分析入口](CODE_ANALYSIS_ENTRYPOINT.md)。
+不经过结构索引。引用、反向文件依赖影响和全项目视图保留各自语义。Live 只读工具
+为 9 个、附加写入为 19 个、完整工作区为 40 个，发现集合与实际注册一致，见
+[读取与分析入口](CODE_ANALYSIS_ENTRYPOINT.md)。
+
+所有非 diff 模式可在 `include` 中追加 `source`；上下文模式还支持 `ownership`、
+`calls`、`dependencies`。正文放在 `source` 字段中，只读取当前 selector 的文件或
+准确符号，不自动读取 target 或全图节点。正文和关系使用同一有效上下文，共享
+max_chars 与剩余 max_ms；附正文时 max_chars 至少 3000。歧义返回候选，不任取正文；
+正文预算不足时按 source 的部分状态与续页信息定向读取。已知文件仅需正文时用
+`read_code`，不必先建立结构索引。
 
 默认深度 1、节点 50、边 100、输出 12,000 字符、计算预算 3,000 毫秒；上限为深度
 5、节点 200、边 500、输出 50,000 字符、计算预算 10,000 毫秒。节点、边在组合

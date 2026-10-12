@@ -207,6 +207,13 @@ class Scanner:
         return None
 
     def _read_text(self, parent: int, name: str, path: str) -> tuple[str | None, str | None]:
+        named = self._stat(parent, name, path)
+        if named is None:
+            return None, None
+        if stat.S_ISLNK(named.st_mode):
+            return None, "symlink"
+        if stat.S_ISREG(named.st_mode) and named.st_nlink != 1:
+            return None, "hardlinked file"
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
         try:
             fd = os.open(name, flags, dir_fd=parent)
@@ -222,6 +229,8 @@ class Scanner:
             before = os.fstat(fd)
             if not stat.S_ISREG(before.st_mode):
                 return None, "not a regular file"
+            if before.st_nlink != 1:
+                return None, "hardlinked file"
             if before.st_size > MAX_FILE_BYTES:
                 return None, f"file exceeds {MAX_FILE_BYTES} bytes"
             chunks: list[bytes] = []
@@ -238,6 +247,8 @@ class Scanner:
                 return None, None
             if stat.S_ISLNK(actual.st_mode):
                 return None, "symlink"
+            if after.st_nlink != 1 or actual.st_nlink != 1:
+                return None, "hardlinked file"
             if _version(before) != _version(after) or _version(after) != _version(actual):
                 raise ScanError(f"file {path!r} changed during reading; retry the scan")
             raw = b"".join(chunks)

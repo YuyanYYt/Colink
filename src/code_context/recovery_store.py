@@ -76,6 +76,14 @@ CREATE TABLE IF NOT EXISTS operations (
     metadata TEXT NOT NULL, result TEXT, sequence INTEGER NOT NULL,
     PRIMARY KEY (task_id, request_id), UNIQUE(task_id, sequence)
 );
+-- Additive batch receipts contain only hashes and operation descriptors.
+-- Bodies and file recovery remain owned by the existing operations/objects.
+CREATE TABLE IF NOT EXISTS write_batches (
+    task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+    request_id TEXT NOT NULL, digest TEXT NOT NULL, created REAL NOT NULL,
+    state TEXT NOT NULL, metadata TEXT NOT NULL,
+    PRIMARY KEY (task_id, request_id)
+);
 CREATE TABLE IF NOT EXISTS operation_attributes (
     task_id TEXT NOT NULL, request_id TEXT NOT NULL,
     before_record TEXT, after_record TEXT NOT NULL,

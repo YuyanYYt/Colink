@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING
 
 from code_context.binding_dependencies import declaration_summary, summary_file
 from code_context.fact_payloads import FactCacheError, decode_fact
+from code_context.intelligence_analysis import AnalysisBudgetExceeded
 from code_context.intelligence_index import (
     INDEX_VERSION,
     MAX_SNAPSHOT_PARSE_BYTES,
@@ -44,7 +45,7 @@ from code_context.intelligence_roots import PythonSourceRoots, read_root_configu
 from code_context.live_analysis import AnalysisFacts
 from code_context.models import validate_project
 from code_context.policy import MAX_FILES
-from code_context.read_context import ContextError
+from code_context.read_context import ContextCapacityError, ContextError
 from code_context.source_access import SourceAccess, SourceError
 from code_context.source_page import source_page
 
@@ -471,6 +472,11 @@ class LiveIndexService:
     def _observe(backend, source, project_id, handle, path, sha):
         try:
             backend.contexts.observe(project_id, source.source_id, handle, path, sha)
+        except ContextCapacityError:
+            raise SourceError(
+                "LIVE_CONTEXT_CAPACITY: active read metadata capacity is full; "
+                "reuse an existing context or wait for its expiry"
+            ) from None
         except ContextError:
             raise SourceError("LIVE_CONTEXT_CHANGED: restart analysis from repo_overview") from None
 
@@ -672,11 +678,11 @@ class LiveIndexService:
             raise SourceError("INVALID_INDEX_OPERATION: unknown structure query")
         if type(max_chars) is not int or not 1000 <= max_chars <= 50_000:
             raise SourceError("INVALID_RESPONSE_BUDGET: max_chars must be between 1000 and 50000")
-        if advanced and (
-            type(parameters.get("max_ms", 3000)) is not int
-            or not 100 <= parameters.get("max_ms", 3000) <= 10_000
-        ):
+        request_max_ms = parameters.get("max_ms", 3000)
+        if type(request_max_ms) is not int or not 100 <= request_max_ms <= 10_000:
             raise SourceError("INVALID_ANALYSIS_BUDGET: max_ms must be between 100 and 10000")
+        if not advanced:
+            parameters.pop("max_ms", None)
         try:
             source = self._source(backend, project_id)
             # LiveQueries already validates the entry context. Direct callers
@@ -745,22 +751,21 @@ class LiveIndexService:
                     "source_mode": "live",
                     "index_partial": stats["partial"],
                 }
-                if advanced:
-                    facts = AnalysisFacts(
-                        self,
-                        project_id,
-                        source.source_id,
-                        manifest,
-                        self._states.get(project_id, {}).get("epoch", 0),
-                        parameters.get("max_ms", 3000),
-                    )
-                elif operation == "read_symbol":
+                facts = AnalysisFacts(
+                    self,
+                    project_id,
+                    source.source_id,
+                    manifest,
+                    self._states.get(project_id, {}).get("epoch", 0),
+                    request_max_ms,
+                )
+                if operation == "read_symbol":
                     result = self._read_symbol(
                         backend, source, project_id, handle, base, max_chars, **parameters
                     )
-                else:
+                elif not advanced:
                     result = bound_result(
-                        {**QUERIES[operation](self._db, project_id, 1, **parameters), **base},
+                        {**QUERIES[operation](facts, project_id, 1, **parameters), **base},
                         max_chars,
                     )
             if advanced:
@@ -810,6 +815,10 @@ class LiveIndexService:
                     status="ready", reason=None
                 )
             return result
+        except AnalysisBudgetExceeded:
+            raise SourceError(
+                "READ_QUERY_TIME_BUDGET_EXCEEDED: narrow the query or increase max_ms"
+            ) from None
         except SourceError:
             self.invalidate(project_id)
             raise

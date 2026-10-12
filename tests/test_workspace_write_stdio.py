@@ -77,7 +77,7 @@ def test_workspace_stdio_default_off_three_round_edits_diff_without_undo():
                     )
                 )["task_id"]
                 for number, path in enumerate(paths):
-                    current = await call("read_file", path=path)
+                    current = await call("read_code", request={"mode": "file", "path": path})
                     arguments = {
                         "task_id": task,
                         "request_id": f"stdio_edit_{number:03}",
@@ -92,12 +92,17 @@ def test_workspace_stdio_default_off_three_round_edits_diff_without_undo():
                     changed = await call("apply_edit", **arguments)
                     assert changed["readback_verified"]
                     assert await call("apply_edit", **arguments) == changed
-                    assert "return 2" in (await call("read_file", path=path))["content"]
+                    assert (
+                        "return 2"
+                        in (await call("read_code", request={"mode": "file", "path": path}))[
+                            "content"
+                        ]
+                    )
                     stale = await session.call_tool(
-                        "read_file",
+                        "read_code",
                         {
                             "project_id": pid,
-                            "path": path,
+                            "request": {"mode": "file", "path": path},
                             "snapshot": current["snapshot"],
                         },
                     )
@@ -110,7 +115,7 @@ def test_workspace_stdio_default_off_three_round_edits_diff_without_undo():
                     path="new/tool.py",
                     content="CREATED = True\n",
                 )
-                target = await call("read_file", path="b.py")
+                target = await call("read_code", request={"mode": "file", "path": "b.py"})
                 deletion = {
                     "task_id": task,
                     "request_id": "stdio_delete_001",
@@ -121,10 +126,14 @@ def test_workspace_stdio_default_off_three_round_edits_diff_without_undo():
                 assert deleted["state"] == "deleted" and deleted["readback_verified"]
                 assert await call("delete_file", **deletion) == deleted
                 assert not (root / "b.py").exists()
-                diff = await call("get_diff")
+                diff = await call("analyze_code", mode="diff")
                 assert diff["summary"]["files_changed"] == 4
                 assert diff["summary"]["deleted"] == 1
-                patch = (await call("get_diff", path="a.py", detail="patch"))["changes"][0]["patch"]
+                patch = (
+                    await call(
+                        "analyze_code", mode="diff", selector={"path": "a.py"}, detail="patch"
+                    )
+                )["changes"][0]["patch"]
                 assert "-    return 1" in patch and "+    return 2" in patch
                 await call("finish_write_task", task_id=task, request_id="stdio_finish_001")
                 assert "rollback_write_task" not in tools
@@ -133,7 +142,7 @@ def test_workspace_stdio_default_off_three_round_edits_diff_without_undo():
                     {"project_id": pid, "task_id": task, "request_id": "stdio_undo_001"},
                 )
                 assert denied_undo.is_error
-                assert (await call("get_diff"))["summary"]["files_changed"] == 4
+                assert (await call("analyze_code", mode="diff"))["summary"]["files_changed"] == 4
                 assert "return 2" in (root / "a.py").read_text()
                 assert "return 2" in (root / "c.py").read_text()
                 assert not (root / "b.py").exists()

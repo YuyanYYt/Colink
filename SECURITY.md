@@ -21,6 +21,59 @@ Local authorization and ChatGPT's action approval policy are separate. Original 
 read tools remain read-only. Development status/output/list operations that renew a
 service lease or acknowledge log cleanup are annotated as effects, not read-only.
 
+## Live source reads and analysis (build 33)
+
+- Live exposes read_code for exact files, exact symbols, bounded text/symbol search,
+  and batches of at most five explicit file ranges. analyze_code provides structural
+  and value-flow evidence, with optional source for its selected file or definition.
+  Exact file reads do not require an index or a preceding analysis. Analysis is not
+  an authorization gate: every source path retains its own project/file/context checks.
+- The eight replaced Live names (read_file, search_code, symbol_search, read_symbol,
+  get_call_graph, get_class_graph, get_file_dependencies, get_diff) are unregistered,
+  including cached-client direct calls. No hidden compatibility or legacy-discovery
+  flag remains in Live. Historical Mirror retains its fifteen read-only tools and
+  immutable retained-state semantics.
+- Declared types are enforced without coercion. Unknown top-level fields and unknown
+  fields inside read_code requests are rejected rather than silently creating a new
+  context. Reuse the exact opaque snapshot, not a guessed field name.
+- Source reads reject symlinks, nonregular files, multiply linked regular files and
+  excluded paths. Enumeration and fingerprint reuse apply the same link rule. This
+  prevents an existing project hardlink from exposing an external inode through an
+  otherwise permitted project filename; it can also reject legitimate hardlinked code.
+- File, symbol, search and batch results share a total serialized-character budget
+  per request, with bounded scanning and time. Search continuation is opaque and
+  bound to its context, query and scope. Failed requests release contexts they newly
+  created; a user-supplied existing context is preserved. Capacity errors distinguish
+  exhaustion from a stale context.
+- Optional analysis source uses the same checked context as the relations and shares
+  their response/time budgets. It reads only the selector, without automatically
+  collecting every graph node or target. Ambiguous definitions return candidates.
+  Partial/truncated evidence must not be presented as complete behavior.
+
+These controls apply to the source-tool path. The explicitly granted host terminal
+continues to use the current OS user's filesystem/network permissions.
+
+## Bounded batch source writes (build 33)
+
+write_batch uses the same default-off exact-project write grant and existing task
+scope. A strict batch contains one to twenty path-unique apply_edit, create_file or
+create_directory operations, with at most 8 MiB of JSON. It does not accept delete,
+move, commands or multiple edits inside one operation. Missing parent directories
+must be declared and explicitly created by earlier batch entries.
+
+All unfinished operations are checked before execution. Each commit still repeats
+the existing source checks and uses the original WriteCoordinator recovery records;
+batch request digests and operation summaries are persisted without a second copy
+of source text. Stable derived item IDs make identical batch retries skip completed
+operations after revalidating their current file identity, hash and attributes.
+Pending outcomes require local recovery rather than a new blind retry.
+
+Preflight cannot make independent filesystem commits a multi-file atomic transaction.
+Runtime failure can leave completed earlier operations. Results state atomic=false
+and distinguish completed, partial and blocked with per-item states. Task status
+provides retained batch summaries. A partial batch is neither a complete success nor
+automatic whole-batch rollback; refreshed reads and task Diff show the actual changes.
+
 ## Native host terminal (introduced in build 17)
 
 - terminal_start/input require the current exact project development grant. Revoke and

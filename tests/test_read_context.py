@@ -5,7 +5,7 @@ from threading import Barrier, Event
 
 import pytest
 
-from code_context.read_context import ContextError, ReadContext, ReadContexts
+from code_context.read_context import ContextCapacityError, ContextError, ReadContext, ReadContexts
 
 FIRST_HASH = "a" * 64
 SECOND_HASH = "b" * 64
@@ -95,6 +95,33 @@ def test_unknown_handles_are_rejected_without_creating_a_context():
         with pytest.raises(ContextError, match="unknown"):
             operation()
     assert contexts.get("project", "source", contexts.create("project", "source")).files == {}
+
+
+def test_discard_is_binding_checked_idempotent_and_releases_file_capacity():
+    contexts = ReadContexts(max_contexts=2, max_files=1)
+    owned = contexts.create("project", "source")
+    other = contexts.create("other", "other-source")
+    contexts.observe("project", "source", owned, "main.py", FIRST_HASH)
+
+    with pytest.raises(ContextError, match="binding"):
+        contexts.discard("project", "other-source", owned)
+    assert contexts.get("project", "source", owned).files == {"main.py": FIRST_HASH}
+    contexts.discard("project", "source", owned)
+    contexts.discard("project", "source", owned)
+    contexts.observe("other", "other-source", other, "other.py", SECOND_HASH)
+    assert contexts.get("other", "other-source", other).files == {"other.py": SECOND_HASH}
+    contexts.create("project", "source")
+
+
+def test_metadata_capacity_uses_a_distinct_error_without_evicting_active_contexts():
+    contexts = ReadContexts(max_contexts=1, max_files=1)
+    active = contexts.create("project", "source")
+    contexts.observe("project", "source", active, "main.py", FIRST_HASH)
+    with pytest.raises(ContextCapacityError, match="capacity"):
+        contexts.create("other", "source")
+    with pytest.raises(ContextCapacityError, match="file capacity"):
+        contexts.observe("project", "source", active, "other.py", SECOND_HASH)
+    assert contexts.get("project", "source", active).files == {"main.py": FIRST_HASH}
 
 
 def test_observe_is_idempotent_and_conflicting_hash_invalidates_without_overwriting():

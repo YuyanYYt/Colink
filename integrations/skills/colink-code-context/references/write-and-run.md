@@ -5,12 +5,24 @@
 ## 受控源码修改
 
 1. 用 `write_task_status` 确认状态，从返回中取得开始任务所需的一次性请求标识，按实际 schema 调用 `begin_write_task`。相关活跃任务可继续复用；大型任务声明准确相对路径及需要创建的各级父目录，不以依赖图扩大可写范围。
-2. 读取目标原文及完整 SHA。`apply_edit` 使用实际 `expected_sha256`，插入传 `expected_context`，行范围替换传 `old_text`，片段替换要求唯一匹配；考虑真实 LF / CRLF 行号。服务保存恢复材料、校验写入并读回，不自创额外备份协议。
+2. 读取目标原文及完整 SHA。搜索带 context 时附带真实文件 sha256/size；原文已覆盖所需范围且未截断，可直接用于这笔写入，缺必要原文则继续精确读取。`apply_edit` 使用实际 `expected_sha256`，插入传 `expected_context`，行范围替换传 `old_text`，片段替换要求唯一匹配；考虑真实 LF / CRLF 行号。服务保存恢复材料、校验写入并读回，不自创额外备份协议。
 3. `create_directory` 先创建已声明父目录，`create_file` 不覆盖已有对象。删除仅在用户要求且 `delete_file` 可用时，传准确单个路径和当前完整 SHA；不以空文件冒充删除，不推断支持重命名或递归删除。
 4. 每个不同操作使用新 `request_id`；同一操作重试保持原标识和全部相同参数。响应丢失先查询任务状态；不要换标识重复插入、创建或删除。`REQUEST_ID_CONFLICT` 是参数绑定冲突，不能当作普通源码冲突忽略。
-5. 成功后刷新读取上下文，读回必要内容。下一笔写入可使用返回的新 SHA，但行号及片段必须对应真实新正文。需要审查整项改动时，用 `get_diff` 摘要再限定路径和 patch；live 比较依赖已有任务材料，不代表任意外部编辑历史。
+5. 成功后刷新读取上下文，用 `read_code` 读回必要内容。下一笔写入可使用返回的新 SHA，但行号及片段必须对应真实新正文。需要审查整项改动时，用 `analyze_code` 的 `mode=diff` 摘要，再限定 `selector.path` 和 `detail=patch`；Live 比较依赖已有任务材料，不代表任意外部编辑历史。历史 Mirror 的 `get_diff` 仍比较其保留的源码状态，不能混用历史含义。
 6. 哈希、原文、属性、授权或容量冲突停止该笔写入，说明实际进度；不更换校验值强写。`WRITE_RECOVERY_REQUIRED` / `WRITE_ROLLBACK_RECOVERY_REQUIRED` 保留任务，由本机受控恢复处理，不在网页自行强制覆盖。
 7. 用户功能完成后 `finish_write_task`。写入读回只证明文件已更新，不等于测试或业务验收。源码恢复以用户已保存的 Git 版本为依据；没有记录的内容不保证能恢复，不自行 reset、checkout、clean、stash、提交或模拟整项撤销。工具返回中的版本差异不能当作当前能力。
+
+### 批量编辑与创建
+
+已取得准确原文、哈希及任务范围时，当前 `write_batch(project_id,task_id,request_id,operations)` 可减少多笔独立写调用；operations 为 1–20 项、全批 JSON 最多 8 MiB，同批 path 不重复。每项由 kind 区分：
+
+- `apply_edit`：path、expected_sha256、edit，沿用现有原文和上下文校验；一项只有一个 edit。
+- `create_file`：path、content；已有目标不覆盖。
+- `create_directory`：path；缺失的每层父目录必须由本批前序显式创建，且在原任务范围内。
+
+每项不传 request_id；稳定子标识由批标识与 index 派生。全批先预检所有未完成项，再使用原协调器逐项保存意图、提交和读回，并持久保留批摘要。批量入口不支持删除、移动、命令或目录扩权。
+
+响应包含 atomic=false、state=completed/partial/blocked、completed_count、total 和逐项 items。执行期间失败可能保留前序成功项，不能称为全批原子成功或全批撤销。先查 `write_task_status` 的最近十个 batches 摘要并刷新实际文件依据；响应丢失或重试时保持批 request_id、任务与 operations 全部不变。服务核验已完成项当前真实文件的身份、哈希与属性，再跳过有效的已完成项；内容变化按冲突处理。不要换标识重发同一整批，也不要改绑定参数追求强行重试；pending 项交由本机恢复。只对真正完成的项报告保存成功，未开始项保持明确。
 
 ## 固定数据库读取
 

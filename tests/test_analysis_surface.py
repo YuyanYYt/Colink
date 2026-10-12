@@ -1,4 +1,4 @@
-"""Unified discovery preserves graph evidence, write diffs and cached-client compatibility."""
+"""The Live dual entrypoint preserves evidence and removes obsolete registrations."""
 
 import asyncio
 import json
@@ -11,15 +11,28 @@ from mcp.server.mcpserver.exceptions import ToolError
 from code_context.analysis_diff import bound_diff_result
 from code_context.cli import parser
 from code_context.execution_tools import EXECUTION_TOOL_NAMES
-from code_context.intelligence_tools import LEGACY_ANALYSIS_TOOL_NAMES
 from code_context.live import LiveQueries
 from code_context.project_index import ProjectIndexService
 from code_context.recovery_store import RecoveryStore
 from code_context.server import LIVE_READ_TOOL_NAMES, READ_TOOL_NAMES, build_mcp
 from code_context.source_access import SourceAccess
+from code_context.storage import MirrorStore
 from code_context.workspace import WorkspaceRuntime, initialize_workspace
 from code_context.write_coordinator import WriteCoordinator
 from code_context.write_tools import WRITE_TOOL_NAMES
+
+REMOVED_LIVE_TOOL_NAMES = frozenset(
+    {
+        "get_call_graph",
+        "get_class_graph",
+        "get_file_dependencies",
+        "get_diff",
+        "search_code",
+        "read_file",
+        "symbol_search",
+        "read_symbol",
+    }
+)
 
 
 @pytest.fixture
@@ -71,7 +84,7 @@ def call(mcp, name, **arguments):
 @pytest.mark.parametrize("depth", [1, 3, 5])
 @pytest.mark.parametrize("budget", [(50, 100), (3, 2)])
 @pytest.mark.parametrize("kind", ["call", "class", "file"])
-def test_old_new_graphs_retain_exact_nodes_edges_and_truncation(
+def test_analysis_graphs_retain_algorithm_nodes_edges_and_truncation(
     parts, direction, depth, budget, kind
 ):
     _, backend, _, _, handle = parts
@@ -95,24 +108,27 @@ def test_old_new_graphs_retain_exact_nodes_edges_and_truncation(
         max_edges=budget[1],
         max_chars=50_000,
     )
-    old_name = {
-        "call": "get_call_graph",
-        "class": "get_class_graph",
-        "file": "get_file_dependencies",
-    }[kind]
-    old_selector = {"path": "main.py"} if kind == "file" else {"symbol_id": selected["symbol_id"]}
-    old = call(mcp, old_name, **old_selector, depth=depth, **options)
+    selector = {"path": "main.py"} if kind == "file" else {"symbol_id": selected["symbol_id"]}
+    baseline = backend.code_query(
+        "sample",
+        handle,
+        "file_dependencies" if kind == "file" else "symbol_graph",
+        **selector,
+        **({} if kind == "file" else {"graph": kind}),
+        depth=depth,
+        **{key: value for key, value in options.items() if key != "snapshot"},
+    )
     new = call(
         mcp,
         "analyze_code",
         mode={"call": "call_graph", "class": "class_relations", "file": "file_dependencies"}[kind],
-        selector=old_selector,
+        selector=selector,
         max_depth=depth,
         **options,
     )
     for key in ("nodes", "edges", "unresolved", "truncated", "root", "path"):
-        if key in old:
-            assert new[key] == old[key], key
+        if key in baseline:
+            assert new[key] == baseline[key], key
 
 
 @pytest.mark.parametrize("include_type_only", [True, False])
@@ -122,31 +138,60 @@ def test_file_dependency_type_only_option_is_preserved(parts, include_type_only)
     options = dict(
         snapshot=handle, direction="both", include_type_only=include_type_only, max_chars=50_000
     )
-    old = call(mcp, "get_file_dependencies", path="main.py", **options)
+    baseline = backend.code_query(
+        "sample",
+        handle,
+        "file_dependencies",
+        path="main.py",
+        **{key: value for key, value in options.items() if key != "snapshot"},
+    )
     new = call(
         mcp, "analyze_code", mode="file_dependencies", selector={"path": "main.py"}, **options
     )
-    assert new["nodes"] == old["nodes"] and new["edges"] == old["edges"]
+    assert new["nodes"] == baseline["nodes"] and new["edges"] == baseline["edges"]
     assert ("types_only.py" in {node["path"] for node in new["nodes"]}) == include_type_only
 
 
-def test_discovery_is_smaller_but_old_names_and_explicit_opt_in_still_work(parts):
+def test_live_discovery_matches_actual_registration_with_nine_read_tools(parts):
     _, backend, _, _, handle = parts
     mcp = build_mcp(backend)
     visible = {tool.name for tool in asyncio.run(mcp.list_tools())}
     assert visible == LIVE_READ_TOOL_NAMES | WRITE_TOOL_NAMES
-    assert not visible & LEGACY_ANALYSIS_TOOL_NAMES
-    assert {"symbol_search", "read_symbol", "find_references", "get_impact_analysis"} <= visible
-    old = build_mcp(backend, expose_legacy_analysis_tools=True)
-    assert {tool.name for tool in asyncio.run(old.list_tools())} == READ_TOOL_NAMES | {
-        "analyze_code"
-    } | WRITE_TOOL_NAMES
-    assert call(mcp, "get_diff", snapshot=handle)["reason"] == "NO_TASK_BASELINE"
-    for command in ("live", "workspace"):
-        args = parser().parse_args(
+    assert visible == {tool.name for tool in mcp._tool_manager.list_tools()}
+    assert len(LIVE_READ_TOOL_NAMES) == 9 and len(visible) == 19
+    assert not visible & REMOVED_LIVE_TOOL_NAMES
+    assert {"read_code", "analyze_code", "find_references", "get_impact_analysis"} <= visible
+    assert call(mcp, "analyze_code", mode="diff", snapshot=handle)["reason"] == "NO_TASK_BASELINE"
+
+
+@pytest.mark.parametrize("name", sorted(REMOVED_LIVE_TOOL_NAMES))
+def test_live_old_tool_names_are_unknown_even_to_cached_clients(parts, name):
+    _, backend, _, _, handle = parts
+    with pytest.raises(ToolError, match="Unknown tool"):
+        call(build_mcp(backend), name, snapshot=handle)
+
+
+@pytest.mark.parametrize("command", ["live", "workspace"])
+def test_cli_no_longer_accepts_legacy_analysis_flag(command, capsys):
+    with pytest.raises(SystemExit) as rejected:
+        parser().parse_args(
             [command, "--root", "/tmp/test", "--project", "sample", "--legacy-analysis-tools"]
         )
-        assert args.legacy_analysis_tools
+    assert rejected.value.code == 2
+    assert "unrecognized arguments: --legacy-analysis-tools" in capsys.readouterr().err
+
+
+def test_mirror_keeps_all_fifteen_historical_tools_without_live_entrypoints(tmp_path):
+    store = MirrorStore(tmp_path / "mirror.sqlite3")
+    mcp = build_mcp(store)
+    visible = {tool.name for tool in asyncio.run(mcp.list_tools())}
+    assert visible == READ_TOOL_NAMES
+    assert visible == {tool.name for tool in mcp._tool_manager.list_tools()}
+    assert len(visible) == 15
+    assert REMOVED_LIVE_TOOL_NAMES <= visible
+    for name in ("read_code", "analyze_code"):
+        with pytest.raises(ToolError, match="Unknown tool"):
+            call(mcp, name)
 
 
 def test_complete_workspace_schema_count_and_terminal_permissions_are_preserved(tmp_path):
@@ -160,17 +205,12 @@ def test_complete_workspace_schema_count_and_terminal_permissions_are_preserved(
         mcp = build_mcp(runtime.backend)
         tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
         assert set(tools) == LIVE_READ_TOOL_NAMES | WRITE_TOOL_NAMES | EXECUTION_TOOL_NAMES
-        assert len(tools) == 42
-        assert (
-            len(
-                asyncio.run(
-                    build_mcp(runtime.backend, expose_legacy_analysis_tools=True).list_tools()
-                )
-            )
-            == 46
-        )
+        assert len(tools) == 40
+        assert set(tools) == {tool.name for tool in mcp._tool_manager.list_tools()}
+        assert not set(tools) & REMOVED_LIVE_TOOL_NAMES
         assert not runtime.write_coordinator.status()["write_enabled"]
         assert tools["analyze_code"].annotations.read_only_hint
+        assert tools["read_code"].annotations.read_only_hint
         assert not tools["terminal_start"].annotations.read_only_hint
 
 
@@ -206,16 +246,16 @@ def test_diff_preserves_baseline_patch_and_pagination_without_index_queries(
             options = dict(
                 baseline=baseline, detail=detail, offset=offset, limit=1, max_chars=12_000
             )
-            old = call(mcp, "get_diff", path=path, **options)
+            expected = backend.get_recent_diff("sample", path=path, **options)
             new = call(
                 mcp,
                 "analyze_code",
                 mode="diff",
                 selector={"path": path} if path else None,
-                snapshot=old["snapshot"],
+                snapshot=expected["snapshot"],
                 **options,
             )
-            assert {key: new[key] for key in old} == old
+            assert {key: new[key] for key in expected} == expected
 
 
 def test_diff_no_baseline_is_unavailable_and_old_live_context_still_fails(parts):

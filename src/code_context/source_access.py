@@ -187,10 +187,13 @@ class SourceAccess:
                 self._fingerprints = SourceFingerprints(cache, self.source_id)
 
     def _ignore_versions(self, root):
-        return tuple(
-            _version(info) if (info := self.scanner._stat(root, name, name)) else None
-            for name in (".gitignore", ".codecontextignore")
-        )
+        versions = []
+        for name in (".gitignore", ".codecontextignore"):
+            info = self.scanner._stat(root, name, name)
+            if info is not None and stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
+                raise SourceError("SOURCE_POLICY_UNAVAILABLE: ignore rules must have one link")
+            versions.append(_version(info) if info is not None else None)
+        return tuple(versions)
 
     def _ignore(self, root):
         before = self._ignore_versions(root)
@@ -373,10 +376,14 @@ class SourceAccess:
             before = self.scanner._stat(parent, name, path)
             if before is None or not stat.S_ISREG(before.st_mode):
                 raise SourceError("FILE_UNAVAILABLE: allowed regular text file not found")
+            if before.st_nlink != 1:
+                raise SourceError("FILE_EXCLUDED: source files must have one link")
             content, problem = self.scanner._read_text(parent, name, path)
             after = self.scanner._stat(parent, name, path)
             if problem or content is None:
                 raise SourceError("FILE_EXCLUDED: file is not an allowed bounded UTF-8 text")
+            if after is not None and after.st_nlink != 1:
+                raise SourceError("FILE_EXCLUDED: source files must have one link")
             if after is None or _version(before) != _version(after):
                 raise SourceError("SOURCE_CHANGED: file changed while reading; retry")
             self.metrics["body_reads"] += 1
@@ -404,6 +411,7 @@ class SourceAccess:
                     cached
                     and before is not None
                     and after is not None
+                    and before.st_nlink == after.st_nlink == 1
                     and stat.S_ISREG(after.st_mode)
                     and cached[0] == _version(before) == _version(after)
                 ):
@@ -468,6 +476,10 @@ class SourceAccess:
                         if partial:
                             return
                     elif stat.S_ISREG(info.st_mode):
+                        if info.st_nlink != 1:
+                            if len(skipped) < 100:
+                                skipped[path] = "hardlinked_file"
+                            continue
                         if info.st_size > MAX_FILE_BYTES:
                             if len(skipped) < 100:
                                 skipped[path] = "file_size_limit"
