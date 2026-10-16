@@ -1,4 +1,4 @@
-"""Bounded, request-local Python value flow over already validated source text.
+"""Bounded, request-local Python/Java value flow over validated source text.
 
 This module does not open a database, import project modules, or execute project
 code. The caller supplies guarded source/fact callbacks and validates the read
@@ -143,6 +143,7 @@ class _Analysis:
         self.incoming: dict[str, list[dict]] = defaultdict(list)
         self.frames: dict[str, _Frame] = {}
         self.trees: dict[str, ast.Module] = {}
+        self.java_sources: dict[str, Any] = {}
         self.symbols: dict[str, dict] = {}
         self.diagnostics: list[dict] = []
         self.diagnostic_keys: set[tuple] = set()
@@ -186,7 +187,7 @@ class _Analysis:
         language = symbol.get("language", "python" if symbol else "unknown")
         if "root" in self.frames:
             availability = "available"
-        elif language not in {"python", "unknown"}:
+        elif language not in {"python", "java", "unknown"}:
             availability = "unsupported_language"
         elif symbol.get("path", "").lower().endswith(".pyi"):
             availability = "unsupported_source"
@@ -195,6 +196,11 @@ class _Analysis:
         else:
             availability = "source_unavailable"
         result["coverage"].update(requested_language=language, availability=availability)
+        if language == "java":
+            result["coverage"].update(
+                frontend="java_tree_sitter_ir_v1",
+                type_resolution="existing static bindings; no JVM or runtime dispatch proof",
+            )
         return annotate_dataflow_result(result, diagnostic_counts=self.diagnostic_counts)
 
     def node(self, frame: _Frame, node: ast.AST, kind: str, name: str = "") -> str:
@@ -222,11 +228,14 @@ class _Analysis:
         kind: str,
         *,
         resolution: str = "static",
-        basis: str = "python_ast",
+        basis: str | None = None,
     ) -> None:
         self.check()
         if source == target:
             return
+        if basis is None:
+            symbol = self.symbols.get(self.nodes[source]["symbol_id"], {})
+            basis = "java_tree_sitter_ir" if symbol.get("language") == "java" else "python_ast"
         key = source, target, kind, resolution, basis
         if key in self.edge_keys:
             return
@@ -261,6 +270,8 @@ class _Analysis:
     def function(self, symbol: dict):
         self.check()
         path = symbol["path"]
+        if symbol.get("language") == "java" and path.lower().endswith(".java"):
+            return self.java_function(symbol)
         if symbol.get("language", "python") != "python" or not path.lower().endswith(
             (".py", ".pyi")
         ):
@@ -309,6 +320,36 @@ class _Analysis:
             return None
         return matches[0]
 
+    def java_function(self, symbol: dict):
+        """Use guarded source callbacks and a request-local Java syntax adapter."""
+        from code_context.java_dataflow_ast import parse_java_flow
+
+        if symbol.get("kind") not in {"method", "constructor"}:
+            self.diagnostic("CALLABLE_REQUIRED", symbol=symbol)
+            return None
+        path = symbol["path"]
+        if path not in self.java_sources:
+            text = self.load_source(path)
+            self.check()
+            if not isinstance(text, str):
+                raise ValueError("data-flow source callback must return source text")
+            if len(text) > MAX_PARSE_BYTES or len(text.encode("utf-8")) > MAX_PARSE_BYTES:
+                self.diagnostic("SOURCE_PARSE_BUDGET", symbol=symbol)
+                return None
+            try:
+                self.java_sources[path] = parse_java_flow(text, self.check)
+            except (ValueError, UnicodeError, RecursionError, MemoryError):
+                self.diagnostic("JAVA_PARSE_ERROR", symbol=symbol)
+                return None
+        source = self.java_sources[path]
+        function = source.function(symbol)
+        for code, node in source.diagnostics:
+            self.diagnostic(code, node=node, symbol=symbol)
+        self.check()
+        if function is None:
+            self.diagnostic("JAVA_BODY_UNAVAILABLE", symbol=symbol)
+        return function
+
     def frame(self, identifier: str, context: str, depth: int, stack: tuple[str, ...]):
         self.check()
         if context in self.frames:
@@ -336,7 +377,15 @@ class _Analysis:
         static = any(
             isinstance(d, ast.Name) and d.id == "staticmethod" for d in function.decorator_list
         )
-        if symbol.get("kind") == "method" and positional and not static:
+        if symbol.get("language") == "java":
+            frame.receiver = getattr(function, "_java_receiver", None)
+            if frame.receiver:
+                frame.env[frame.receiver] = {self.node(frame, function, "receiver", frame.receiver)}
+            for code, node in getattr(function, "_java_diagnostics", ()):
+                self.diagnostic(code, frame, node)
+                if code != "JAVA_BRANCH_PARTIAL":
+                    frame.uncertain_flow = True
+        elif symbol.get("kind") == "method" and positional and not static:
             frame.receiver = positional[0].arg
         if isinstance(function, ast.AsyncFunctionDef):
             self.diagnostic("ASYNC_SEMANTICS_PARTIAL", frame, function)
@@ -360,7 +409,12 @@ class _Analysis:
                 pending.extend(ast.iter_child_nodes(statement))
         alive = self.block(frame, function.body)
         if alive and not frame.generator:
-            implicit = self.node(frame, function, "return", "implicit_none")
+            implicit = self.node(
+                frame,
+                function,
+                "return",
+                "implicit_void" if symbol.get("language") == "java" else "implicit_none",
+            )
             frame.returns.append(implicit)
         return frame
 
@@ -467,8 +521,9 @@ class _Analysis:
             self.merge_states(frame, states)
             return result
         result = self.node(frame, node, "expression", type(node).__name__)
-        unknown = isinstance(node, (ast.Await, ast.Yield, ast.YieldFrom))
-        if unknown:
+        python_async = isinstance(node, (ast.Await, ast.Yield, ast.YieldFrom))
+        unknown = python_async or getattr(node, "_java_unknown", False)
+        if python_async:
             self.diagnostic("ASYNC_OR_GENERATOR_PARTIAL", frame, node)
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.expr):
@@ -787,18 +842,11 @@ class _Analysis:
         keywords = [
             (keyword.arg, self.expression(frame, keyword.value)) for keyword in node.keywords
         ]
-        receiver = (
-            self.expression(frame, node.func.value)
-            if isinstance(node.func, ast.Attribute)
-            else None
+        java = frame.symbol.get("language") == "java"
+        line, column = (
+            getattr(node.func, "_java_relation_line", _position(node.func)[0]),
+            getattr(node.func, "_java_relation_column", _position(node.func)[1]),
         )
-        values = [*arguments, *[value for _, value in keywords], *([receiver] if receiver else [])]
-        if any(isinstance(arg, ast.Starred) for arg in node.args) or any(
-            k is None for k, _ in keywords
-        ):
-            self.unknown_call(frame, node, result, values, "EXPANDED_ARGUMENTS_PARTIAL")
-            return result
-        line, column = _position(node.func)
         candidates = [
             relation
             for relation in frame.relations
@@ -811,11 +859,72 @@ class _Analysis:
             for r in candidates
             if r.get("resolution") == "resolved" and r.get("target_symbol_id")
         }
+        target_symbol, target_function = None, None
+        if (
+            java
+            and len(targets) == 1
+            and all(relation.get("resolution") == "resolved" for relation in candidates)
+        ):
+            target_symbol = self.symbol(next(iter(targets)))
+            target_function = self.function(target_symbol)
+        java_static = java and getattr(target_function, "_java_static", False)
+        qualifier = node.func.value if isinstance(node.func, ast.Attribute) else None
+        type_qualifier = False
+        if java_static and qualifier is not None:
+            # A matching declared owner with no local/field binding is a type
+            # qualifier. Objects may also legally qualify Java static calls.
+            parts, current = [], qualifier
+            while isinstance(current, ast.Attribute):
+                parts.append(current.attr)
+                current = current.value
+            if isinstance(current, ast.Name):
+                parts.append(current.id)
+                name = ".".join(reversed(parts))
+                owner = target_symbol["qualname"].rsplit(".", 1)[0]
+                fields = getattr(frame.function, "_java_fields", ())
+                type_qualifier = (
+                    current.id not in frame.env
+                    and current.id not in fields
+                    and (name == owner or name.endswith("." + owner))
+                )
+        receiver_value = (
+            self.expression(frame, qualifier)
+            if qualifier is not None and not type_qualifier
+            else None
+        )
+        receiver = None if java_static else receiver_value
+        values = [
+            *arguments,
+            *[value for _, value in keywords],
+            *([receiver] if receiver else []),
+        ]
+        unsupported = getattr(node, "_java_unsupported_call", None)
+        if unsupported:
+            self.unknown_call(frame, node, result, values, unsupported)
+            return result
+        if any(isinstance(arg, ast.Starred) for arg in node.args) or any(
+            k is None for k, _ in keywords
+        ):
+            self.unknown_call(frame, node, result, values, "EXPANDED_ARGUMENTS_PARTIAL")
+            return result
         if len(targets) != 1 or any(r.get("resolution") != "resolved" for r in candidates):
             self.unknown_call(frame, node, result, values, "CALL_TARGET_UNKNOWN_OR_AMBIGUOUS")
             return result
         identifier = next(iter(targets))
-        target_symbol = self.symbol(identifier)
+        target_symbol = target_symbol or self.symbol(identifier)
+        if java and not java_static:
+            # A lexical target does not prove JVM dispatch. Keep an unknown
+            # alternative even when the nominal method returns a constant.
+            self.diagnostic("JAVA_DISPATCH_PARTIAL", frame, node)
+            frame.uncertain_flow = True
+            for value in values:
+                self.edge(
+                    value,
+                    result,
+                    "TRANSFORM",
+                    resolution="unknown",
+                    basis="java_dynamic_dispatch_may_flow",
+                )
         if (
             isinstance(node.func, ast.Name)
             and target_symbol.get("scope") == frame.symbol["qualname"]
@@ -881,7 +990,21 @@ class _Analysis:
         positional = [*args.posonlyargs, *args.args]
         values = list(positional_values)
         # Only an attribute call with a known method receiver consumes the implicit first arg.
-        if callee.receiver and isinstance(call.func, ast.Attribute):
+        java = callee.symbol.get("language") == "java"
+        if java and callee.receiver:
+            if receiver is None and not isinstance(call.func, ast.Attribute) and caller.receiver:
+                receiver = next(iter(caller.env.get(caller.receiver, ())), None)
+            if receiver is None:
+                return False
+            for receiver_node in callee.env.get(callee.receiver, ()):
+                self.edge(
+                    receiver,
+                    receiver_node,
+                    "RECEIVER_BIND",
+                    resolution="unknown",
+                    basis="java_receiver_binding",
+                )
+        elif callee.receiver and isinstance(call.func, ast.Attribute):
             if receiver is None:
                 return False
             values.insert(0, receiver)
@@ -1158,7 +1281,7 @@ def analyze_dataflow(
         if analysis.diagnostics or analysis.truncated_reasons
         else "complete",
         "coverage": {
-            "language": "python",
+            "language": analysis.symbols.get(identifier, {}).get("language", "python"),
             "semantics": "static_may_flow",
             "runtime_trace": False,
             "alias_analysis": "same-method receiver fields only",

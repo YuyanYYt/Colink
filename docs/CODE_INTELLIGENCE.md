@@ -181,11 +181,24 @@ snapshot 的配置、源码和关系保持一致。派生索引版本已更新�
 
 值传播结果保留原诊断 code，并增加 `diagnostic_summary`、固定分类说明和
 `conclusion`。分类包含语言支持、调用解析、控制流、别名/副作用、资源预算及
-源上下文；未知 code 保守归为其他限制。Java 值传播明确显示
-`coverage.availability=unsupported_language`。空路径与裁剪的图都不能证明运行时
+源上下文；未知 code 保守归为其他限制。当前开发源码已接入有界 Java 值传播，
+可用切片显示 `coverage.language=java` 与 `coverage.availability=available`；
+`frontend=java_tree_sitter_ir_v1` 区分证据来源。空路径与裁剪的图都不能证明运行时
 不存在，`runtime_reachability=unknown`、`absence_proven=false` 持续保留。
 小于 1500 字符预算时可省略整图证据；此时明确报告证据被省略或尚未计算，不能
 据空 nodes/edges 声称已经完成追踪。
+
+Java 开发版通过现有 `analyze_code` 的 `data_origin`、`data_impact`、`data_path`
+与 `combined` 查询值传播，不新增工具或参数。Tree-sitter Java 仅降低为内部的
+非执行流表示，支持参数、局部赋值、基础表达式、返回值与已有静态绑定的调用。
+方法按带签名的 qualname 与声明起点精确匹配；值位置为 UTF-8 字节列，旧 Java
+关系事实的字符列独立匹配，避免中文前缀导致调用丢失。
+
+实例调用即使有唯一词法候选，也保留未知动态分派路径；构造器、外部调用、对象
+别名、复杂控制流、不支持表达式与作用域均明确报告 partial/unknown，不把它们
+当作已完成的 JVM 类型、堆、反射或运行时分析。Java 的 `this` 不占业务参数，
+前后源码校验、恢复与授权不变，不执行项目或安装新的 JVM 分析器。当前支持范围
+与 Python 仍存在精度差异，不能将两者的统一入口写成完整语义能力对等。
 
 `get_external_dependencies` 的列表范围仍为原来的缺失导入。新增 `dependency_kind`
 区分 `standard_library`、`third_party`、`local_module`、`unknown`，以及置信度和

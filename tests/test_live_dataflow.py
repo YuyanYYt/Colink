@@ -296,7 +296,7 @@ def test_multiple_returns_are_explicit_candidates_even_after_nested_clipping(par
     assert len(json.dumps(result, ensure_ascii=False)) <= 6000
 
 
-def test_java_combined_keeps_structure_and_explains_unavailable_flow(parts):
+def test_java_combined_keeps_structure_and_includes_value_flow(parts):
     root, backend, service, _ = parts
     (root / "Flow.java").write_text("class Flow { int entry(int value) { return value; } }\n")
     service.invalidate("sample")
@@ -312,15 +312,14 @@ def test_java_combined_keeps_structure_and_explains_unavailable_flow(parts):
             "value": {"kind": "parameter", "name": "value"},
         },
     )
-    assert result["analysis_status"] == "partial"
+    assert result["analysis_status"] == "ready"
     assert result["structure"]["analysis_status"] == "ready"
     graph = result["dataflow"]
-    assert graph["coverage"]["availability"] == "unsupported_language"
+    assert graph["coverage"]["availability"] == "available"
     assert graph["coverage"]["requested_language"] == "java"
-    assert graph["diagnostics"][0]["code"] == "PYTHON_ONLY"
-    assert graph["diagnostics"][0]["category"] == "language_support"
-    assert graph["diagnostic_summary"]["by_category"] == {"language_support": 1}
-    assert graph["conclusion"]["status"] == "analysis_unavailable"
+    assert not graph["diagnostics"]
+    assert any(edge["kind"] == "RETURN_FLOW" for edge in graph["edges"])
+    assert graph["conclusion"]["status"] == "analyzed_static_slice"
     assert graph["conclusion"]["absence_proven"] is False
 
 

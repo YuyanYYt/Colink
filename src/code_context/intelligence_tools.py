@@ -80,7 +80,7 @@ def register_analysis_tool(mcp, store, authorize, display_name, annotations):
         exclude type-only edges with include_type_only=false.
         Absence of a static path is not proof of absence of runtime behavior. Budgeted results
         expose partial coverage and continuation, never execute source or change permissions.
-        Python value modes add value={kind:parameter,name} or {kind:return,line?,column?}
+        Python/Java value modes add value={kind:parameter,name} or {kind:return,line?,column?}
         or {kind:occurrence,line,column}; columns use one-based UTF-8 byte offsets.
         data_path needs a target value. combined returns typed structure and may-flow edges.
         Values and contexts are local to one request; select saved source positions to continue.

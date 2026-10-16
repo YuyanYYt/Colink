@@ -473,11 +473,11 @@ def test_source_mismatch_and_non_python_are_explicit_partial():
     assert result["diagnostic_summary"]["by_category"] == {"source_context": 1}
     assert result["coverage"]["availability"] == "source_unavailable"
     assert result["conclusion"]["status"] == "analysis_unavailable"
-    project.symbols[project.symbol("f")]["language"] = "java"
+    project.symbols[project.symbol("f")]["language"] = "typescript"
     result = project.analyze("f", name="x")
     assert "PYTHON_ONLY" in codes(result)
     assert result["analysis_status"] == "selection_not_found"  # Compatibility status.
-    assert result["coverage"]["requested_language"] == "java"
+    assert result["coverage"]["requested_language"] == "typescript"
     assert result["coverage"]["availability"] == "unsupported_language"
     assert result["diagnostic_summary"]["by_category"] == {"language_support": 1}
     assert result["diagnostics"][0]["path"] == "flow.py"

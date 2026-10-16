@@ -1,4 +1,4 @@
-"""Request-local Python flow callbacks over one guarded Live fact publication."""
+"""Request-local Python/Java flow over one guarded Live fact publication."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ class FlowValueSelector(BaseModel):
     @model_validator(mode="after")
     def valid_value(self):
         if self.kind == "parameter":
-            if self.name is None or not self.name.isidentifier():
+            if self.name is None or not self.name.replace("$", "_").isidentifier():
                 raise ValueError("select a parameter identifier")
             if self.line is not None or self.column is not None:
                 raise ValueError("parameter selection uses its name within one method")
@@ -356,7 +356,7 @@ def analyze_live_dataflow(
             "truncated_reason": list(
                 dict.fromkeys([*structure["truncated_reason"], *flow["truncated_reason"]])
             ),
-            "coverage": "typed static structure and Python may-flow; not a runtime trace",
+            "coverage": "static Python/Java structure and bounded may-flow; not a runtime trace",
         }
     flow["continuation"] = {"selector": selector, "value_ids_are_request_local": True}
     if max_chars < 1500:
