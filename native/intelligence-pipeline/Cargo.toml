@@ -1,0 +1,16 @@
+[package]
+name = "colink-intelligence-pipeline-pilot"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+libc = "0.2"
+serde_json = "1"
+sha2 = "0.10"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
