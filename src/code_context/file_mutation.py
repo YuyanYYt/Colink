@@ -28,6 +28,7 @@ from code_context.file_attributes import (
     apply_prepared_file_attributes,
     capture_file_attributes,
     ensure_private_staging,
+    replacement_file_attributes,
 )
 from code_context.policy import MAX_FILE_BYTES, content_problem
 from code_context.scanner import _version
@@ -333,6 +334,9 @@ def prepare_file(
                     creation = ensure_private_staging(fd)
                     if attributes is None:
                         attributes = replace(creation, mode=mode)
+                    elif on_attributes is not None:
+                        attributes = replacement_file_attributes(attributes, creation)
+                    if on_attributes is not None:
                         prepared = replace(prepared, attribute_sha256=attributes.sha256)
                         on_attributes(prepared, attributes)
                 _write_all(fd, raw)

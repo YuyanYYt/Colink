@@ -12,6 +12,7 @@ import os
 import stat
 
 from code_context.directory_mutation import PreparedDirectory, discard_directory_temp
+from code_context.file_attributes import replacement_file_attributes
 from code_context.file_mutation import (
     PreparedFile,
     _check_new,
@@ -255,8 +256,19 @@ class WriteRecovery:
                     raise WriteError("WRITE_RECOVERY_UNKNOWN_TEMP: preserve an unregistered inode")
                 if stat.S_IMODE(temp.st_mode) not in {receipt.mode, 0o600}:
                     raise WriteError("WRITE_RECOVERY_CONFLICT: temporary permissions changed")
+                # Build 33 may have copied the original's Darwin provenance into
+                # the intended record, although the kernel retains the temp's
+                # own value. Only abort an uninstalled, fully verified attempt;
+                # installed-source and all other attribute checks stay exact.
+                discard_attributes = after_attributes
+                if metadata["phase"] == "preparing" and after_attributes is not None:
+                    with source.parent_fd(metadata["path"]) as (parent, _):
+                        staged = _read_named(parent, receipt.temp_name, links=(1,), attributes=True)
+                    discard_attributes = replacement_file_attributes(
+                        after_attributes, staged.attributes
+                    )
                 discard_prepared(
-                    source, receipt, receipt.sha256, receipt.temp_identity, after_attributes
+                    source, receipt, receipt.sha256, receipt.temp_identity, discard_attributes
                 )
             return self._abort(operation, metadata)
         if (
