@@ -146,6 +146,8 @@ def test_callback_budget_returns_completed_local_slice(parts, monkeypatch):
     assert result["analysis_status"] == "partial"
     assert "time_budget" in result["truncated_reason"]
     assert result["nodes"] and result["edges"]
+    assert result["diagnostic_summary"]["by_category"]["resource_budget"] >= 1
+    assert result["conclusion"]["absence_proven"] is False
 
 
 def test_corrupt_facts_return_rebuild_status_without_decoder_content(parts, monkeypatch):
@@ -245,6 +247,8 @@ def test_deadline_sql_interrupt_is_converted_only_to_budget_exception(parts, mon
     monkeypatch.setattr(flow, "_symbol", budget)
     result = query(parts)
     assert result["analysis_status"] == "partial" and "time_budget" in result["truncated_reason"]
+    assert result["diagnostic_summary"]["by_category"] == {"resource_budget": 1}
+    assert result["conclusion"]["status"] == "selection_not_computed"
     assert service.status("sample")["status"] == "ready"
 
 
@@ -290,3 +294,74 @@ def test_multiple_returns_are_explicit_candidates_even_after_nested_clipping(par
     assert selected["candidates"] and selected["total"] == 41
     assert selected["next_offset"] is None
     assert len(json.dumps(result, ensure_ascii=False)) <= 6000
+
+
+def test_java_combined_keeps_structure_and_explains_unavailable_flow(parts):
+    root, backend, service, _ = parts
+    (root / "Flow.java").write_text("class Flow { int entry(int value) { return value; } }\n")
+    service.invalidate("sample")
+    handle = backend.resolve_snapshot("sample")[0]
+    result = backend.code_query(
+        "sample",
+        handle,
+        "analyze_code",
+        mode="combined",
+        selector={
+            "path": "Flow.java",
+            "qualname": "Flow.entry(int)",
+            "value": {"kind": "parameter", "name": "value"},
+        },
+    )
+    assert result["analysis_status"] == "partial"
+    assert result["structure"]["analysis_status"] == "ready"
+    graph = result["dataflow"]
+    assert graph["coverage"]["availability"] == "unsupported_language"
+    assert graph["coverage"]["requested_language"] == "java"
+    assert graph["diagnostics"][0]["code"] == "PYTHON_ONLY"
+    assert graph["diagnostics"][0]["category"] == "language_support"
+    assert graph["diagnostic_summary"]["by_category"] == {"language_support": 1}
+    assert graph["conclusion"]["status"] == "analysis_unavailable"
+    assert graph["conclusion"]["absence_proven"] is False
+
+
+def test_live_clipping_preserves_uncertainty_counts(parts):
+    root, backend, service, _ = parts
+    (root / "flow.py").write_text(
+        "def entry(value):\n"
+        + "".join(f"    local_{i} = external_{i}(value)\n" for i in range(25))
+        + "    return value\n"
+    )
+    service.invalidate("sample")
+    handle = backend.resolve_snapshot("sample")[0]
+    result = backend.code_query(
+        "sample",
+        handle,
+        "analyze_code",
+        mode="data_impact",
+        selector=selector(),
+        max_chars=3500,
+    )
+    assert result["analysis_status"] == "partial" and result["truncated"]
+    assert result["diagnostic_summary"]["by_category"]["call_resolution"] == 25
+    assert result["diagnostic_summary"]["by_category"]["resource_budget"] >= 1
+    assert len(result["diagnostics"]) < 25
+    assert result["conclusion"]["runtime_reachability"] == "unknown"
+    assert result["conclusion"]["absence_proven"] is False
+    assert len(json.dumps(result, ensure_ascii=False)) <= 3500
+
+
+@pytest.mark.parametrize("mode", ["data_path", "combined"])
+def test_minimum_output_budget_reports_omitted_evidence(parts, mode):
+    result = query(
+        parts,
+        mode=mode,
+        **({"target": selector(kind="return")} if mode == "data_path" else {}),
+        max_chars=1000,
+    )
+    graph = result.get("dataflow", result)
+    assert result["analysis_status"] == "partial" and result["truncated"]
+    assert graph["nodes"] == graph["edges"] == []
+    assert graph["diagnostic_summary"]["by_category"]["resource_budget"] >= 1
+    assert graph["conclusion"]["status"] == "output_evidence_omitted"
+    assert graph["conclusion"]["absence_proven"] is False
+    assert len(json.dumps(result, ensure_ascii=False)) <= 1000

@@ -2,6 +2,7 @@
 
 import time
 
+from code_context.intelligence_coverage import bound_index_coverage
 from code_context.read_requests import (
     BatchReadRequest,
     FileReadRequest,
@@ -143,6 +144,10 @@ def _read_symbol(backend, project_id, handle, request, max_chars, max_ms, base):
         **base,
         "index_partial": selected.get("index_partial", False),
     }
+    if "index_coverage" in selected:
+        metadata["index_coverage"] = bound_index_coverage(
+            selected["index_coverage"], max_chars, compact=True
+        )
     return _fit_page(
         document,
         first,
@@ -181,6 +186,10 @@ def _search_symbols(backend, project_id, source, handle, request, max_chars, max
         max_chars=50_000,
         max_ms=max_ms,
     )
+    if "index_coverage" in found:
+        found["index_coverage"] = bound_index_coverage(
+            found["index_coverage"], max_chars, compact=True
+        )
     if found.get("index_not_ready"):
         result = {**found, **base, "kind": "symbol", "read_status": "index_not_ready"}
         if json_chars(result) > max_chars:

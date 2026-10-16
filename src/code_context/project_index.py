@@ -19,6 +19,7 @@ from pathlib import Path
 from threading import Condition
 
 from code_context.dataflow_ast_cache import DataflowAstCache
+from code_context.intelligence_coverage import public_index_stats
 from code_context.intelligence_index import MAX_SNAPSHOT_PARSE_BYTES
 from code_context.live_index import (
     _APPLICATION_ID,
@@ -261,7 +262,7 @@ class ProjectIndexService:
                     stats = json.loads(row[0])
                     result.update(
                         status="closed" if closed else "cached",
-                        stats=stats,
+                        stats=public_index_stats(stats),
                         index_partial=stats.get("partial", True),
                     )
                 result["storage_bytes"] = path.stat().st_size

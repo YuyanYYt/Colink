@@ -164,3 +164,41 @@ snapshot 的配置、源码和关系保持一致。派生索引版本已更新�
 [OpenAI：Skills 与 MCP](https://developers.openai.com/plugins/concepts/skills)。
 
 项目文件更新不等于账号内已安装 Skill 更新，本轮不自动修改个人账号、连接权限或目录。
+
+## 2026-10-16 源码阶段的可靠性字段
+
+本轮保留现有 MCP 工具名称和输入 schema，只增加兼容的结果信息。当前正在使用的
+本机安装版仍为 build 33；这些源码改动没有覆盖安装版。
+
+`index_coverage` 分开报告结构事实已提取、结构受限、未分析和元数据遗漏数量，
+并提供用户所选文件优先、成功/受限/不支持交错排列的有限样本。`limitation_codes`
+按诊断码聚合原因；`details_omitted` 与 `details_are_samples` 表示详情不完整。
+结构 ready 不代表所有名称绑定完整，也不代表运行时可达。
+
+`SOURCE_TEXT_EXCLUDED` 表示原文同样受源码内容策略约束；项目索引预算限制则不
+自动禁止通过现有读取策略获取精确源码。TS/JS/Vue/Rust 等文件目前可被标明为
+结构分析不支持，不得把这种识别当作已接入相应语言解析器。
+
+值传播结果保留原诊断 code，并增加 `diagnostic_summary`、固定分类说明和
+`conclusion`。分类包含语言支持、调用解析、控制流、别名/副作用、资源预算及
+源上下文；未知 code 保守归为其他限制。Java 值传播明确显示
+`coverage.availability=unsupported_language`。空路径与裁剪的图都不能证明运行时
+不存在，`runtime_reachability=unknown`、`absence_proven=false` 持续保留。
+小于 1500 字符预算时可省略整图证据；此时明确报告证据被省略或尚未计算，不能
+据空 nodes/edges 声称已经完成追踪。
+
+`get_external_dependencies` 的列表范围仍为原来的缺失导入。新增 `dependency_kind`
+区分 `standard_library`、`third_party`、`local_module`、`unknown`，以及置信度和
+证据。Python 标准目录按分析运行时标注；Java 使用保守的标准包族，不泛化所有
+`javax.*`。第三方分类需要项目声明与有限的明确包名映射共同支持，不普遍将发行包名
+等同 import 名，也不把 Maven groupId 当 Java package。解析不到的传递依赖保留未知。
+这些归属分类不证明已经安装、目标版本兼容或具体符号可用。
+
+依赖声明仅从已有授权源码清单中的有界文件提炼，与结构事实同发布；不执行 pip、
+Maven 或用户项目。完整原文、仓库 URL 和凭据不会进入声明元数据。已解析本地导入
+用 `local_imports_omitted` 计数，实际依赖关系继续查询 `file_dependencies`。
+
+独立 Rust 图核心与真实源码的测量范围、收益门槛和结论见
+[Rust 核心试点](RUST_CORE_PILOT_20261016.md)。后续按用户指定顺序推进 TS/JS/Vue
+结构解析、Spring Boot 与 Vue 接口关系、影响分析与受控重构闭环；不优先引入向量库
+或图数据库，不将底层分析器的每个操作逐一注册为新的 MCP 工具。

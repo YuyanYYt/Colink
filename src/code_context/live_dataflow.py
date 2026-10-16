@@ -9,6 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from code_context.dataflow_diagnostics import annotate_dataflow_result
 from code_context.intelligence_analysis import (
     AnalysisBudgetExceeded,
     AnalysisSelector,
@@ -150,6 +151,63 @@ def _resolved(db, project_id, revision, selector, *, offset, limit):
     return symbol, ambiguity
 
 
+def _compact_flow_output(result):
+    """Keep limitation evidence usable when the minimum budget cannot hold a graph."""
+    graph = result.get("dataflow", result)
+    graph["nodes"], graph["edges"] = [], []
+    graph["root"] = None
+    if "target" in graph:
+        graph["target"] = None
+    if "paths" in graph:
+        graph["paths"], graph["paths_truncated"] = [], True
+    if not graph.get("candidates"):
+        for key in (
+            "candidates",
+            "candidate_total",
+            "candidates_truncated",
+            "total",
+            "offset",
+            "has_more",
+            "next_offset",
+            "value_selection_candidates",
+            "selection_required",
+        ):
+            graph.pop(key, None)
+    graph["diagnostics"] = [
+        {key: item[key] for key in ("code", "category")}
+        for item in graph.get("diagnostics", [])[:1]
+    ]
+    graph["coverage"] = {
+        key: value
+        for key, value in graph["coverage"].items()
+        if key in {"language", "requested_language", "availability", "runtime_trace"}
+    }
+    graph["truncated"] = True
+    graph.setdefault("truncated_reason", []).append("max_chars")
+    graph["truncated_reason"] = list(dict.fromkeys(graph["truncated_reason"]))
+    if graph["analysis_status"] == "ready":
+        graph["analysis_status"] = "partial"
+    annotate_dataflow_result(graph)
+    # Omitted evidence must not look like a disproven path or a completed trace.
+    if graph["coverage"]["availability"] == "available":
+        graph["conclusion"]["status"] = "output_evidence_omitted"
+    graph["diagnostics"] = [
+        {key: item[key] for key in ("code", "category")} for item in graph["diagnostics"]
+    ]
+    result.pop("continuation", None)
+    if "dataflow" in result:
+        result["structure"] = {
+            "analysis_status": "not_computed"
+            if result["structure"]["analysis_status"] == "not_computed"
+            else "partial",
+            "evidence_omitted": True,
+        }
+        result.pop("coverage", None)
+        result["analysis_status"], result["truncated"] = "partial", True
+        result["truncated_reason"] = list(dict.fromkeys([*result["truncated_reason"], "max_chars"]))
+    return result
+
+
 def analyze_live_dataflow(
     facts,
     project_id,
@@ -203,7 +261,7 @@ def analyze_live_dataflow(
             facts, project_id, revision, selector, offset=offset, limit=limit
         )
         if ambiguity is not None:
-            return {"mode": mode, **ambiguity}
+            return annotate_dataflow_result({"mode": mode, **ambiguity})
         resolved = {"symbol_id": symbol["symbol_id"], "value": selector["value"]}
         resolved_target = None
         if target is not None:
@@ -211,18 +269,22 @@ def analyze_live_dataflow(
                 facts, project_id, revision, target, offset=offset, limit=limit
             )
             if ambiguity is not None:
-                return {"mode": mode, **ambiguity, "ambiguous_selector": "target"}
+                return annotate_dataflow_result(
+                    {"mode": mode, **ambiguity, "ambiguous_selector": "target"}
+                )
             resolved_target = {"symbol_id": end["symbol_id"], "value": target["value"]}
     except AnalysisBudgetExceeded:
-        return {
-            "mode": mode,
-            "analysis_status": "partial",
-            "nodes": [],
-            "edges": [],
-            "truncated": True,
-            "truncated_reason": ["time_budget"],
-            "selection_status": "selection_not_computed",
-        }
+        return annotate_dataflow_result(
+            {
+                "mode": mode,
+                "analysis_status": "partial",
+                "nodes": [],
+                "edges": [],
+                "truncated": True,
+                "truncated_reason": ["time_budget"],
+                "selection_status": "selection_not_computed",
+            }
+        )
     provider = FlowSources(facts, project_id, revision, source, observe)
     remaining_ms = max(1, min(max_ms, int((facts.deadline - time.monotonic()) * 1000)))
     flow = analyze_dataflow(
@@ -257,22 +319,31 @@ def analyze_live_dataflow(
         flow["analysis_status"] = "partial"
         flow["truncated"] = True
         flow["truncated_reason"].append("relation_facts_budget")
+    annotate_dataflow_result(flow)
     if mode == "combined":
         from code_context.intelligence_analysis import analyze_structure
 
-        structure = analyze_structure(
-            facts,
-            project_id,
-            revision,
-            mode="symbol_context",
-            selector={"symbol_id": symbol["symbol_id"]},
-            include=["ownership", "calls", "dependencies"] if include is None else include,
-            direction=direction,
-            max_depth=max(1, max_depth),
-            max_nodes=max_nodes,
-            max_edges=max_edges,
-            max_chars=max_chars,
-            max_ms=max(100, remaining_ms),
+        structure = (
+            {
+                "analysis_status": "not_computed",
+                "truncated": True,
+                "truncated_reason": ["max_chars"],
+            }
+            if max_chars < 1500
+            else analyze_structure(
+                facts,
+                project_id,
+                revision,
+                mode="symbol_context",
+                selector={"symbol_id": symbol["symbol_id"]},
+                include=["ownership", "calls", "dependencies"] if include is None else include,
+                direction=direction,
+                max_depth=max(1, max_depth),
+                max_nodes=max_nodes,
+                max_edges=max_edges,
+                max_chars=max_chars,
+                max_ms=max(100, remaining_ms),
+            )
         )
         flow = {
             "mode": mode,
@@ -288,4 +359,15 @@ def analyze_live_dataflow(
             "coverage": "typed static structure and Python may-flow; not a runtime trace",
         }
     flow["continuation"] = {"selector": selector, "value_ids_are_request_local": True}
-    return bound_analysis_result(apply_analysis_bounds(flow, max_nodes, max_edges), max_chars)
+    if max_chars < 1500:
+        return bound_analysis_result(_compact_flow_output(flow), max_chars)
+    bounded = apply_analysis_bounds(flow, max_nodes, max_edges)
+    if mode != "combined":
+        annotate_dataflow_result(bounded)
+    bounded = bound_analysis_result(bounded, max_chars)
+    if mode != "combined":
+        annotate_dataflow_result(bounded)
+        # Classification is bounded metadata; a changed count/conclusion must
+        # still respect the caller's exact serialized output budget.
+        bounded = bound_analysis_result(bounded, max_chars)
+    return bounded

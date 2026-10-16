@@ -343,6 +343,11 @@ def test_real_data_path_and_constant_return_no_path():
     )
     assert not result["path_found"]
     assert "runtime reachability is unknown" in result["no_path_claim"]
+    assert result["conclusion"] == {
+        "status": "no_path_in_analyzed_slice",
+        "runtime_reachability": "unknown",
+        "absence_proven": False,
+    }
 
 
 def test_exact_occurrence_uses_utf8_column_and_does_not_guess_name():
@@ -465,9 +470,19 @@ def test_source_mismatch_and_non_python_are_explicit_partial():
     project.files["flow.py"] = "def different(x):\n    return x\n"
     result = project.analyze("f", name="x")
     assert "SYMBOL_SOURCE_MISMATCH" in codes(result)
+    assert result["diagnostic_summary"]["by_category"] == {"source_context": 1}
+    assert result["coverage"]["availability"] == "source_unavailable"
+    assert result["conclusion"]["status"] == "analysis_unavailable"
     project.symbols[project.symbol("f")]["language"] = "java"
     result = project.analyze("f", name="x")
     assert "PYTHON_ONLY" in codes(result)
+    assert result["analysis_status"] == "selection_not_found"  # Compatibility status.
+    assert result["coverage"]["requested_language"] == "java"
+    assert result["coverage"]["availability"] == "unsupported_language"
+    assert result["diagnostic_summary"]["by_category"] == {"language_support": 1}
+    assert result["diagnostics"][0]["path"] == "flow.py"
+    assert result["conclusion"]["status"] == "analysis_unavailable"
+    assert result["conclusion"]["absence_proven"] is False
 
 
 def test_import_rebind_and_deleted_field_kill_previous_definitions():
@@ -879,3 +894,86 @@ def test_strict_bounds(parameters):
     project = Project("def f(x):\n    return x\n")
     with pytest.raises(ValueError):
         project.analyze("f", name="x", **parameters)
+
+
+@pytest.mark.parametrize(
+    "source,options,code,category",
+    [
+        (
+            "def f(x):\n    return external(x)\n",
+            {},
+            "CALL_TARGET_UNKNOWN_OR_AMBIGUOUS",
+            "call_resolution",
+        ),
+        (
+            "def f(x):\n    for value in x:\n        x = value\n    return x\n",
+            {},
+            "LOOP_FIXED_POINT_PARTIAL",
+            "control_flow",
+        ),
+        (
+            "def f(x):\n    return x[0]\n",
+            {},
+            "SUBSCRIPT_SELECTION_PARTIAL",
+            "alias_side_effect",
+        ),
+        (
+            "def helper(x):\n    return x\ndef f(x):\n    return helper(x)\n",
+            {"max_depth": 0},
+            "CALL_DEPTH_PARTIAL",
+            "resource_budget",
+        ),
+        (
+            "def f(x):\n    return unbound\n",
+            {},
+            "EXTERNAL_OR_UNBOUND_NAME",
+            "source_context",
+        ),
+    ],
+)
+def test_uncertainty_is_classified_without_losing_original_evidence(
+    source, options, code, category
+):
+    result = Project(source).analyze("f", name="x", **options)
+    diagnostic = next(item for item in result["diagnostics"] if item["code"] == code)
+    assert diagnostic["category"] == category
+    assert diagnostic["message"] and diagnostic["path"] == "flow.py"
+    assert diagnostic["line"] >= 1 and diagnostic["column"] >= 1
+    assert result["diagnostic_summary"]["by_category"][category] >= 1
+    assert result["coverage"]["availability"] == "available"
+    assert result["conclusion"]["runtime_reachability"] == "unknown"
+    assert result["conclusion"]["absence_proven"] is False
+
+
+def test_aggregate_counts_survive_diagnostic_detail_budget():
+    source = (
+        "def f(x):\n"
+        + "".join(f"    value_{i} = external_{i}(x)\n" for i in range(80))
+        + "    return x\n"
+    )
+    result = Project(source).analyze("f", name="x", max_nodes=200, max_edges=500)
+    assert len(result["diagnostics"]) == 50
+    assert "diagnostics_budget" in result["truncated_reasons"]
+    assert result["diagnostic_summary"]["by_category"]["call_resolution"] == 80
+    assert result["diagnostic_summary"]["by_category"]["resource_budget"] >= 1
+    assert result["diagnostic_summary"]["total"] > len(result["diagnostics"])
+
+
+def test_unknown_path_is_not_upgraded_to_proven_flow():
+    project = Project("def f(x):\n    return external(x)\n")
+    result = project.analyze(
+        "f", mode="data_path", name="x", target=project.selector("f", "return")
+    )
+    assert result["path_found"] and result["path_resolution"] == "unknown"
+    assert result["conclusion"]["status"] == "uncertain_path_found"
+    assert result["conclusion"]["absence_proven"] is False
+
+
+def test_source_parse_failure_is_safe_context_diagnostic():
+    project = Project("def f(x):\n    return x\n")
+    project.files["flow.py"] = 'def f(x):\n    broken "SOURCE_DIAGNOSTIC_SENTINEL" @@@\n'
+    result = project.analyze("f", name="x")
+    assert codes(result) == {"PYTHON_PARSE_ERROR"}
+    assert result["diagnostic_summary"]["by_category"] == {"source_context": 1}
+    assert result["coverage"]["availability"] == "source_unavailable"
+    assert "SOURCE_DIAGNOSTIC_SENTINEL" not in str(result)

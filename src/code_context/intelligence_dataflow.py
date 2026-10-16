@@ -11,11 +11,12 @@ from __future__ import annotations
 import ast
 import hashlib
 import time
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
+from code_context.dataflow_diagnostics import annotate_dataflow_result, diagnostic_details
 from code_context.intelligence_models import MAX_FILE_NODES, MAX_PARSE_BYTES
 
 _MODES = frozenset({"data_origin", "data_impact", "data_path", "combined"})
@@ -145,6 +146,7 @@ class _Analysis:
         self.symbols: dict[str, dict] = {}
         self.diagnostics: list[dict] = []
         self.diagnostic_keys: set[tuple] = set()
+        self.diagnostic_counts: Counter[str] = Counter()
         self.truncated_reasons: list[str] = []
         self.overrides: dict[tuple[str, int, int], str] = {}
         self.visited_incoming: set[tuple[str, str, int]] = set()
@@ -160,22 +162,40 @@ class _Analysis:
             self.truncated_reasons.append(reason)
         raise _WorkLimit
 
-    def diagnostic(self, code: str, frame: _Frame | None = None, node=None) -> None:
+    def diagnostic(self, code: str, frame: _Frame | None = None, node=None, *, symbol=None) -> None:
         line, column = _position(node) if node is not None else (None, None)
-        path = frame.symbol["path"] if frame else None
+        symbol = frame.symbol if frame else symbol
+        path = symbol["path"] if symbol else None
         key = code, path, line, column
         if key in self.diagnostic_keys:
             return
         self.diagnostic_keys.add(key)
+        self.diagnostic_counts[diagnostic_details(code)["category"]] += 1
         if len(self.diagnostics) < _MAX_DIAGNOSTICS:
-            item = {"code": code}
-            if frame:
-                item.update(path=path, symbol_id=_symbol_id(frame.symbol))
+            item = {"code": code, **diagnostic_details(code)}
+            if symbol:
+                item.update(path=path, symbol_id=_symbol_id(symbol))
             if node is not None:
                 item.update(line=line, column=column)
             self.diagnostics.append(item)
         elif "diagnostics_budget" not in self.truncated_reasons:
             self.truncated_reasons.append("diagnostics_budget")
+
+    def describe_result(self, result: dict, identifier: str) -> dict:
+        symbol = self.symbols.get(identifier, {})
+        language = symbol.get("language", "python" if symbol else "unknown")
+        if "root" in self.frames:
+            availability = "available"
+        elif language not in {"python", "unknown"}:
+            availability = "unsupported_language"
+        elif symbol.get("path", "").lower().endswith(".pyi"):
+            availability = "unsupported_source"
+        elif self.truncated_reasons or self.diagnostic_counts["resource_budget"]:
+            availability = "budget_limited"
+        else:
+            availability = "source_unavailable"
+        result["coverage"].update(requested_language=language, availability=availability)
+        return annotate_dataflow_result(result, diagnostic_counts=self.diagnostic_counts)
 
     def node(self, frame: _Frame, node: ast.AST, kind: str, name: str = "") -> str:
         self.check()
@@ -244,13 +264,13 @@ class _Analysis:
         if symbol.get("language", "python") != "python" or not path.lower().endswith(
             (".py", ".pyi")
         ):
-            self.diagnostic("PYTHON_ONLY")
+            self.diagnostic("PYTHON_ONLY", symbol=symbol)
             return None
         if path.lower().endswith(".pyi"):
-            self.diagnostic("PYTHON_STUB_UNSUPPORTED")
+            self.diagnostic("PYTHON_STUB_UNSUPPORTED", symbol=symbol)
             return None
         if symbol.get("kind") not in {"function", "method", "constructor"}:
-            self.diagnostic("CALLABLE_REQUIRED")
+            self.diagnostic("CALLABLE_REQUIRED", symbol=symbol)
             return None
         if path not in self.trees:
             text = self.load_source(path)
@@ -258,7 +278,7 @@ class _Analysis:
             if not isinstance(text, str):
                 raise ValueError("data-flow source callback must return source text")
             if len(text) > MAX_PARSE_BYTES or len(text.encode("utf-8")) > MAX_PARSE_BYTES:
-                self.diagnostic("SOURCE_PARSE_BUDGET")
+                self.diagnostic("SOURCE_PARSE_BUDGET", symbol=symbol)
                 return None
             try:
                 tree = (
@@ -270,12 +290,12 @@ class _Analysis:
                 for _ in ast.walk(tree):
                     count += 1
                     if count > MAX_FILE_NODES:
-                        self.diagnostic("AST_NODE_BUDGET")
+                        self.diagnostic("AST_NODE_BUDGET", symbol=symbol)
                         return None
                     if count % 256 == 0:
                         self.check()
             except (SyntaxError, ValueError, UnicodeError, RecursionError, MemoryError):
-                self.diagnostic("PYTHON_PARSE_ERROR")
+                self.diagnostic("PYTHON_PARSE_ERROR", symbol=symbol)
                 return None
             self.trees[path] = tree
         matches = [
@@ -285,7 +305,7 @@ class _Analysis:
         ]
         self.check()
         if len(matches) != 1:
-            self.diagnostic("SYMBOL_SOURCE_MISMATCH")
+            self.diagnostic("SYMBOL_SOURCE_MISMATCH", symbol=symbol)
             return None
         return matches[0]
 
@@ -1157,12 +1177,12 @@ def analyze_dataflow(
         result["candidates"] = [analysis.nodes[identifier] for identifier in roots[:max_nodes]]
         result["candidate_total"] = len(roots)
         result["candidates_truncated"] = len(roots) > max_nodes
-        return result
+        return analysis.describe_result(result, identifier)
     if mode == "data_path":
         targets = analysis.select(target)
         if not targets:
             result["analysis_status"] = "target_not_found"
-            return result
+            return analysis.describe_result(result, identifier)
         # Multiple contexts for one exact target occurrence are expected for different calls.
         # Multiple source occurrences, however, must be narrowed explicitly.
         locations = {
@@ -1172,7 +1192,7 @@ def analyze_dataflow(
         if len(locations) != 1:
             result["analysis_status"] = "selection_ambiguous"
             result["candidates"] = [analysis.nodes[n] for n in targets[:max_nodes]]
-            return result
+            return analysis.describe_result(result, identifier)
         node_ids, edges = analysis.path(roots[0], set(targets), max_nodes, max_edges)
         result["target"] = node_ids[-1] if node_ids else None
         result["paths"] = [node_ids] if node_ids else []
@@ -1224,4 +1244,4 @@ def analyze_dataflow(
     result["truncated"] = bool(result["truncated_reasons"])
     if result["truncated"]:
         result["analysis_status"] = "partial"
-    return result
+    return analysis.describe_result(result, identifier)

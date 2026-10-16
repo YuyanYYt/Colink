@@ -32,6 +32,19 @@ from typing import TYPE_CHECKING
 from code_context.binding_dependencies import declaration_summary, summary_file
 from code_context.fact_payloads import FactCacheError, decode_fact
 from code_context.intelligence_analysis import AnalysisBudgetExceeded
+from code_context.intelligence_coverage import (
+    bound_index_coverage,
+    count_index_diagnostics,
+    index_coverage,
+    public_index_stats,
+)
+from code_context.intelligence_dependencies import (
+    MAX_DEPENDENCY_MANIFEST_BYTES,
+    MAX_DEPENDENCY_MANIFESTS,
+    is_dependency_manifest,
+    merge_dependency_metadata,
+    parse_dependency_manifest,
+)
 from code_context.intelligence_index import (
     INDEX_VERSION,
     MAX_SNAPSHOT_PARSE_BYTES,
@@ -55,7 +68,7 @@ if TYPE_CHECKING:
 _APPLICATION_ID = 0x434C4958
 _SCHEMA_VERSION = 1
 _PAGE_SIZE = 4096
-_INDEX_VERSION = f"live-facts-v5-local-{INDEX_VERSION}"
+_INDEX_VERSION = f"live-facts-v6-coverage-{INDEX_VERSION}"
 _PARSE_CACHE_VERSION = f"live-packed-v1-{PARSER_VERSION}"
 _BINDING_CACHE_VERSION = "binding-reads-v1"
 _MAX_BINDING_BYTES = 16 * 1024 * 1024
@@ -560,7 +573,7 @@ class LiveIndexService:
                 "reason": self._storage_error
                 or state.get("reason")
                 or self._recent.get(project_id),
-                "stats": stats,
+                "stats": public_index_stats(stats),
                 "storage_bytes": storage_bytes,
                 "storage": self._storage_details(project_id),
                 "limits": self._limits(),
@@ -750,7 +763,20 @@ class LiveIndexService:
                     "snapshot": handle,
                     "source_mode": "live",
                     "index_partial": stats["partial"],
+                    "index_coverage": index_coverage(
+                        self._db,
+                        project_id,
+                        1,
+                        stats,
+                        parameters=parameters,
+                        inventory=metadata,
+                        max_chars=max_chars,
+                    ),
                 }
+                if advanced and max_chars < 1600:
+                    base["index_coverage"] = bound_index_coverage(
+                        base["index_coverage"], max_chars, compact=True
+                    )
                 facts = AnalysisFacts(
                     self,
                     project_id,
@@ -797,7 +823,20 @@ class LiveIndexService:
                     view = analyze_structure(
                         facts, project_id, 1, max_chars=max_chars, **parameters
                     )
-                if base["index_partial"] and view.get("analysis_status") == "ready":
+                selected = parameters.get("selector")
+                selected_path = (
+                    selected.get("path")
+                    if isinstance(selected, dict)
+                    else getattr(selected, "path", None)
+                )
+                unsupported_selection = (
+                    parameters.get("mode") == "file_context"
+                    and isinstance(selected_path, str)
+                    and _language(selected_path) == "unsupported"
+                )
+                if (base["index_partial"] or unsupported_selection) and view.get(
+                    "analysis_status"
+                ) == "ready":
                     view["analysis_status"] = "partial"
                 result = bound_analysis_result({**view, **base}, max_chars)
             self._guard(backend, source, project_id, handle, manifest)
@@ -1024,6 +1063,42 @@ class LiveIndexService:
                 if path not in reusable or source.fingerprint(path) != prior[path][0]:
                     del prior[path]
         source_bytes = parse_bytes = parse_facts = parsed_count = reused_count = file_bytes = 0
+        dependency_manifests = []
+        dependency_documents = {}
+        dependency_hashes = {}
+        manifest_items = [
+            item for item in metadata["files"] if is_dependency_manifest(item["path"])
+        ]
+        for item in manifest_items[:MAX_DEPENDENCY_MANIFESTS]:
+            path, content = item["path"], None
+            if (
+                item["size"] <= MAX_DEPENDENCY_MANIFEST_BYTES
+                and source_bytes + item["size"] <= self.max_source_bytes
+            ):
+                try:
+                    document = source.read(path)
+                except SourceError as exc:
+                    if not str(exc).startswith("FILE_EXCLUDED:"):
+                        raise
+                else:
+                    if (
+                        tuple(document.version) != tuple(item["fingerprint"])
+                        or document.size != item["size"]
+                    ):
+                        raise SourceError("LIVE_INDEX_CHANGED: manifest changed during build")
+                    self._observe(backend, source, project_id, handle, path, document.sha256)
+                    source_bytes += item["size"]
+                    content = document.content
+                    dependency_hashes[path] = document.sha256
+                    if path == "pyproject.toml":
+                        dependency_documents[path] = document
+                    del document
+            dependency_manifests.append(parse_dependency_manifest(path, content))
+        dependency_metadata = merge_dependency_metadata(
+            dependency_manifests,
+            truncated=len(manifest_items) > MAX_DEPENDENCY_MANIFESTS
+            or bool(metadata["partial"] or metadata.get("skipped")),
+        )
         repaired_parse_files = 0
         configuration = read_root_configuration(None)
         partial = bool(metadata["partial"] or metadata.get("skipped"))
@@ -1031,7 +1106,8 @@ class LiveIndexService:
             with self._lock:
                 if self._closed:
                     raise SourceError("INDEX_CLOSED: build cancelled")
-            path, sha, parsed = item["path"], None, None
+            path, parsed = item["path"], None
+            sha = dependency_hashes.get(path)
             cached = cached_binding = None
             # Metadata consumes the index budget as well. Omitted paths have no facts.
             file_cost = len(
@@ -1058,7 +1134,8 @@ class LiveIndexService:
             file_bytes += file_cost
             supported = _language(path) != "unsupported"
             if supported or path in _CONFIG_PATHS:
-                if source_bytes + item["size"] > self.max_source_bytes:
+                source_cost = 0 if path in dependency_hashes else item["size"]
+                if source_bytes + source_cost > self.max_source_bytes:
                     parsed = _limited(path, "PROJECT_SOURCE_BUDGET_EXCEEDED") if supported else None
                     partial = True
                     if path == "pyproject.toml":
@@ -1092,7 +1169,11 @@ class LiveIndexService:
                         # Every retained prior parse passed the batch's double-stat
                         # and hash validation; changed files still need complete reads.
                         unchanged = cached is not None
-                        document = None if unchanged else source.read(path)
+                        document = (
+                            None
+                            if unchanged
+                            else dependency_documents.get(path) or source.read(path)
+                        )
                     except SourceError as exc:
                         if not str(exc).startswith("FILE_EXCLUDED:"):
                             raise
@@ -1109,7 +1190,7 @@ class LiveIndexService:
                         ):
                             raise SourceError("LIVE_INDEX_CHANGED: source changed during build")
                         sha = cached[0] if unchanged else document.sha256
-                        source_bytes += item["size"]
+                        source_bytes += source_cost
                         self._observe(backend, source, project_id, handle, path, sha)
                         if path == "pyproject.toml":
                             configuration = read_root_configuration(document.content)
@@ -1224,7 +1305,7 @@ class LiveIndexService:
         fact_updates, parse_updates = set(), set()
         binding_bytes = 0
         index_bytes, fact_count = file_bytes, 0
-        languages, statuses = {}, {}
+        languages, statuses, index_diagnostics = {}, {}, {}
         for path, parsed in parsed_files.items():
             cached_info = binding_data.get(path)
             reuse_file = reuse_relations and path in reused_paths and cached_info is not None
@@ -1339,6 +1420,7 @@ class LiveIndexService:
                 fact_count += count
             languages[parsed.language] = languages.get(parsed.language, 0) + 1
             statuses[status] = statuses.get(status, 0) + 1
+            count_index_diagnostics(index_diagnostics, diagnostics)
             indexed_row = (
                 project_id,
                 source.source_id,
@@ -1413,6 +1495,7 @@ class LiveIndexService:
             "supported_languages": ["python", "java"],
             "files_by_language": languages,
             "files_by_status": statuses,
+            "index_diagnostics": index_diagnostics,
             "python_source_roots": list(resolver.python_source_roots),
             "python_source_roots_mode": resolver.python_roots.mode,
             "python_source_roots_diagnostics": [{"code": resolver.python_roots.diagnostic}]
@@ -1443,6 +1526,7 @@ class LiveIndexService:
             "file_count": len(files),
             "metadata_payload_bytes": file_bytes,
             "discovery_partial": metadata["partial"],
+            "dependency_metadata": dependency_metadata,
             "build_ms": round((time.perf_counter() - started) * 1000, 3),
             "analysis": "static; unresolved targets are not runtime facts",
         }

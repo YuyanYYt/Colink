@@ -6,6 +6,7 @@ from collections import defaultdict, deque
 from itertools import islice
 
 from code_context.fact_payloads import FactCacheError, decode_fact
+from code_context.intelligence_dependencies import DependencyClassifier
 from code_context.intelligence_models import CLASS_KINDS, Relation, module_id
 from code_context.policy import validate_path
 from code_context.source_page import source_page
@@ -775,6 +776,40 @@ def external_dependencies(
     _bounds(offset, limit)
     if query is not None and len(query) > 200:
         raise ValueError("dependency query is too long")
+    if getattr(db, "source_mode", None) == "live":
+        row = db.execute(
+            "SELECT stats FROM li_projects WHERE project_id=?", (project_id,)
+        ).fetchone()
+    else:
+        row = db.execute(
+            "SELECT stats FROM ci_snapshots WHERE project_id=? AND revision=?",
+            (project_id, revision),
+        ).fetchone()
+    stats = json.loads(row["stats"]) if row is not None else {}
+    metadata = stats.get("dependency_metadata", {})
+    metadata_diagnostics = [
+        *metadata.get("diagnostics", []),
+        *(
+            {**diagnostic, "path": manifest["path"]}
+            for manifest in metadata.get("manifests", [])
+            for diagnostic in manifest.get("diagnostics", [])
+        ),
+    ]
+    if not metadata:
+        metadata_diagnostics.append({"code": "DEPENDENCY_METADATA_UNAVAILABLE"})
+    files = list(
+        db.execute(
+            "SELECT path, language, module FROM ci_files WHERE project_id=? AND revision=?",
+            (project_id, revision),
+        )
+    )
+    languages = {item["path"]: item["language"] for item in files}
+    classifier = DependencyClassifier(files, metadata, tuple(stats.get("python_source_roots", ())))
+    local_imports_omitted = db.execute(
+        "SELECT COUNT(*) FROM ci_relations WHERE project_id=? AND revision=? "
+        "AND kind='IMPORT' AND resolution='resolved' AND target_path IS NOT NULL",
+        (project_id, revision),
+    ).fetchone()[0]
     groups = {}
     for row in db.execute(
         "SELECT data FROM ci_relations WHERE project_id=? AND revision=? "
@@ -786,15 +821,25 @@ def external_dependencies(
         name = relation.get("target_module") or relation["name"]
         if query and query.casefold() not in name.casefold():
             continue
+        language = languages.get(relation["source_path"], "unknown")
+        classification = classifier.classify(relation, language)
         group = groups.setdefault(
-            name,
+            (language, name, classification["dependency_kind"]),
             {
                 "module": name,
+                "language": language,
                 "classification": relation["resolution"],
+                **classification,
                 "used_by": [],
                 "usage_count": 0,
             },
         )
+        for evidence in classification["dependency_evidence"]:
+            if (
+                evidence not in group["dependency_evidence"]
+                and len(group["dependency_evidence"]) < 4
+            ):
+                group["dependency_evidence"].append(evidence)
         group["usage_count"] += 1
         if len(group["used_by"]) < 10:
             group["used_by"].append({"path": relation["source_path"], "line": relation["line"]})
@@ -805,8 +850,17 @@ def external_dependencies(
         "offset": offset,
         "has_more": offset + limit < len(items),
         "next_offset": offset + limit if offset + limit < len(items) else None,
-        "coverage": "missing imports may be external libraries, ignored local files or typos; "
-        "no installed versions or third-party source were inspected",
+        "local_imports_omitted": local_imports_omitted,
+        "local_dependency_query": "file_dependencies",
+        "dependency_metadata_partial": metadata.get("partial", True),
+        "dependency_manifest_count": len(metadata.get("manifests", [])),
+        "dependency_metadata_diagnostics": metadata_diagnostics[:5],
+        "dependency_metadata_diagnostics_omitted": max(0, len(metadata_diagnostics) - 5),
+        "coverage": "missing imports only; dependency_kind is static provenance, "
+        "not installation, version compatibility or symbol availability. Resolved local "
+        "imports are omitted; use file_dependencies. Unknown imports can be excluded "
+        "local modules, undeclared libraries or typos. No installed packages, "
+        "third-party source or dependency resolver were inspected",
     }
 
 
