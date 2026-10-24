@@ -110,9 +110,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func showPanel() {
         guard let button = statusItem?.button, popover != nil else { return }
         NSApplication.shared.activate(ignoringOtherApps: true)
-        controller.refresh()
+        controller.panelDidShow()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        controller.panelDidHide()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

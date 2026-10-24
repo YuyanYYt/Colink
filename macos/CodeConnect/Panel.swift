@@ -391,6 +391,10 @@ private struct StorageSettingsView: View {
                             .disabled(!controller.canChangeStorage)
                             .help("关闭连接后可更改存储位置")
                         Button("打开文件夹") { controller.openStorage() }
+                        if controller.configuration.isLive {
+                            Button("项目数据") { controller.showingProjectStorage = true }
+                                .disabled(controller.projectBusy)
+                        }
                     }.font(.system(size: 12)).buttonStyle(.bordered).controlSize(.large)
                     if let error = controller.storageError {
                         Text(error).font(.system(size: 11)).foregroundStyle(.orange)
@@ -401,6 +405,118 @@ private struct StorageSettingsView: View {
         .background(PanelSheetBackground()).presentationBackground(.clear)
         .onAppear { controller.storageExpanded = false }
         .onDisappear { controller.storageExpanded = false }
+        .sheet(isPresented: $controller.showingProjectStorage) {
+            ProjectStorageView(controller: controller)
+        }
+    }
+}
+
+private struct ProjectStorageView: View {
+    @ObservedObject var controller: ConnectionController
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("项目工作区").font(.system(size: 21, weight: .semibold, design: .rounded))
+                Spacer()
+                Button(controller.projectBusy ? "读取中…" : "刷新") {
+                    controller.loadProjectWorkspaces(offset: controller.workspacePageOffset)
+                }.disabled(controller.projectBusy)
+            }
+            Text("每行是一个 CoLink 本机工作区。清理后可从废纸篓恢复或在源目录重新建立；源代码、全局连接配置与未完成写入恢复记录保留。")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    if controller.savedWorkspaceStorage.isEmpty && !controller.projectBusy {
+                        Text("尚无可管理的项目工作区。")
+                            .font(.system(size: 12)).foregroundStyle(.secondary)
+                    }
+                    ForEach(controller.savedWorkspaceStorage) { workspace in
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack {
+                                Text(workspace.name).font(.system(size: 13, weight: .semibold))
+                                if !workspace.sourceExists {
+                                    Text("原目录不存在").font(.system(size: 10)).foregroundStyle(.orange)
+                                }
+                                Spacer()
+                                Text(ByteCountFormatter.string(fromByteCount: workspace.workspaceBytes,
+                                                               countStyle: .file))
+                                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                            }
+                            Text("工作区：\(workspace.workspaceDirectory)").font(.system(size: 10))
+                                .textSelection(.enabled)
+                                .lineLimit(2).truncationMode(.middle)
+                                .help(workspace.workspaceDirectory)
+                            Text("来源目录：\(workspace.sourcePath)").font(.system(size: 10))
+                                .foregroundStyle(.secondary).textSelection(.enabled)
+                                .lineLimit(2).truncationMode(.middle).help(workspace.sourcePath)
+                            Text("项目：\(workspace.projectCount) 个（\(workspace.projectNamesSummary)）")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2).truncationMode(.tail)
+                                .help(workspace.projectNames.joined(separator: "、"))
+                            Text("运行目录：\(workspace.runtimeDirectory)").font(.system(size: 10))
+                                .foregroundStyle(.secondary).textSelection(.enabled)
+                                .lineLimit(2).truncationMode(.middle).help(workspace.runtimeDirectory)
+                            Text("磁盘占用：" + ByteCountFormatter.string(
+                                fromByteCount: workspace.workspaceAllocatedBytes, countStyle: .file)
+                                + "；索引合计：" + ByteCountFormatter.string(
+                                    fromByteCount: workspace.indexBytes, countStyle: .file))
+                                .font(.system(size: 10)).foregroundStyle(.secondary)
+                            HStack {
+                                Button("打开工作区") { controller.revealProjectWorkspace(workspace) }
+                                Button("清理工作区", role: .destructive) {
+                                    controller.pendingWorkspaceCleanup = workspace
+                                    controller.showingWorkspaceCleanupConfirmation = true
+                                }
+                                    .disabled(controller.projectBusy
+                                              || controller.ownsConnection || controller.phase == .external)
+                                    .help("关闭连接后清理该工作区的本地派生数据")
+                            }.font(.system(size: 11))
+                        }
+                        Divider()
+                    }
+                }.padding(.vertical, 4)
+            }.frame(minHeight: 160, maxHeight: 350)
+            if controller.storageMetadataUnavailable > 0 {
+                Text("\(controller.storageMetadataUnavailable) 份登记暂不可读，已保留原数据。")
+                    .font(.system(size: 11)).foregroundStyle(.orange)
+            }
+            if let error = controller.projectError {
+                Text(error).font(.system(size: 11)).foregroundStyle(.orange)
+            }
+            if let message = controller.workspaceCleanupMessage {
+                Text(message).font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            HStack {
+                Text("共 \(controller.workspaceTotal) 个工作区").font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Button("上一页") {
+                    controller.loadProjectWorkspaces(offset: max(0, controller.workspacePageOffset - 10))
+                }.disabled(controller.projectBusy || controller.workspacePageOffset == 0)
+                Button("下一页") {
+                    if let offset = controller.workspaceNextOffset {
+                        controller.loadProjectWorkspaces(offset: offset)
+                    }
+                }.disabled(controller.projectBusy || controller.workspaceNextOffset == nil)
+                Spacer()
+                Button("完成") { controller.showingProjectStorage = false }
+            }
+        }.padding(24).frame(width: 600).tint(accent)
+        .onAppear { controller.loadProjectWorkspaces() }
+        .alert("清理项目工作区？", isPresented: $controller.showingWorkspaceCleanupConfirmation) {
+            Button("取消", role: .cancel) { controller.pendingWorkspaceCleanup = nil }
+            Button("移到废纸篓", role: .destructive) {
+                if let workspace = controller.pendingWorkspaceCleanup {
+                    controller.trashProjectWorkspace(workspace)
+                }
+                controller.pendingWorkspaceCleanup = nil
+            }
+        } message: {
+            let workspace = controller.pendingWorkspaceCleanup
+            Text("\(workspace?.name ?? "")\n将移除这个工作区内的 CoLink 本地派生数据，包含 \(workspace?.projectCount ?? 0) 个项目：\(workspace?.projectNamesSummary ?? "")。源代码、全局连接配置与未完成写入恢复记录保留。")
+        }
     }
 }
 

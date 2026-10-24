@@ -9,13 +9,20 @@ import sqlite3
 import time
 from pathlib import PurePosixPath
 
+from code_context.intelligence_coverage import count_index_diagnostics
+from code_context.intelligence_dependencies import (
+    MAX_DEPENDENCY_MANIFESTS,
+    is_dependency_manifest,
+    merge_dependency_metadata,
+    parse_dependency_manifest,
+)
 from code_context.intelligence_models import PARSER_VERSION, ParsedFile
 from code_context.intelligence_resolver import Resolver
 from code_context.intelligence_roots import MAX_SOURCE_ROOTS, read_root_configuration
 
 # Source-root binding changed, but extracted facts did not. Rebuild derived
 # relations on startup while retaining the existing content-addressed parse cache.
-INDEX_VERSION = f"{PARSER_VERSION}-roots-v1"
+INDEX_VERSION = f"{PARSER_VERSION}-roots-v1-dependencies-v1-coverage-v1"
 
 MAX_SNAPSHOT_PARSE_BYTES = 32 * 1024 * 1024
 MAX_SNAPSHOT_INDEX_BYTES = 32 * 1024 * 1024
@@ -97,6 +104,28 @@ def _root_configuration(db: sqlite3.Connection, project_id: str, revision: int):
         (project_id, revision),
     ).fetchone()
     return read_root_configuration(row["content"] if row is not None else None)
+
+
+def _dependency_metadata(db: sqlite3.Connection, project_id: str, revision: int) -> dict:
+    # The producer reads only already-retained authorized source blobs. Queries
+    # consume these source-free facts from the exact same immutable publication.
+    paths = [
+        row["path"]
+        for row in db.execute(
+            "SELECT path FROM files WHERE project_id=? AND revision=? ORDER BY path",
+            (project_id, revision),
+        )
+        if is_dependency_manifest(row["path"])
+    ]
+    manifests = []
+    for path in paths[:MAX_DEPENDENCY_MANIFESTS]:
+        row = db.execute(
+            "SELECT b.content FROM files f JOIN blobs b USING(sha256) "
+            "WHERE f.project_id=? AND f.revision=? AND f.path=?",
+            (project_id, revision, path),
+        ).fetchone()
+        manifests.append(parse_dependency_manifest(path, row["content"]))
+    return merge_dependency_metadata(manifests, truncated=len(paths) > MAX_DEPENDENCY_MANIFESTS)
 
 
 def build_index(db: sqlite3.Connection, project_id: str, revision: int) -> None:
@@ -184,6 +213,7 @@ def build_index(db: sqlite3.Connection, project_id: str, revision: int) -> None:
     index_bytes = facts_count = resolved_count = copied_count = 0
     languages: dict[str, int] = {}
     statuses: dict[str, int] = {}
+    index_diagnostics: dict[str, int] = {}
     for path, parsed in sorted(parsed_files.items()):
         languages[parsed.language] = languages.get(parsed.language, 0) + 1
         symbol_rows = []
@@ -250,6 +280,7 @@ def build_index(db: sqlite3.Connection, project_id: str, revision: int) -> None:
             index_bytes += cost
             facts_count += count
         statuses[parsed.status] = statuses.get(parsed.status, 0) + 1
+        count_index_diagnostics(index_diagnostics, parsed.diagnostics)
         db.execute(
             "INSERT INTO ci_files VALUES(?, ?, ?, ?, ?, ?, ?)",
             (
@@ -270,6 +301,7 @@ def build_index(db: sqlite3.Connection, project_id: str, revision: int) -> None:
         "supported_languages": ["python", "java"],
         "files_by_language": languages,
         "files_by_status": statuses,
+        "index_diagnostics": index_diagnostics,
         "partial": bool(resolver.python_roots.diagnostic)
         or any(s not in {"ready", "unsupported"} for s in statuses),
         "python_source_roots": list(resolver.python_source_roots),
@@ -292,6 +324,7 @@ def build_index(db: sqlite3.Connection, project_id: str, revision: int) -> None:
         "reused_parse_files": reused_count,
         "resolved_files": resolved_count,
         "reused_relation_files": copied_count,
+        "dependency_metadata": _dependency_metadata(db, project_id, revision),
         "parse_payload_bytes": parse_bytes,
         "index_payload_bytes": index_bytes,
         "fact_count": facts_count,

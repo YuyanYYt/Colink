@@ -18,6 +18,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from threading import Condition
 
+from code_context.dataflow_ast_cache import DataflowAstCache
+from code_context.intelligence_coverage import public_index_stats
 from code_context.intelligence_index import MAX_SNAPSHOT_PARSE_BYTES
 from code_context.live_index import (
     _APPLICATION_ID,
@@ -64,6 +66,8 @@ class ProjectIndexService:
         self._condition = Condition()
         self._entries = OrderedDict()
         self._closed = False
+        self.on_activity = None
+        self.dataflow_ast_cache = DataflowAstCache()
         self._ownership = os.open(
             self.root / "project-index.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600
         )
@@ -135,6 +139,8 @@ class ProjectIndexService:
                     executor=self._executor,
                     **self._options,
                 )
+                entry["service"].on_activity = self._changed
+                entry["service"].dataflow_ast_cache = self.dataflow_ast_cache
             yield entry["service"]
         finally:
             with self._condition:
@@ -142,6 +148,33 @@ class ProjectIndexService:
                 if entry["service"] is None:
                     self._entries.pop(project_id, None)
                 self._condition.notify_all()
+            self._changed()
+
+    def _changed(self):
+        if self.on_activity is not None:
+            self.on_activity()
+
+    def active_count(self):
+        """Observe leases/futures without starting, querying or cancelling work."""
+        with self._condition:
+            return sum(
+                entry["users"] + bool(entry["service"] and entry["service"]._tasks)
+                for entry in self._entries.values()
+            )
+
+    def trim_idle(self):
+        """Release unused handles, retaining databases, pool owner and executor."""
+        services = []
+        with self._condition:
+            if self._closed:
+                return 0
+            for project, entry in tuple(self._entries.items()):
+                service = entry["service"]
+                if not entry["users"] and service is not None and not service._tasks:
+                    services.append(self._entries.pop(project)["service"])
+        for service in services:
+            service.close()
+        return len(services)
 
     def query(self, backend, project_id, handle, operation, **parameters):
         # Refuse before creating a project cache. The delegated query validates
@@ -163,6 +196,7 @@ class ProjectIndexService:
 
     def invalidate(self, project_id):
         self.path_for(project_id)
+        self.dataflow_ast_cache.evict_project(project_id)
         with self._condition:
             if self._closed:
                 return
@@ -228,7 +262,7 @@ class ProjectIndexService:
                     stats = json.loads(row[0])
                     result.update(
                         status="closed" if closed else "cached",
-                        stats=stats,
+                        stats=public_index_stats(stats),
                         index_partial=stats.get("partial", True),
                     )
                 result["storage_bytes"] = path.stat().st_size
@@ -243,6 +277,7 @@ class ProjectIndexService:
             if self._closed:
                 return
             self._closed = True
+            self.dataflow_ast_cache.close()
             while any(entry["users"] for entry in self._entries.values()):
                 self._condition.wait()
             services = [

@@ -1,8 +1,11 @@
+import io
 import json
 import os
+import select
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,7 +14,12 @@ from unittest.mock import Mock
 import pytest
 
 from code_context.client import SyncError
-from code_context.desktop import _stop_owned_group, desktop_binding, desktop_status
+from code_context.desktop import (
+    _desktop_control_pipe,
+    _stop_owned_group,
+    desktop_binding,
+    desktop_status,
+)
 from code_context.local import LocalMirror, read_local_mirror_status
 from code_context.scanner import ScanError
 from code_context.storage import MirrorStore
@@ -158,6 +166,89 @@ def test_stop_permission_failure_is_not_reported_as_closed(monkeypatch):
     child.wait.assert_not_called()
 
 
+def test_private_control_status_reuses_reader_and_echoes_request_counters(monkeypatch):
+    status = Mock(return_value={"ready": True, "workspace_status": {"power_state": "idle"}})
+    monkeypatch.setattr("code_context.desktop.desktop_status", status)
+    frames = [
+        {"type": "status", "epoch": 1, "seq": 1},
+        {"type": "status", "epoch": 3, "seq": 2},
+    ]
+    stream = io.BytesIO(
+        b"".join(json.dumps(frame).encode() + b"\n" for frame in frames) + b"stop\n"
+    )
+    output = io.BytesIO()
+    stopped = threading.Event()
+    _desktop_control_pipe("workspace", "root", "live", stopped, stream, output)
+    responses = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert [(item["epoch"], item["seq"]) for item in responses] == [(1, 1), (3, 2)]
+    assert all(item["type"] == "status" and item["status"]["ready"] for item in responses)
+    assert status.call_count == 2 and stopped.is_set()
+    status.assert_called_with("workspace", "root", "live")
+
+
+@pytest.mark.parametrize(
+    "frame_bytes",
+    [
+        b"",
+        b"\n",
+        b"status\n",
+        b"{}\n",
+        b"[]\n",
+        b"x" * 4097 + b"\n",
+        b'{"type":"status","epoch":1,"seq":1}',
+        b'{"type":"stop","epoch":1,"seq":1}\n',
+        b'{"type":"status","epoch":true,"seq":1}\n',
+        b'{"type":"status","epoch":1,"seq":1.0}\n',
+        b'{"type":"status","epoch":0,"seq":1}\n',
+        b'{"type":"status","epoch":1,"seq":0}\n',
+        b'{"type":"status","epoch":1,"seq":9007199254740992}\n',
+        b'{"type":"status","epoch":1,"seq":1,"action":"enable_write"}\n',
+        b'{"type":"status","epoch":1,"seq":1,"seq":2}\n',
+        b"\xff\n",
+    ],
+)
+def test_private_control_invalid_frames_close_without_status_or_echo(monkeypatch, frame_bytes):
+    status = Mock()
+    monkeypatch.setattr("code_context.desktop.desktop_status", status)
+    output = io.BytesIO()
+    stopped = threading.Event()
+    _desktop_control_pipe("workspace", "root", "live", stopped, io.BytesIO(frame_bytes), output)
+    assert stopped.is_set() and output.getvalue() == b""
+    status.assert_not_called()
+
+
+@pytest.mark.parametrize("next_epoch,next_sequence", [(1, 1), (1, 2), (2, 1)])
+def test_private_control_replay_or_older_epoch_closes(monkeypatch, next_epoch, next_sequence):
+    status = Mock(return_value={"ready": True})
+    monkeypatch.setattr("code_context.desktop.desktop_status", status)
+    first = {"type": "status", "epoch": 2, "seq": 1}
+    second = {"type": "status", "epoch": next_epoch, "seq": next_sequence}
+    stream = io.BytesIO(json.dumps(first).encode() + b"\n" + json.dumps(second).encode() + b"\n")
+    output = io.BytesIO()
+    stopped = threading.Event()
+    _desktop_control_pipe("workspace", "root", "live", stopped, stream, output)
+    assert stopped.is_set() and len(output.getvalue().splitlines()) == 1
+    assert status.call_count == 1
+
+
+@pytest.mark.parametrize("failure", ["oversized_status", "reader", "output"])
+def test_private_control_status_failure_closes_without_details(monkeypatch, failure):
+    if failure == "reader":
+        status = Mock(side_effect=RuntimeError("private source or token must not be echoed"))
+    else:
+        status = Mock(return_value={"text": "x" * 65536} if failure == "oversized_status" else {})
+    monkeypatch.setattr("code_context.desktop.desktop_status", status)
+    output = io.BytesIO()
+    if failure == "output":
+        output.close()
+    stopped = threading.Event()
+    stream = io.BytesIO(b'{"type":"status","epoch":1,"seq":1}\n')
+    _desktop_control_pipe("workspace", "root", "live", stopped, stream, output)
+    assert stopped.is_set()
+    if failure != "output":
+        assert output.getvalue() == b""
+
+
 @pytest.fixture
 def fake_official_client(desktop_workspace):
     workspace, _ = desktop_workspace
@@ -282,6 +373,51 @@ def await_running(workspace, root, supervisor):
             pass
         time.sleep(0.05)
     raise AssertionError("desktop mirror did not start")
+
+
+@pytest.mark.parametrize("failure", ["malformed", "oversized", "replay", "output_eof"])
+def test_supervisor_status_pipe_preserves_identity_and_failures_stop_tree(
+    desktop_workspace, fake_official_client, failure
+):
+    workspace, root = desktop_workspace
+    supervisor = launch(workspace, root, fake_official_client)
+    try:
+        await_running(workspace, root, supervisor)
+        server_pid = int((workspace / "fake-mcp.pid").read_text())
+        for epoch, sequence in ((1, 1), (3, 2)):
+            supervisor.stdin.write(
+                json.dumps({"type": "status", "epoch": epoch, "seq": sequence}) + "\n"
+            )
+            supervisor.stdin.flush()
+            assert select.select([supervisor.stdout], [], [], 5)[0], "missing status frame"
+            response = json.loads(supervisor.stdout.readline(65538))
+            assert response["type"] == "status"
+            assert (response["epoch"], response["seq"]) == (epoch, sequence)
+            assert response["status"]["supervised"] and response["status"]["running"]
+            assert response["status"]["app_pid"] == os.getpid()
+            assert response["status"]["selected_root"] == str(root)
+            assert supervisor.poll() is None
+        if failure == "output_eof":
+            supervisor.stdout.close()
+            invalid = json.dumps({"type": "status", "epoch": 3, "seq": 3}) + "\n"
+        elif failure == "oversized":
+            invalid = "x" * 4097 + "\n"
+        elif failure == "replay":
+            invalid = json.dumps({"type": "status", "epoch": 3, "seq": 2}) + "\n"
+        else:
+            invalid = '{"type":"enable_write"}\n'
+        supervisor.stdin.write(invalid)
+        supervisor.stdin.flush()
+        assert supervisor.wait(timeout=12) == 0, supervisor.stderr.read()
+        with pytest.raises(ProcessLookupError):
+            os.kill(server_pid, 0)
+        assert not desktop_status(workspace, root)["running"]
+        if failure != "output_eof":
+            assert supervisor.stdout.read() == ""
+    finally:
+        if supervisor.poll() is None:
+            supervisor.send_signal(signal.SIGTERM)
+            supervisor.wait(timeout=12)
 
 
 @pytest.mark.parametrize("stop_mode", ["request", "pipe_eof", "signal"])

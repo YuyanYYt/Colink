@@ -4,10 +4,11 @@ import sys
 import pytest
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.server.mcpserver.exceptions import ToolError
 
 from code_context.live import LiveQueries
 from code_context.project_registry import ProjectRegistry
-from code_context.read_context import ContextError
+from code_context.read_context import ContextError, ReadContexts
 from code_context.server import build_mcp
 from code_context.source_access import SourceAccess, SourceError
 
@@ -47,6 +48,97 @@ def test_project_context_and_history_never_silently_fall_back(backend):
     assert backend.get_recent_diff("a", handle)["reason"] == "NO_TASK_BASELINE"
     with pytest.raises(SourceError, match="PROJECT_NOT_AUTHORIZED"):
         backend.resolve_snapshot("unknown")
+
+
+@pytest.mark.parametrize("operation", ["file", "overview", "search", "structure", "diff"])
+def test_failed_new_requests_release_only_their_context(backend, monkeypatch, operation):
+    backend.contexts = ReadContexts(max_contexts=2)
+    other = backend.read_file("b", "b.py")["snapshot"]
+    other_files = backend.contexts.get("b", backend.sources["b"].source_id, other).files
+    source = backend.sources["a"]
+    if operation in {"overview", "search"}:
+
+        def unavailable(**_parameters):
+            raise SourceError("FILE_UNAVAILABLE: injected discovery failure")
+
+        monkeypatch.setattr(source, "manifest", unavailable)
+
+    queries = {
+        "file": lambda: backend.read_file("a", "missing.py"),
+        "overview": lambda: backend.repo_overview("a", None),
+        "search": lambda: backend.search_code("a", "before"),
+        "structure": lambda: backend.code_query("a", None, "analyze_code"),
+        "diff": lambda: backend.get_recent_diff("a", detail="invalid"),
+    }
+    for _ in range(4):
+        with pytest.raises(SourceError) as error:
+            queries[operation]()
+        assert not str(error.value).startswith("LIVE_CONTEXT_CAPACITY:")
+        assert backend.contexts.get("b", backend.sources["b"].source_id, other).files == other_files
+    assert backend.read_file("b", "b.py", other)["content"] == "other project\n"
+    backend.resolve_snapshot("a")
+
+
+def test_failed_request_preserves_existing_snapshot_and_observed_metadata(backend):
+    backend.contexts = ReadContexts(max_contexts=1)
+    handle = backend.read_file("a", "a.py")["snapshot"]
+    with pytest.raises(SourceError, match="FILE_UNAVAILABLE"):
+        backend.read_file("a", "missing.py", handle)
+    assert backend.read_file("a", "a.py", handle)["content"] == "before\n"
+    assert backend.contexts.get("a", backend.sources["a"].source_id, handle).files
+
+
+def test_outer_request_failure_releases_successful_inner_read_metadata(backend):
+    backend.contexts = ReadContexts(max_contexts=1)
+    with pytest.raises(RuntimeError, match="injected response failure"):
+        with backend.context_request("a") as (_, handle):
+            backend.read_file("a", "a.py", handle)
+            raise RuntimeError("injected response failure")
+    with pytest.raises(ContextError, match="unknown"):
+        backend.contexts.get("a", backend.sources["a"].source_id, handle)
+    backend.read_file("a", "a.py")
+
+
+def test_live_context_capacity_is_distinct_and_preserves_existing_reads(backend):
+    backend.contexts = ReadContexts(max_contexts=1)
+    handle = backend.read_file("a", "a.py")["snapshot"]
+    with pytest.raises(SourceError, match="LIVE_CONTEXT_CAPACITY") as error:
+        backend.repo_overview("a", None)
+    assert "repo_overview" not in str(error.value)
+    assert backend.read_file("a", "a.py", handle)["content"] == "before\n"
+
+
+def test_failed_observation_releases_new_context_and_preserves_active_files(backend):
+    backend.contexts = ReadContexts(max_contexts=2, max_files=1)
+    handle = backend.read_file("b", "b.py")["snapshot"]
+    for _ in range(3):
+        with pytest.raises(SourceError, match="LIVE_CONTEXT_CAPACITY"):
+            backend.read_file("a", "a.py")
+    assert backend.read_file("b", "b.py", handle)["content"] == "other project\n"
+    backend.resolve_snapshot("a")
+
+
+def test_mcp_failed_overview_does_not_leak_server_created_context(backend, monkeypatch):
+    backend.contexts = ReadContexts(max_contexts=1)
+    source = backend.sources["a"]
+    manifest = source.manifest
+
+    def unavailable(**_parameters):
+        raise SourceError("FILE_UNAVAILABLE: injected discovery failure")
+
+    monkeypatch.setattr(source, "manifest", unavailable)
+
+    async def inspect():
+        mcp = build_mcp(backend)
+        for _ in range(3):
+            with pytest.raises(ToolError, match="FILE_UNAVAILABLE") as error:
+                await mcp.call_tool("repo_overview", {"project_id": "a"})
+            assert "LIVE_CONTEXT_CAPACITY" not in str(error.value)
+        monkeypatch.setattr(source, "manifest", manifest)
+        result = await mcp.call_tool("repo_overview", {"project_id": "a"})
+        assert not result.is_error
+
+    asyncio.run(inspect())
 
 
 def test_search_and_pagination_are_source_bounded(backend):
@@ -146,7 +238,8 @@ def test_live_mcp_keeps_read_annotations_and_explains_contexts(backend):
             backend, project_names={"a": "A", "b": "B"}, status_provider=backend.mcp_status
         )
         tools = await mcp.list_tools()
-        assert len(tools) == 15
+        assert len(tools) == 9
+        assert "analyze_code" in {tool.name for tool in tools}
         assert all(tool.annotations.read_only_hint for tool in tools)
         overview = next(tool for tool in tools if tool.name == "repo_overview")
         assert "not an immutable historical" in overview.description
@@ -187,16 +280,27 @@ def test_live_stdio_reads_new_saved_content_without_source_database(tmp_path):
                 overview = await session.call_tool("repo_overview", {"project_id": "sample"})
                 snapshot = overview.structured_content["snapshot"]
                 before = await session.call_tool(
-                    "read_file", {"project_id": "sample", "path": "a.py", "snapshot": snapshot}
+                    "read_code",
+                    {
+                        "project_id": "sample",
+                        "request": {"mode": "file", "path": "a.py"},
+                        "snapshot": snapshot,
+                    },
                 )
                 assert before.structured_content["content"] == "before\n"
                 file.write_text("after\n")
                 stale = await session.call_tool(
-                    "read_file", {"project_id": "sample", "path": "a.py", "snapshot": snapshot}
+                    "read_code",
+                    {
+                        "project_id": "sample",
+                        "request": {"mode": "file", "path": "a.py"},
+                        "snapshot": snapshot,
+                    },
                 )
                 assert stale.is_error
                 fresh = await session.call_tool(
-                    "read_file", {"project_id": "sample", "path": "a.py"}
+                    "read_code",
+                    {"project_id": "sample", "request": {"mode": "file", "path": "a.py"}},
                 )
                 assert fresh.structured_content["content"] == "after\n"
 

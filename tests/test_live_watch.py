@@ -109,3 +109,53 @@ def test_real_watch_records_saved_sample_changes(tmp_path):
     assert changed.wait(3)
     watcher.close()
     assert all(source.metrics["body_reads"] == 0 for source in sources.values())
+
+
+def test_idle_preserves_events_and_refreshes_paths_without_periodic_scan(tmp_path, monkeypatch):
+    sources = projects(tmp_path)
+    ready, emit, changed = threading.Event(), threading.Event(), threading.Event()
+    manifests, options = [], []
+    original = SourceAccess.manifest
+
+    def manifest(self, **kwargs):
+        manifests.append(self.root)
+        return original(self, **kwargs)
+
+    def fake_watch(*paths, **kwargs):
+        options.append(kwargs["yield_on_timeout"])
+        ready.set()
+        while not kwargs["stop_event"].wait(0.01):
+            if emit.is_set():
+                emit.clear()
+                yield {(1, str(sources["a"].root / "new"))}
+            else:
+                yield set()
+
+    monkeypatch.setattr(SourceAccess, "manifest", manifest)
+    watcher = WatchCoordinator(
+        sources, lambda _: changed.set(), watch_function=fake_watch, reconcile_seconds=0.01
+    )
+    watcher.set_active(False)
+    changed.clear()
+    watcher.start()
+    try:
+        assert ready.wait(2)
+        count = len(manifests)
+        time.sleep(0.05)
+        assert len(manifests) == count and options == [False]
+        (sources["a"].root / "new").mkdir()
+        emit.set()
+        assert changed.wait(2)
+        deadline = time.monotonic() + 2
+        while sources["a"].root / "new" not in watcher.metadata["a"]["directories"]:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert all(source.metrics["body_reads"] == 0 for source in sources.values())
+        watcher.set_active(True)
+        deadline = time.monotonic() + 2
+        while True not in options:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+    finally:
+        watcher.close()
+    assert not watcher.thread.is_alive()

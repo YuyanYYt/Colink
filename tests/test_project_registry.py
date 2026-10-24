@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import stat
@@ -44,6 +45,30 @@ def state_file(data):
 def save_test_state(data, state):
     state_file(data).write_text(json.dumps(state), encoding="utf-8")
     state_file(data).chmod(0o600)
+
+
+def legacy_test_state(workspace, data, schema):
+    state = json.loads(state_file(data).read_text())
+    state["schema"] = schema
+    state["workspace"].pop("stable_id")
+    workspace_id = SourceAccess(workspace).legacy_source_id()
+    state["workspace"]["source_id"] = workspace_id
+    renamed = {}
+    for row in state["projects"]:
+        relative = row["relative_root"]
+        row["source_id"] = SourceAccess(workspace / relative).legacy_source_id()
+        raw = json.dumps([workspace_id, relative, row["source_id"]]).encode()
+        project_id = "p_" + hashlib.sha256(raw).hexdigest()[:32]
+        renamed[row["project_id"]] = project_id
+        row["project_id"] = project_id
+        row.pop("stable_id")
+        if schema == 1:
+            row.pop("name_origin")
+    state["authorized_projects"] = sorted(
+        p["project_id"] for p in state["projects"] if p["enabled"]
+    )
+    save_test_state(data, state)
+    return renamed
 
 
 def test_discovers_a_through_g_as_pending_from_metadata_without_source_reads(
@@ -102,12 +127,7 @@ def test_registered_unmarked_workspace_discovers_new_non_git_projects_after_rest
     registry = ProjectRegistry(workspace, data_dir=data)
     parent = registry.register(display_name="Workspace", aliases=("root",), enabled=True)
     registry.discover()
-    if schema == 1:
-        state = json.loads(state_file(data).read_text())
-        state["schema"] = 1
-        for row in state["projects"]:
-            row.pop("name_origin")
-        save_test_state(data, state)
+    parent = legacy_test_state(workspace, data, schema)[parent]
 
     project(workspace, "new-project", marker, body="NEW_PROJECT_BODY\n")
     project(workspace, "new-project/module", marker)
@@ -319,16 +339,13 @@ def test_legacy_basename_records_are_not_silently_renamed_during_upgrade(workspa
     registry = ProjectRegistry(workspace, data_dir=data)
     first = registry.register(paths[0], display_name="backend", aliases=("API",), enabled=True)
     second = registry.register(paths[1], display_name="backend")
-    legacy = json.loads(state_file(data).read_text())
-    legacy["schema"] = 1
-    for row in legacy["projects"]:
-        row.pop("name_origin")
-    save_test_state(data, legacy)
+    renamed = legacy_test_state(workspace, data, 1)
+    first, second = renamed[first], renamed[second]
     before = state_file(data).read_bytes()
 
     reopened = ProjectRegistry(workspace, data_dir=data)
     reopened.discover()
-    assert state_file(data).read_bytes() == before
+    assert (data / "projects.pre-volume-v1.json").read_bytes() == before
     found = rows(reopened)
     assert all(p["display_name"] == "backend" for p in found.values())
     assert all(p["name_origin"] == "legacy" for p in found.values())
@@ -339,11 +356,11 @@ def test_legacy_basename_records_are_not_silently_renamed_during_upgrade(workspa
     assert reopened.resolve_name(paths[0]) == first
     assert set(reopened.authorized_sources()) == {first}
 
-    # A later local write upgrades the schema, not unknown user choices or authorizations.
+    # Upgrade preserves unknown user choices and authorizations.
     project(workspace, "new-python", "pyproject.toml")
     reopened.discover()
     saved = json.loads(state_file(data).read_text())
-    assert saved["schema"] == 2
+    assert saved["schema"] == 3
     assert saved["authorized_projects"] == [first]
     assert {p["name_origin"] for p in saved["projects"]} == {"auto", "legacy"}
     restarted = ProjectRegistry(workspace, data_dir=data)
@@ -679,7 +696,7 @@ def test_persistent_metadata_restores_stable_ids_names_authorizations_and_nested
     parent = registry.register("A", display_name="Alpha", aliases=("first",), enabled=True)
     child = registry.register("A/child")
     saved = json.loads(state_file(data).read_text())
-    assert saved["schema"] == 2 and saved["authorized_projects"] == [parent]
+    assert saved["schema"] == 3 and saved["authorized_projects"] == [parent]
     assert saved["workspace"]["source_id"]
     assert all(p["source_id"] for p in saved["projects"])
     assert "PARENT_PRIVATE_BODY" not in state_file(data).read_text()
@@ -731,7 +748,7 @@ def test_persistent_state_rejects_other_or_replaced_workspace(workspace, tmp_pat
     assert state_file(data).read_bytes() == before
 
 
-@pytest.mark.parametrize("schema", [3, True, "1"])
+@pytest.mark.parametrize("schema", [4, True, "1"])
 def test_unknown_schema_is_rejected_without_overwriting_metadata(workspace, tmp_path, schema):
     data = tmp_path / "state"
     ProjectRegistry(workspace, data_dir=data)

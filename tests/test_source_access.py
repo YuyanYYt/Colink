@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from code_context.fingerprint_cache import FingerprintCache
+from code_context.scanner import Scanner, _version
 from code_context.source_access import SourceAccess, SourceError
 
 
@@ -72,6 +73,102 @@ def test_secret_and_binary_are_not_read(tmp_path):
     (tmp_path / "binary.py").write_bytes(b"x\x00y")
     with pytest.raises(SourceError, match="FILE_EXCLUDED"):
         SourceAccess(tmp_path).read("binary.py")
+
+
+def test_hardlinked_source_is_excluded_from_manifest_reads_and_snapshots(tmp_path):
+    root = tmp_path / "source"
+    root.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("external fixture body\n")
+    os.link(outside, root / "allowed.py")
+    access = SourceAccess(root)
+
+    metadata = access.manifest()
+    assert metadata["files"] == []
+    assert metadata["skipped"] == {"allowed.py": "hardlinked_file"}
+    with pytest.raises(SourceError, match="FILE_EXCLUDED") as error:
+        access.read("allowed.py")
+    assert "external fixture body" not in str(error.value)
+    assert access.fingerprint("allowed.py") is None
+    assert access.metrics["body_reads"] == 0
+    snapshot = Scanner(root).scan()
+    assert snapshot.files == {} and snapshot.skipped["allowed.py"] == "hardlinked file"
+
+
+@pytest.mark.parametrize("phase", ["opened", "reading", "returned"])
+def test_hardlink_added_during_read_never_returns_source(tmp_path, monkeypatch, phase):
+    file = tmp_path / "a.py"
+    file.write_text("bounded fixture body\n")
+    access = SourceAccess(tmp_path)
+    linked = tmp_path / "second.py"
+    original_open, original_read = os.open, os.read
+    original_text = access.scanner._read_text
+
+    def link():
+        if not linked.exists():
+            os.link(file, linked)
+
+    if phase == "opened":
+
+        def opening(path, *args, **kwargs):
+            fd = original_open(path, *args, **kwargs)
+            if path == "a.py":
+                link()
+            return fd
+
+        monkeypatch.setattr(os, "open", opening)
+    elif phase == "reading":
+
+        def reading(fd, length):
+            data = original_read(fd, length)
+            if os.fstat(fd).st_ino == file.stat().st_ino:
+                link()
+            return data
+
+        monkeypatch.setattr(os, "read", reading)
+    else:
+
+        def returned(parent, name, path):
+            value = original_text(parent, name, path)
+            if path == "a.py":
+                link()
+            return value
+
+        monkeypatch.setattr(access.scanner, "_read_text", returned)
+
+    with pytest.raises(SourceError, match="FILE_EXCLUDED"):
+        access.read("a.py")
+    assert access.metrics["body_reads"] == 0
+
+
+def test_matching_fingerprint_metadata_never_adopts_a_hardlinked_source(tmp_path):
+    file = tmp_path / "a.py"
+    file.write_text("bounded fixture body\n")
+    access = SourceAccess(tmp_path)
+    original = access.read("a.py")
+    os.link(file, tmp_path / "second.py")
+    # Matching all six existing metadata fields must not bypass the link policy.
+    access._fingerprints.put("a.py", _version(file.stat()), original.sha256)
+
+    assert access.fingerprint("a.py") is None
+    assert access._fingerprints.get("a.py") is None
+    assert access.metrics["body_reads"] == 1
+
+
+def test_hardlinked_ignore_file_cannot_reuse_loaded_policy(tmp_path):
+    root = tmp_path / "source"
+    root.mkdir()
+    ignore = root / ".gitignore"
+    ignore.write_text("other.py\n")
+    (root / "a.py").write_text("value = 1\n")
+    access = SourceAccess(root)
+    access.read("a.py")
+    os.link(ignore, tmp_path / "outside-ignore.txt")
+
+    with pytest.raises(SourceError, match="SOURCE_POLICY_UNAVAILABLE"):
+        access.manifest()
+    with pytest.raises(SourceError, match="SOURCE_POLICY_UNAVAILABLE"):
+        access.fingerprint("a.py")
 
 
 def test_read_detects_changes_during_safe_read(tmp_path, monkeypatch):

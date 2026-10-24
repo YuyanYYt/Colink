@@ -281,8 +281,15 @@ class WriteOperations:
                 metadata["prepared"] = asdict(receipt)
                 with self.store.transaction() as db:
                     db.execute(
-                        "INSERT INTO operation_attributes VALUES(?,?,NULL,?)",
-                        (task_id, request_id, encode_metadata(attributes.to_record())),
+                        "INSERT INTO operation_attributes VALUES(?,?,?,?) "
+                        "ON CONFLICT(task_id,request_id) DO UPDATE "
+                        "SET after_record=excluded.after_record",
+                        (
+                            task_id,
+                            request_id,
+                            before_record,
+                            encode_metadata(attributes.to_record()),
+                        ),
                     )
                     db.execute(
                         "UPDATE operations SET metadata=? WHERE task_id=? AND request_id=?",
@@ -297,7 +304,7 @@ class WriteOperations:
                 metadata["temp_name"],
                 created,
                 after_attributes,
-                attributes_registered if before is None else None,
+                attributes_registered,
             )
             c._authorized(project, _allow_pending=True)
             metadata["phase"] = "installing"

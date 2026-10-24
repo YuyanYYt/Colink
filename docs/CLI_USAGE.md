@@ -49,6 +49,20 @@ uv run colink workspace --root examples/sample_project --project sample \
 命令中两次的根目录和数据目录必须一致。具体授权与受控写入步骤见
 [LIVE_USAGE.md](LIVE_USAGE.md)。命令本身不授予写权限。
 
+### Live 读取与分析工具
+
+当前 build 33 用 `read_code` 读取已知文件、准确符号、文本/符号搜索及最多五个
+显式范围；`analyze_code` 返回结构、数据传播和任务 Diff，非 diff 分析可附带
+selector 的实际源码。精确文件读取不要求先调用分析或完成索引。
+
+Live 只读工具 9 个，带写协调器时 19 个，完整工作区含开发工具 40 个；发现即
+实际注册。八个被替代的旧名字不再可调用，`live` / `workspace` 不再接受
+`--legacy-analysis-tools`，`build_mcp` 也没有恢复旧注册的开关。更新客户端缓存
+后使用新 schema，具体请求与预算见 [入口说明](CODE_ANALYSIS_ENTRYPOINT.md)。
+`write_batch` 是一个额外的批量写入口，复用当前写任务与本机授权；最多二十笔
+显式编辑/创建先整体预检，再逐项执行。不提供批量删除或移动，也不承诺多文件
+原子事务，详见 [使用指南](LIVE_USAGE.md)。
+
 ## 旧镜像兼容：持续 stdio
 
 仍需使用旧模式的客户端可运行：
@@ -74,7 +88,8 @@ uv run colink mcp --data-dir /absolute/path/to/Colink/.code-context
 
 旧模式只保留当前与前一份源码状态，不按编辑次数无限保留历史；读取标识过期明确
 拒绝，不悄悄替换为最新代码。此模式的 `get_diff` 比较两份镜像，直读模式的 Diff
-则使用受控写任务起点，二者不能混用历史含义。
+则通过 `analyze_code` 的 `diff` 模式使用受控写任务起点，二者不能混用历史含义。
+Mirror 仍保留原十五工具，包括原读取、搜索和图工具；它不提供 Live 双入口。
 
 ## 旧镜像兼容：HTTP 同步与查询
 

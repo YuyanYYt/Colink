@@ -281,7 +281,10 @@ def test_new_file_installs_with_link_and_rereads_final_ctime_after_explicit_disc
     target, temp = source.root / "new.py", temporary(source, prepared)
     assert identity(target) == identity(temp) == prepared.temp_identity
     assert target.stat().st_nlink == temp.stat().st_nlink == 2
-    assert result == source.read("new.py")
+    assert result.content == "\ufeff中文\r\n"
+    assert result.sha256 == prepared.sha256 and result.version == _version(target.stat())
+    with pytest.raises(SourceError, match="FILE_EXCLUDED"):
+        source.read("new.py")
     discard_prepared(source, prepared, prepared.sha256, prepared.temp_identity)
     assert not temp.exists()
     assert target.stat().st_nlink == 1
@@ -289,6 +292,7 @@ def test_new_file_installs_with_link_and_rereads_final_ctime_after_explicit_disc
     assert final.content == "\ufeff中文\r\n"
     assert final.version == _version(target.stat())
     assert final.sha256 == result.sha256
+    assert final.content == result.content and final.mode == result.mode
     discard_prepared(source, prepared, prepared.sha256, prepared.temp_identity)
 
 

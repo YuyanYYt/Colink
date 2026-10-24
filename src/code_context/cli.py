@@ -7,19 +7,27 @@ import sqlite3
 import sys
 from pathlib import Path
 
-import uvicorn
-
 from code_context import __version__
-from code_context.client import RetryableSyncError, SyncClient, SyncError, read_local_status
 from code_context.execution_defaults import DEFAULT_HTTP_PORT
-from code_context.models import FileChange, SyncBatch
-from code_context.scanner import ScanError, Scanner
-from code_context.server import build_mcp, create_app
-from code_context.storage import MirrorError, MirrorStore
 
 
 def emit(value):
     print(json.dumps(value, ensure_ascii=False, indent=2), flush=True)
+
+
+def _handled_errors():
+    """Keep the CLI's error boundary without importing unused command modules."""
+    errors = [ValueError, OSError, sqlite3.Error]
+    for module_name, names in (
+        ("code_context.client", ("SyncError", "RetryableSyncError")),
+        ("code_context.scanner", ("ScanError",)),
+    ):
+        module = sys.modules.get(module_name)
+        for name in names:
+            error = getattr(module, name, None)
+            if isinstance(error, type) and issubclass(error, BaseException):
+                errors.append(error)
+    return tuple(errors)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -63,6 +71,20 @@ def parser() -> argparse.ArgumentParser:
     control.add_argument("--data-dir", type=Path, required=True)
     control.add_argument("--action", required=True)
 
+    upgrade = commands.add_parser(
+        "registry-upgrade-identity", help="本机修复重启后的旧目录身份；保留原登记备份"
+    )
+    upgrade.add_argument("--root", type=Path, required=True)
+    upgrade.add_argument("--data-dir", type=Path, required=True)
+    upgrade.add_argument("--legacy-device", type=int, required=True)
+
+    recovery_upgrade = commands.add_parser(
+        "recovery-upgrade-identity", help="本机核验重启后的恢复文件身份并备份原数据库"
+    )
+    recovery_upgrade.add_argument("--root", type=Path, required=True)
+    recovery_upgrade.add_argument("--legacy-device", type=int, required=True)
+    recovery_upgrade.add_argument("--backup-dir", type=Path, required=True)
+
     for name in ("desktop-status", "desktop-run", "desktop-control", "desktop-select"):
         command = commands.add_parser(name, help="CoLink 菜单栏应用的本机生命周期接口")
         command.add_argument("--workspace", type=Path, default=Path.cwd())
@@ -76,6 +98,32 @@ def parser() -> argparse.ArgumentParser:
 
     setup = commands.add_parser("desktop-setup", help="通过标准输入保存首次连接设置，不联网或启动")
     setup.add_argument("--workspace", type=Path, default=Path.cwd())
+
+    storage_list = commands.add_parser(
+        "project-storage", help="本机查看已保存项目和索引目录，不启动连接"
+    )
+    storage_list.add_argument("--workspace", type=Path, required=True)
+    storage_list.add_argument("--offset", type=int, default=0)
+    storage_list.add_argument("--limit", type=int, default=10)
+    storage_list.add_argument("--view", choices=("projects", "workspaces"), default="projects")
+    workspace_trash = commands.add_parser(
+        "project-workspace-trash", help="本机将完整停用工作区及项目登记移到废纸篓"
+    )
+    workspace_trash.add_argument("--workspace", type=Path, required=True)
+    workspace_trash.add_argument("--workspace-id", required=True)
+    workspace_trash.add_argument("--stage-for-native-trash", action="store_true")
+    index_migration = commands.add_parser(
+        "project-index-migrate", help="显式离线迁移旧共享索引，不启动或执行项目"
+    )
+    index_migration.add_argument("--workspace", type=Path, required=True)
+    index_migration.add_argument("--workspace-id", required=True)
+    index_migration.add_argument("--stage-for-native-trash", action="store_true")
+    storage_trash = commands.add_parser(
+        "project-storage-trash", help="本机将一个停用项目的索引移到废纸篓"
+    )
+    storage_trash.add_argument("--workspace", type=Path, required=True)
+    storage_trash.add_argument("--entry-id", required=True)
+    storage_trash.add_argument("--stage-for-native-trash", action="store_true")
 
     tunnel_init = commands.add_parser("tunnel-init", help="生成无凭据的官方隧道配置，不启动连接")
     tunnel_init.add_argument("--root", type=Path, required=True)
@@ -146,16 +194,71 @@ def main(argv: list[str] | None = None) -> int:
             emit(control_request(args.data_dir, args.action, parameters))
             return 0
         if args.command == "workspace":
+            from code_context.server import build_mcp
             from code_context.workspace import WorkspaceRuntime
 
             os.environ.pop("CONTROL_PLANE_API_KEY", None)
             os.environ.pop("OPENAI_API_KEY", None)
             with WorkspaceRuntime(args.root, args.data_dir) as runtime:
-                build_mcp(runtime.backend, status_provider=runtime.backend.mcp_status).run(
-                    transport="stdio"
+                build_mcp(
+                    runtime.backend,
+                    status_provider=runtime.backend.mcp_status,
+                ).run(transport="stdio")
+            return 0
+        if args.command == "registry-upgrade-identity":
+            from code_context.project_registry import upgrade_legacy_registry_identity
+
+            emit(upgrade_legacy_registry_identity(args.root, args.data_dir, args.legacy_device))
+            return 0
+        if args.command == "recovery-upgrade-identity":
+            from code_context.recovery_identity import upgrade_recovery_identity
+
+            emit(upgrade_recovery_identity(args.root, args.legacy_device, args.backup_dir))
+            return 0
+        if args.command == "project-storage":
+            from code_context.project_storage import project_storage
+
+            emit(
+                project_storage(
+                    args.workspace, offset=args.offset, limit=args.limit, view=args.view
                 )
+            )
+            return 0
+        if args.command == "project-workspace-trash":
+            from code_context.project_storage import trash_project_workspace
+
+            emit(
+                trash_project_workspace(
+                    args.workspace,
+                    args.workspace_id,
+                    stage_for_native_trash=args.stage_for_native_trash,
+                )
+            )
+            return 0
+        if args.command == "project-index-migrate":
+            from code_context.project_index_migration import migrate_project_indexes
+
+            emit(
+                migrate_project_indexes(
+                    args.workspace,
+                    args.workspace_id,
+                    stage_for_native_trash=args.stage_for_native_trash,
+                )
+            )
+            return 0
+        if args.command == "project-storage-trash":
+            from code_context.project_storage import trash_project_index
+
+            emit(
+                trash_project_index(
+                    args.workspace,
+                    args.entry_id,
+                    stage_for_native_trash=args.stage_for_native_trash,
+                )
+            )
             return 0
         if args.command == "desktop-setup":
+            from code_context.client import SyncError
             from code_context.onboarding import configure_desktop
 
             payload = sys.stdin.read(65537)
@@ -213,6 +316,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "local-status":
                 emit(read_local_mirror_status(args.data_dir))
                 return 0
+            from code_context.server import build_mcp
+
             # This server does not need model/control-plane credentials, even when
             # it was started by a tunnel client which inherited them.
             os.environ.pop("CONTROL_PLANE_API_KEY", None)
@@ -231,6 +336,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "live":
             from code_context.live import LiveQueries
+            from code_context.server import build_mcp
             from code_context.source_access import SourceAccess
 
             os.environ.pop("CONTROL_PLANE_API_KEY", None)
@@ -255,10 +361,18 @@ def main(argv: list[str] | None = None) -> int:
             emit((run_demo if args.command == "demo" else run_local_demo)(args.output_dir))
             return 0
         if args.command in {"serve", "mcp"}:
+            from code_context.storage import MirrorStore
+
             store = MirrorStore(args.data_dir / "server" / "mirror.sqlite3")
             if args.command == "mcp":
+                from code_context.server import build_mcp
+
                 build_mcp(store).run(transport="stdio")
             else:
+                import uvicorn
+
+                from code_context.server import create_app
+
                 app = create_app(
                     store,
                     os.getenv("CODE_CONTEXT_READ_TOKEN", ""),
@@ -268,8 +382,12 @@ def main(argv: list[str] | None = None) -> int:
                 uvicorn.run(app, host=args.host, port=args.port, access_log=False)
             return 0
         if args.command == "status":
+            from code_context.client import read_local_status
+
             emit(read_local_status(args.root, args.project, args.server, args.data_dir))
             return 0
+        from code_context.scanner import Scanner
+
         scanner = Scanner(args.root, excluded_roots=(args.data_dir.expanduser().resolve(),))
         if args.command == "scan":
             scanned = scanner.scan()
@@ -285,6 +403,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "snapshot":
             import uuid
+
+            from code_context.models import FileChange, SyncBatch
+            from code_context.storage import MirrorError, MirrorStore
 
             store = MirrorStore(args.data_dir / "server" / "mirror.sqlite3")
             scanned = scanner.scan()
@@ -319,6 +440,8 @@ def main(argv: list[str] | None = None) -> int:
                 result = {"project_id": args.project, "revision": revision}
             emit({**result, "changed_files": len(changes), "skipped": scanned.skipped})
             return 0
+        from code_context.client import SyncClient
+
         client = SyncClient(
             args.root,
             args.project,
@@ -345,7 +468,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("已停止；本地待同步队列已保留。", file=sys.stderr)
         return 130
-    except (ValueError, SyncError, RetryableSyncError, ScanError, OSError, sqlite3.Error) as exc:
+    except _handled_errors() as exc:
         # All user-facing errors deliberately avoid echoing HTTP headers or rejected content.
         print(f"错误：{exc}", file=sys.stderr)
         return 1

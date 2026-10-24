@@ -4,8 +4,9 @@ import os
 import pytest
 
 import code_context.write_operations as operations
+from code_context.models import content_hash
 from code_context.recovery_store import RecoveryError, RecoveryStore
-from code_context.source_access import SourceAccess
+from code_context.source_access import SourceAccess, SourceError
 from code_context.write_coordinator import WriteCoordinator, WriteError
 
 
@@ -102,6 +103,11 @@ def test_crash_after_native_install_recovers_without_second_mutation(parts, monk
             c.create_file("a", task, "create_001", "new.py", "created\n")
     path = "a.py" if kind == "edit" else "new.py"
     inode = os.stat(source.root / path).st_ino
+    if kind == "create":
+        assert os.stat(source.root / path).st_nlink == 2
+        with pytest.raises(SourceError, match="FILE_EXCLUDED"):
+            source.read(path)
+        assert path not in {item["path"] for item in source.manifest()["files"]}
     c.close()
     fresh = WriteCoordinator(store, lambda _: source, control_alive=lambda: True)
     assert fresh.status()["recovery_required"] and not fresh.status()["write_enabled"]
@@ -115,6 +121,44 @@ def test_crash_after_native_install_recovers_without_second_mutation(parts, monk
     if kind == "create":
         assert fresh.create_file("a", task, "create_001", "new.py", "created\n")["state"] == "saved"
     fresh.close()
+
+
+@pytest.mark.parametrize("change", ["missing_receipt", "wrong_inode", "foreign_peer", "third_link"])
+def test_recovery_accepts_two_links_only_for_the_registered_create(parts, monkeypatch, change):
+    source, store, c = parts
+    task = begin(c)
+    commit_file = operations.commit_file
+
+    def interrupted(*args):
+        commit_file(*args)
+        raise RuntimeError("simulated process stop with both installation links")
+
+    monkeypatch.setattr(operations, "commit_file", interrupted)
+    with pytest.raises(WriteError):
+        c.create_file("a", task, "create_001", "new.py", "created\n")
+    row = store.query("SELECT * FROM operations")[0]
+    metadata = json.loads(row["metadata"])
+    target = source.root / "new.py"
+    temporary = source.root / metadata["temp_name"]
+    if change == "missing_receipt":
+        metadata["prepared"] = None
+    elif change == "wrong_inode":
+        metadata["prepared"]["temp_identity"][1] += 1
+    elif change == "foreign_peer":
+        temporary.unlink()
+        os.link(target, source.root / "foreign.py")
+    else:
+        os.link(target, source.root / "foreign.py")
+    with store.transaction() as db:
+        db.execute("UPDATE operations SET metadata=?", (json.dumps(metadata),))
+
+    with pytest.raises(WriteError, match="WRITE_RECOVERY_CONFLICT"):
+        c.recover("a")
+    assert target.read_text() == "created\n"
+    assert c.status()["recovery_required"] and not c.status()["write_enabled"]
+    assert store.query("SELECT * FROM files") == []
+    if change != "foreign_peer":
+        assert temporary.exists()
 
 
 def test_crash_after_temp_cleanup_can_confirm_persisted_verified_install(parts, monkeypatch):
@@ -342,7 +386,14 @@ def test_hardlinked_existing_file_refuses_before_backup_or_pending_intent(parts)
     source, store, c = parts
     os.link(source.root / "a.py", source.root / "linked.py")
     task = begin(c)
-    with pytest.raises(WriteError, match="WRITE_UNSAFE_FILE"):
-        edit(source, c, task)
+    with pytest.raises(SourceError, match="FILE_EXCLUDED"):
+        c.apply_edit(
+            "a",
+            task,
+            "edit_0001",
+            "a.py",
+            content_hash("one\ntwo\n"),
+            {"kind": "replace_fragment", "old_text": "one", "new_text": "updated"},
+        )
     assert store.query("SELECT * FROM operations") == []
     assert store.query("SELECT * FROM objects") == []

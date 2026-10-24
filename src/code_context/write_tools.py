@@ -6,6 +6,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 from code_context.source_access import SourceError
+from code_context.write_batch import BatchOperations
 
 WRITE_TOOL_NAMES = {
     "begin_write_task",
@@ -17,6 +18,7 @@ WRITE_TOOL_NAMES = {
     "write_task_status",
     "move_path",
     "move_path_status",
+    "write_batch",
 }
 
 
@@ -134,6 +136,28 @@ def register_write_tools(mcp, coordinator, authorize):
         )
 
     @mcp.tool(annotations=write, structured_output=True)
+    def write_batch(
+        project_id: str,
+        task_id: str,
+        request_id: str,
+        operations: BatchOperations,
+    ) -> dict[str, Any]:
+        """Apply 1-20 explicit edit/create_file/create_directory operations in one call.
+        Each item has kind and a unique path; edits also require current expected_sha256
+        and one exact edit, files require content. Create every missing parent directory
+        earlier in this batch. Full JSON input is limited to 8 MiB. A complete read-only
+        preflight precedes any file change, then ordinary durable operations run in order.
+        atomic=false: execution failures report partial/blocked and unstarted items; there
+        is no automatic batch undo. Reuse the same batch request_id and identical complete
+        parameters to retry; completed children are verified and never executed twice.
+        Pending children require the local app's recovery. No deletion, move or commands.
+        """
+        return call(
+            project_id,
+            lambda: coordinator.write_batch(project_id, task_id, request_id, operations),
+        )
+
+    @mcp.tool(annotations=write, structured_output=True)
     def delete_file(
         project_id: str, task_id: str, request_id: str, path: str, expected_sha256: str
     ) -> dict[str, Any]:
@@ -175,6 +199,6 @@ def register_write_tools(mcp, coordinator, authorize):
             for key in ("active_task", "recent_task"):
                 if result[key] and result[key]["project_id"] != project_id:
                     result[key] = None
-            return {**result, "project_id": project_id}
+            return {**result, "project_id": project_id, **coordinator.batch_status(project_id)}
 
         return call(project_id, status)

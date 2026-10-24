@@ -153,6 +153,172 @@ def test_native_ui_removes_user_undo_but_preserves_interrupted_recovery():
     assert 'control("recover_write"' in runtime
 
 
+def test_native_closed_status_has_no_timer_and_owned_status_reuses_private_pipe():
+    runtime = (WORKSPACE / "macos/CodeConnect/Runtime.swift").read_text()
+    entry = (WORKSPACE / "macos/CodeConnect/main.swift").read_text()
+    controller = runtime.split("final class ConnectionController", 1)[1]
+    initializer = controller.split("init(configuration:", 1)[1].split("func panelDidShow", 1)[0]
+    assert "Timer" not in initializer and "refresh()" in initializer
+    scheduling = controller.split("private func updateStatusTimer", 1)[1].split(
+        "private func cancelPendingStatus", 1
+    )[0]
+    assert "ownsConnection && !requestedStop && phase != .stopping" in scheduling
+    assert "phase == .external" in scheduling and "timer?.invalidate()" in scheduling
+    refresh = controller.split("func refresh()", 1)[1].split("private func requestOwnedStatus", 1)[
+        0
+    ]
+    assert "requestOwnedStatus()" in refresh and "inspectStatusOnce()" in refresh
+    stop = controller.split("func stop()", 1)[1].split("func openChat()", 1)[0]
+    assert "cancelStatusRefresh()" in stop and 'Data("stop\\n".utf8)' in stop
+    frames = controller.split("private func acceptStatusFrame", 1)[1].split(
+        "private func inspectStatusOnce", 1
+    )[0]
+    assert "connection === process" in frames and "connectionEpoch == generation" in frames
+    assert "pendingStatus?.epoch == frame.epoch" in frames
+    assert "pendingStatus?.sequence == frame.sequence" in frames
+    assert "stop()" in frames and "process.terminate()" not in frames
+    assert "controller.panelDidShow()" in entry and "controller.panelDidHide()" in entry
+
+
+@pytest.mark.skipif(shutil.which("xcrun") is None, reason="native status framing requires macOS")
+def test_native_status_frames_are_bounded_and_response_counters_are_strict(tmp_path):
+    runtime = (WORKSPACE / "macos/CodeConnect/Runtime.swift").read_text()
+    models = (
+        "struct DesktopStatusDecoder"
+        + runtime.split("struct DesktopStatusDecoder", 1)[1].split(
+            "private final class DesktopStatusStream", 1
+        )[0]
+    )
+    main = tmp_path / "main.swift"
+    main.write_text(
+        "import Foundation\nimport CoreFoundation\n"
+        + models
+        + r"""
+func rejected(_ body: String) {
+    assert(DesktopStatusResponse(Data(body.utf8)) == nil)
+}
+let body = #"{"type":"status","epoch":3,"seq":2,"status":{"ready":true}}"#
+let response = DesktopStatusResponse(Data(body.utf8))!
+assert(response.epoch == 3 && response.sequence == 2 && response.status["ready"] as? Bool == true)
+rejected(#"{"type":"status","epoch":true,"seq":2,"status":{}}"#)
+rejected(#"{"type":"status","epoch":3,"seq":2.5,"status":{}}"#)
+rejected(#"{"type":"status","epoch":0,"seq":2,"status":{}}"#)
+rejected(#"{"type":"status","epoch":3,"seq":9007199254740992,"status":{}}"#)
+rejected(#"{"type":"status","epoch":3,"seq":2,"status":{},"action":"enable_write"}"#)
+rejected(#"{"type":"status","epoch":3,"seq":2,"status":[]}"#)
+var decoder = DesktopStatusDecoder()
+let incomplete = try decoder.append(Data(body.prefix(10).utf8))
+assert(incomplete.isEmpty)
+let frames = try decoder.append(Data((String(body.dropFirst(10)) + "\n").utf8))
+assert(frames == [Data(body.utf8)])
+var maximum = DesktopStatusDecoder()
+let maximumIncomplete = try maximum.append(Data(repeating: 120, count: 65536))
+assert(maximumIncomplete.isEmpty)
+let maximumComplete = try maximum.append(Data([10]))
+assert(maximumComplete.first?.count == 65536)
+var overflow = DesktopStatusDecoder()
+_ = try overflow.append(Data(repeating: 120, count: 65536))
+do { _ = try overflow.append(Data([120])); assertionFailure("accepted oversized frame") }
+catch { }
+var empty = DesktopStatusDecoder()
+do { _ = try empty.append(Data([10])); assertionFailure("accepted empty frame") }
+catch { }
+print("Native status frame checks passed")
+""",
+        encoding="utf-8",
+    )
+    binary = tmp_path / "status-framing"
+    subprocess.run(
+        [
+            "xcrun",
+            "swiftc",
+            "-module-cache-path",
+            str(WORKSPACE / "swift-module-cache"),
+            str(main),
+            "-o",
+            str(binary),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = subprocess.run([str(binary)], check=True, capture_output=True, text=True)
+    assert "Native status frame checks passed" in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("xcrun") is None, reason="native pipe reads require macOS")
+def test_native_status_stream_delivers_small_frames_before_process_exit(tmp_path):
+    runtime = (WORKSPACE / "macos/CodeConnect/Runtime.swift").read_text()
+    stream = (
+        "struct DesktopStatusDecoder"
+        + runtime.split("struct DesktopStatusDecoder", 1)[1].split("enum CodeAccessMode", 1)[0]
+    )
+    main = tmp_path / "main.swift"
+    main.write_text(
+        "import Foundation\nimport CoreFoundation\nimport Darwin\n"
+        + stream
+        + r"""
+final class Receipts: @unchecked Sendable {
+    let lock = NSLock()
+    var frames: [Data] = []
+    let delivered = DispatchSemaphore(value: 0)
+    func append(_ frame: Data) {
+        lock.lock(); frames.append(frame); lock.unlock()
+        delivered.signal()
+    }
+}
+let process = Process()
+process.executableURL = URL(fileURLWithPath: "/bin/cat")
+let input = Pipe(), output = Pipe()
+process.standardInput = input
+process.standardOutput = output
+process.standardError = FileHandle.nullDevice
+let receipts = Receipts()
+private let reader = DesktopStatusStream(output.fileHandleForReading,
+    onFrame: { receipts.append($0) }, onFailure: {})
+try process.run()
+let first = Data(#"{"type":"status","epoch":1,"seq":1,"status":{"ready":false}}"#.utf8)
+let second = Data(#"{"type":"status","epoch":1,"seq":2,"status":{"ready":true}}"#.utf8)
+try input.fileHandleForWriting.write(contentsOf: first.prefix(10))
+try input.fileHandleForWriting.write(contentsOf: first.dropFirst(10) + Data([10]))
+let firstBeforeEOF = receipts.delivered.wait(timeout: .now() + 2) == .success
+let runningAfterFirst = process.isRunning
+try input.fileHandleForWriting.write(contentsOf: second + Data([10]))
+let secondBeforeEOF = receipts.delivered.wait(timeout: .now() + 2) == .success
+let runningAfterSecond = process.isRunning
+try input.fileHandleForWriting.close()
+process.waitUntilExit()
+reader.close()
+assert(firstBeforeEOF && secondBeforeEOF, "status waited for a full buffer or EOF")
+assert(runningAfterFirst && runningAfterSecond)
+receipts.lock.lock()
+assert(receipts.frames == [first, second])
+receipts.lock.unlock()
+assert(process.terminationStatus == 0)
+print("Small live status frames delivered before EOF")
+""",
+        encoding="utf-8",
+    )
+    binary = tmp_path / "live-status-pipe"
+    subprocess.run(
+        [
+            "xcrun",
+            "swiftc",
+            "-module-cache-path",
+            str(WORKSPACE / "swift-module-cache"),
+            str(main),
+            "-o",
+            str(binary),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert "Small live status frames delivered before EOF" in result.stdout
+
+
 @pytest.mark.skipif(
     shutil.which("xcrun") is None, reason="native Swift presentation requires macOS"
 )
