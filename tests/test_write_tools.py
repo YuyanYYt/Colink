@@ -5,7 +5,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from code_context.live import LiveQueries
 from code_context.recovery_store import RecoveryStore
-from code_context.server import READ_TOOL_NAMES, build_mcp
+from code_context.server import LIVE_READ_TOOL_NAMES, READ_TOOL_NAMES, build_mcp
 from code_context.source_access import SourceAccess
 from code_context.write_coordinator import WriteCoordinator
 from code_context.write_tools import WRITE_TOOL_NAMES
@@ -31,14 +31,16 @@ def parts(tmp_path):
     store.close()
 
 
-def test_original_fifteen_and_seven_task_tools_without_undo_or_local_grant(parts):
+def test_nine_live_read_and_ten_write_tools_without_undo_or_local_grant(parts):
     _, c, mcp = parts
 
     async def inspect():
         tools = {t.name: t for t in await mcp.list_tools()}
-        assert set(tools) == READ_TOOL_NAMES | WRITE_TOOL_NAMES
-        assert len(READ_TOOL_NAMES) == 15 and len(tools) == 24
-        assert all(tools[n].annotations.read_only_hint for n in READ_TOOL_NAMES)
+        assert set(tools) == LIVE_READ_TOOL_NAMES | WRITE_TOOL_NAMES
+        assert len(READ_TOOL_NAMES) == 15 and len(LIVE_READ_TOOL_NAMES) == 9
+        assert len(WRITE_TOOL_NAMES) == 10 and len(tools) == 19
+        assert set(tools) == {t.name for t in mcp._tool_manager.list_tools()}
+        assert all(tools[n].annotations.read_only_hint for n in LIVE_READ_TOOL_NAMES)
         assert tools["write_task_status"].annotations.read_only_hint
         assert tools["move_path_status"].annotations.read_only_hint
         for name in WRITE_TOOL_NAMES - {"write_task_status", "move_path_status"}:
@@ -47,7 +49,7 @@ def test_original_fifteen_and_seven_task_tools_without_undo_or_local_grant(parts
         assert "rollback_write_task" not in tools
         assert not hasattr(c, "rollback_write_task")
         assert "expected_context" in tools["apply_edit"].description
-        assert "NO_TASK_BASELINE" in tools["get_diff"].description
+        assert "NO_TASK_BASELINE" in tools["analyze_code"].description
         assert not c.status()["write_enabled"]
 
     asyncio.run(inspect())
@@ -71,7 +73,7 @@ def test_mcp_real_edit_read_diff_finish_and_removed_undo_using_fresh_context(par
                 paths=["a.py", "new.py"],
             )
         )["task_id"]
-        read = await call("read_file", path="a.py")
+        read = await call("read_code", request={"mode": "file", "path": "a.py"})
         parameters = {
             "task_id": task,
             "request_id": "edit_0001",
@@ -85,7 +87,7 @@ def test_mcp_real_edit_read_diff_finish_and_removed_undo_using_fresh_context(par
         await call(
             "create_file", task_id=task, request_id="create_001", path="new.py", content="B = 2\n"
         )
-        patch = await call("get_diff", path="a.py", detail="patch")
+        patch = await call("analyze_code", mode="diff", selector={"path": "a.py"}, detail="patch")
         assert "-VALUE = 1" in patch["changes"][0]["patch"]
         assert "+VALUE = 2" in patch["changes"][0]["patch"]
         await call("finish_write_task", task_id=task, request_id="finish_001")
@@ -96,7 +98,7 @@ def test_mcp_real_edit_read_diff_finish_and_removed_undo_using_fresh_context(par
             )
         assert (root / "a.py").read_text() == "VALUE = 2\n"
         assert (root / "new.py").read_text() == "B = 2\n"
-        assert (await call("get_diff"))["summary"]["files_changed"] == 2
+        assert (await call("analyze_code", mode="diff"))["summary"]["files_changed"] == 2
         c.disable()
         assert not (await call("write_task_status"))["write_enabled"]
 

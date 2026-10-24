@@ -9,7 +9,7 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 
 from code_context.execution_tools import EXECUTION_TOOL_NAMES
 from code_context.local_control import control_request
-from code_context.server import READ_TOOL_NAMES, build_mcp
+from code_context.server import LIVE_READ_TOOL_NAMES, build_mcp
 from code_context.source_access import SourceError
 from code_context.workspace import WorkspaceRuntime, initialize_workspace
 from code_context.write_tools import WRITE_TOOL_NAMES
@@ -71,7 +71,7 @@ def test_private_control_enables_a_only_and_old_handle_revoked(workspace):
             control_request(state, "enable_write", {})
 
 
-def test_mcp_cannot_grant_permissions_and_original_structural_tools_available(workspace):
+def test_mcp_cannot_grant_permissions_and_unified_structural_tools_available(workspace):
     root, state = workspace
     initial = initialize_workspace(root / "a", state, "Project A")
     runtime = WorkspaceRuntime(root / "a", state, socket_directory())
@@ -79,8 +79,10 @@ def test_mcp_cannot_grant_permissions_and_original_structural_tools_available(wo
     async def inspect():
         mcp = build_mcp(runtime.backend, status_provider=runtime.backend.mcp_status)
         tools = await mcp.list_tools()
-        assert {t.name for t in tools} == READ_TOOL_NAMES | WRITE_TOOL_NAMES | EXECUTION_TOOL_NAMES
-        assert all(t.annotations.read_only_hint for t in tools if t.name in READ_TOOL_NAMES)
+        assert {
+            t.name for t in tools
+        } == LIVE_READ_TOOL_NAMES | WRITE_TOOL_NAMES | EXECUTION_TOOL_NAMES
+        assert all(t.annotations.read_only_hint for t in tools if t.name in LIVE_READ_TOOL_NAMES)
         assert all(
             not t.annotations.read_only_hint
             for t in tools
@@ -93,22 +95,27 @@ def test_mcp_cannot_grant_permissions_and_original_structural_tools_available(wo
         overview = await mcp.call_tool("repo_overview", {"project_id": pid})
         handle = overview.structured_content["snapshot"]
         symbols = await mcp.call_tool(
-            "symbol_search", {"project_id": pid, "snapshot": handle, "query": "Example"}
+            "read_code",
+            {
+                "project_id": pid,
+                "snapshot": handle,
+                "request": {"mode": "search", "kind": "symbol", "query": "Example"},
+            },
         )
         assert not symbols.is_error and symbols.structured_content["symbols"]
         assert symbols.structured_content["display_name"] == "Project A"
         sid = symbols.structured_content["symbols"][0]["symbol_id"]
-        arguments = {
-            "find_references": {"symbol_id": sid},
-            "read_symbol": {"symbol_id": sid},
-            "get_call_graph": {"symbol_id": sid},
-            "get_class_graph": {"symbol_id": sid},
-            "get_file_dependencies": {"path": "module.py"},
-            "get_project_architecture": {},
-            "get_external_dependencies": {},
-            "get_impact_analysis": {"path": "module.py"},
-        }
-        for name, values in arguments.items():
+        arguments = [
+            ("find_references", {"symbol_id": sid}),
+            ("read_code", {"request": {"mode": "symbol", "symbol_id": sid}}),
+            ("analyze_code", {"mode": "call_graph", "selector": {"symbol_id": sid}}),
+            ("analyze_code", {"mode": "class_relations", "selector": {"symbol_id": sid}}),
+            ("analyze_code", {"mode": "file_dependencies", "selector": {"path": "module.py"}}),
+            ("get_project_architecture", {}),
+            ("get_external_dependencies", {}),
+            ("get_impact_analysis", {"path": "module.py"}),
+        ]
+        for name, values in arguments:
             result = await mcp.call_tool(name, {"project_id": pid, "snapshot": handle, **values})
             assert not result.is_error, (name, result.content)
             assert not result.structured_content.get("index_not_ready"), name
@@ -185,11 +192,19 @@ def test_workspace_stdio_routes_saved_sources_and_reports_no_whole_project_limit
                 assert status.structured_content["limits"]["max_project_bytes"] is None
                 assert not status.structured_content["write_enabled"]
                 symbols = await session.call_tool(
-                    "symbol_search", {"project_id": initial["project_id"], "query": "Model"}
+                    "read_code",
+                    {
+                        "project_id": initial["project_id"],
+                        "request": {"mode": "search", "kind": "symbol", "query": "Model"},
+                    },
                 )
                 assert symbols.structured_content["symbols"]
                 saved = await session.call_tool(
-                    "read_file", {"project_id": initial["project_id"], "path": "models.py"}
+                    "read_code",
+                    {
+                        "project_id": initial["project_id"],
+                        "request": {"mode": "file", "path": "models.py"},
+                    },
                 )
                 assert saved.structured_content["content"] == "class Model: pass\n"
                 assert json.loads((state / "control.json").read_text())["token"] not in str(saved)

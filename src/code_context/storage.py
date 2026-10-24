@@ -2,12 +2,14 @@
 
 import difflib
 import hashlib
+import json
 import secrets
 import sqlite3
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from code_context.intelligence_coverage import index_coverage, public_index_stats
 from code_context.intelligence_index import SCHEMA, backfill_indexes, build_index, prune_index
 from code_context.intelligence_queries import QUERIES, bound_result, index_status
 from code_context.models import SyncBatch, validate_project
@@ -170,16 +172,28 @@ class MirrorStore:
             with self.read_connection() as db:
                 revision, handle = self._resolve_snapshot(db, project_id, snapshot)
                 status = index_status(db, project_id, revision)
+                base = {
+                    "project_id": project_id,
+                    "snapshot": handle,
+                    "index_partial": status["partial"],
+                    "index_coverage": index_coverage(
+                        db,
+                        project_id,
+                        revision,
+                        status,
+                        parameters=parameters,
+                        max_chars=max_chars,
+                    ),
+                }
                 if operation == "read_symbol":
-                    parameters["text_budget"] = max(1000, max_chars - 2000)
-                    parameters["response_budget"] = max_chars - 500
+                    overhead = len(json.dumps(base, ensure_ascii=False)) + 2
+                    parameters["text_budget"] = max(1, max_chars - overhead - 1500)
+                    parameters["response_budget"] = max_chars - overhead
                 result = QUERIES[operation](db, project_id, revision, **parameters)
                 return bound_result(
                     {
                         **result,
-                        "project_id": project_id,
-                        "snapshot": handle,
-                        "index_partial": status["partial"],
+                        **base,
                     },
                     max_chars,
                 )
@@ -189,7 +203,7 @@ class MirrorStore:
     def code_index_status(self, project_id: str, revision: int) -> dict:
         with self.read_connection() as db:
             self._revision(db, project_id, revision)
-            return index_status(db, project_id, revision)
+            return public_index_stats(index_status(db, project_id, revision))
 
     @staticmethod
     def _resolve_snapshot(
@@ -398,7 +412,7 @@ class MirrorStore:
                 "file_count": total,
                 "offset": offset,
                 "has_more": offset + len(rows) < total,
-                "code_intelligence": index_status(db, project_id, revision),
+                "code_intelligence": public_index_stats(index_status(db, project_id, revision)),
             }
 
     def read_file(

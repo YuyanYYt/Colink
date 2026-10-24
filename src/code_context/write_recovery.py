@@ -12,7 +12,15 @@ import os
 import stat
 
 from code_context.directory_mutation import PreparedDirectory, discard_directory_temp
-from code_context.file_mutation import PreparedFile, _read_named, discard_prepared
+from code_context.file_attributes import replacement_file_attributes
+from code_context.file_mutation import (
+    PreparedFile,
+    _check_new,
+    _read_named,
+    _validate_prepared,
+    _validate_raw,
+    discard_prepared,
+)
 from code_context.recovery_store import encode_metadata
 from code_context.scanner import _version
 from code_context.source_access import SourceDocument
@@ -43,7 +51,7 @@ class WriteRecovery:
     def __init__(self, coordinator):
         self.c, self.store = coordinator, coordinator.store
 
-    def _current(self, source, path, *, directory=False):
+    def _current(self, source, path, *, directory=False, receipt=None):
         with source.parent_fd(path, directory=directory) as (parent, name):
             info = source.scanner._stat(parent, name, path)
             if info is None:
@@ -57,7 +65,43 @@ class WriteRecovery:
                 or stat.S_IMODE(info.st_mode) > 0o777
             ):
                 raise WriteError("WRITE_RECOVERY_CONFLICT: source ownership or type changed")
-            return source.read(path)
+            if info.st_nlink == 1:
+                return source.read(path)
+            # Only a journaled create can have the installed target and staging
+            # name temporarily share an inode. Public source reads stay single-link.
+            if receipt is None or receipt.path != path:
+                raise WriteError("WRITE_RECOVERY_CONFLICT: unregistered installation links")
+            _validate_prepared(source, receipt)
+            temp = source.scanner._stat(parent, receipt.temp_name, path)
+            if (
+                (os.fstat(parent).st_dev, os.fstat(parent).st_ino) != receipt.parent_identity
+                or (info.st_dev, info.st_ino) != receipt.temp_identity
+                or temp is None
+                or temp.st_nlink != 2
+                or (temp.st_dev, temp.st_ino) != receipt.temp_identity
+            ):
+                raise WriteError("WRITE_RECOVERY_CONFLICT: installation link binding changed")
+            attributes = receipt.attribute_sha256 is not None
+            actual = _read_named(parent, name, links=(2,), attributes=attributes)
+            staged = _read_named(parent, receipt.temp_name, links=(2,), attributes=attributes)
+            _check_new(actual, receipt)
+            _check_new(staged, receipt)
+            current = source.scanner._stat(parent, name, path)
+            if (
+                _version(actual.info) != _version(staged.info)
+                or current is None
+                or current.st_nlink != 2
+                or _version(current) != _version(actual.info)
+            ):
+                raise WriteError("WRITE_RECOVERY_CONFLICT: installation links changed")
+            return SourceDocument(
+                path,
+                _validate_raw(actual.raw),
+                actual.sha256,
+                len(actual.raw),
+                stat.S_IMODE(actual.info.st_mode),
+                _version(actual.info),
+            )
 
     def _temp(self, source, metadata, *, directory=False):
         with source.parent_fd(metadata["path"], directory=directory) as (parent, _):
@@ -174,8 +218,6 @@ class WriteRecovery:
         return result
 
     def _recover_file(self, source, task, operation, metadata):
-        current = self._current(source, metadata["path"])
-        temp = self._temp(source, metadata)
         receipt = prepared_file(metadata["prepared"]) if metadata.get("prepared") else None
         before_attributes, after_attributes = self._attributes(operation)
         if receipt is not None:
@@ -184,6 +226,14 @@ class WriteRecovery:
                 after_attributes is None or receipt.attribute_sha256 != after_attributes.sha256
             ):
                 raise WriteError("WRITE_RECOVERY_METADATA: complete temporary attributes required")
+        current = self._current(
+            source,
+            metadata["path"],
+            receipt=receipt
+            if metadata["kind"] == "create_file" and metadata["before_hash"] is None
+            else None,
+        )
+        temp = self._temp(source, metadata)
         before_matches = (current is None and metadata["before_hash"] is None) or (
             current is not None
             and current.sha256 == metadata["before_hash"]
@@ -206,8 +256,19 @@ class WriteRecovery:
                     raise WriteError("WRITE_RECOVERY_UNKNOWN_TEMP: preserve an unregistered inode")
                 if stat.S_IMODE(temp.st_mode) not in {receipt.mode, 0o600}:
                     raise WriteError("WRITE_RECOVERY_CONFLICT: temporary permissions changed")
+                # Build 33 may have copied the original's Darwin provenance into
+                # the intended record, although the kernel retains the temp's
+                # own value. Only abort an uninstalled, fully verified attempt;
+                # installed-source and all other attribute checks stay exact.
+                discard_attributes = after_attributes
+                if metadata["phase"] == "preparing" and after_attributes is not None:
+                    with source.parent_fd(metadata["path"]) as (parent, _):
+                        staged = _read_named(parent, receipt.temp_name, links=(1,), attributes=True)
+                    discard_attributes = replacement_file_attributes(
+                        after_attributes, staged.attributes
+                    )
                 discard_prepared(
-                    source, receipt, receipt.sha256, receipt.temp_identity, after_attributes
+                    source, receipt, receipt.sha256, receipt.temp_identity, discard_attributes
                 )
             return self._abort(operation, metadata)
         if (

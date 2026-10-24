@@ -15,6 +15,10 @@ class ContextError(RuntimeError):
     """A live read context cannot safely support the requested operation."""
 
 
+class ContextCapacityError(ContextError):
+    """Active metadata filled a limit; existing valid contexts remain available."""
+
+
 @dataclass(frozen=True, slots=True)
 class ReadContext:
     project_id: str
@@ -68,7 +72,7 @@ class ReadContexts:
             now = self._clock()
             self._expire_locked(now)
             if len(self._contexts) >= self._max_contexts:
-                raise ContextError("read context capacity exceeded")
+                raise ContextCapacityError("read context capacity exceeded")
             handle = "live_" + secrets.token_urlsafe(32)
             while handle in self._contexts:
                 handle = "live_" + secrets.token_urlsafe(32)
@@ -102,7 +106,7 @@ class ReadContexts:
                     raise ContextError("read context file changed; create a new context")
                 return
             if self._file_count >= self._max_files:
-                raise ContextError("read context file capacity exceeded")
+                raise ContextCapacityError("read context file capacity exceeded")
             context.files[path] = sha256
             self._file_count += 1
 
@@ -144,6 +148,16 @@ class ReadContexts:
             for handle, context in list(self._contexts.items()):
                 if context.project_id == project_id:
                     self._discard_locked(handle)
+
+    def discard(self, project_id: str, source_id: str, handle: str) -> None:
+        """Release one caller-owned unpublished context, without evicting others."""
+        with self._lock:
+            context = self._contexts.get(handle)
+            if context is None:
+                return
+            if context.project_id != project_id or context.source_id != source_id:
+                raise ContextError("read context project or source binding does not match")
+            self._discard_locked(handle)
 
     def clear(self) -> None:
         with self._lock:

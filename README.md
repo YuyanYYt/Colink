@@ -10,13 +10,35 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b7">本期源码发行</a> ·
   <a href="https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b5">下载 macOS 安装包</a> ·
   <a href="docs/INSTALL.md">安装与使用</a> ·
   <a href="docs/AGENT_INSTALL.md">让 Agent 帮你安装</a> ·
   <a href="https://github.com/YuyanYYt/Colink/releases">历史版本</a>
 </p>
 
-**公开预发行：0.5.0 Beta 5（`0.5.0b5`，build 22）** · macOS 14+ · Apple Silicon · [MIT](LICENSE)
+**macOS 安装包：0.5.0 Beta 5（`0.5.0b5`，build 22）** · macOS 14+ · Apple Silicon · [MIT](LICENSE)
+
+**本期最终源码：`0.5.0b7`**，见 [固定版本 `v0.5.0b7`](https://github.com/YuyanYYt/Colink/tree/v0.5.0b7)
+和[本期发行说明](docs/RELEASE_0.5.0b7.md)。源码中的 macOS 构建元数据沿用 build 34。
+包含统一源码读取、联合分析、Python / Java 有界数据流、分析限制诊断和本机工作区管理；
+见[读取与分析入口](docs/CODE_ANALYSIS_ENTRYPOINT.md)、[M1 接口](docs/CODE_INTELLIGENCE_M1.md)、
+[M2 边界](docs/CODE_INTELLIGENCE_M2.md)与[Java 数据流说明](docs/JAVA_DATAFLOW_BUILD34_20261016.md)。
+本期发行提供源码。当前可下载的 macOS 安装包仍为 `0.5.0b5 / build 22`；本机历史
+build 34 热修复包只包含写入恢复修复，与本期完整源码的功能范围不同。
+
+Live 主要使用两个入口：`read_code` 定向读取文件、符号、搜索和少量显式文件，
+`analyze_code` 查询关系、数据传播及任务 Diff，需要正文时可在同一次分析中附带。
+已知文件可直接读取；跨文件理解先取得必要关系与源码证据。Live 完整工具集合为
+40 个，含一个批量写入入口；八个被替代的旧入口已删除，更新后刷新连接工具。
+历史 Mirror 保持原十五个只读工具与原有语义，详情见
+[入口说明](docs/CODE_ANALYSIS_ENTRYPOINT.md)。
+
+查看和清理项目工作区：设置 → 存储位置 → 项目数据。每行显示一个完整本机工作区、
+原目录、包含的项目和全部占用；关闭连接后可将整个工作区及登记移到废纸篓，
+原目录不存在或没有索引时也可操作。清理后退出列表，重新选择源码目录可重建。
+源码、全局连接配置与写入恢复库保留；具体范围和恢复方式见
+[本机工作区](docs/PROJECT_WORKSPACE_STORAGE.md)。升级前的正式 `build 29` 保留可安装回退包。
 
 本版增加本机开发终端、固定数据库只读工具和局部代码索引更新。原生终端按当前
 macOS 用户权限运行；可选隔离执行器目前只在已验证的 Darwin 27 上开放。
@@ -32,10 +54,11 @@ CoLink 把你选定的本机项目接入 MCP。你可以在 ChatGPT 网页端询
 
 | 功能 | 你可以用它做什么 |
 | --- | --- |
-| 按需读取源码 | 查找文件、搜索代码、读取指定行或片段；直接读取磁盘上已保存的文件|
+| 按需读取源码 | 一个入口读取文件、符号、搜索及少量显式范围；直接读取磁盘上已保存的文件 |
 | 多项目管理 | 选择一个工作目录，分别启用其中的项目；在对话中指定项目|
-| Python / Java 代码关系 | 查找符号、定义和引用，按需查询类关系、调用关系、文件/模块依赖、反向影响和依赖层级 |
+| Python / Java 代码关系 | 联合查询类、调用、文件/模块关系与数据传播，可附带目标源码；引用、文件影响和全项目视图保留专用查询 |
 | 精准写入 | 本机授权后按行插入、替换指定范围或唯一片段；修改前核对原文和文件哈希 |
+| 批量写入 | 一次预检并提交最多二十笔显式编辑或创建，逐项保存恢复记录；执行中断明确报告已完成与待处理项 |
 | 创建、移动与删除 | 创建文件和目录，在任务范围内移动源码与静态资源，删除明确指定的单个文件；不提供递归删除 |
 | 任务 Diff | 查看同一任务跨多轮、跨文件的累计改动，不在普通问答里展示递增版本编号 |
 | 网页开发终端 | 开发档直接运行本机命令、安装依赖与启动前后端，支持交互输入和输出；按当前 macOS 用户权限执行 |
@@ -137,6 +160,7 @@ uv run colink live --root examples/sample_project --project sample \
 
 | 版本 | 主要变化 |
 | --- | --- |
+| [**0.5.0 Beta 7 · 本期最终源码**](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b7) | Python / Java 有界数据流、结构分析覆盖与限制诊断、可恢复批量写入与工作区管理；见[本期发行说明](docs/RELEASE_0.5.0b7.md)。本期提供源码 |
 | [**0.5.0 Beta 5 · 公开预发行**](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b5) | 只读 / 写入 / 开发三档、原生终端、固定数据库只读、局部索引和自定义运行数据目录；见 [发行说明](docs/RELEASE_0.5.0b5.md) |
 | **0.5.0 Beta 4 · 维护源码** | 网页独立开发作业、原生隔离与有界存储、环境/端口/数据库引导、受控移动与本地 Git；公开发行状态和实际验收另行记录 |
 | **0.5.0 Beta 2 · 公开发行** | 改善无 Git 项目发现和同名项目区分；发布直读、多项目及受控写入安装包；移除主动代码回退，代码历史交给项目 Git 管理 |
@@ -181,7 +205,8 @@ CoLink 使用 [MIT 许可证](LICENSE)。这是每位用户独立运行的开源
 
 ## 软件恢复锚点
 
-当前首选：`anchor/colink-0.5.0b5-build19-verified`（恢复基准为 `0.5.0b5 · build 19`，对应源码 `79ad2ae`；当前发布版为 build 22）。
+维护者当前首选恢复基准：`0.5.0b7 / build 33`，本机固定标签为
+`anchor/colink-0.5.0b7-build33-before-cross-language-20261016T152045`。
 恢复前保留当前改动并检查运行数据兼容性，具体步骤和归档记录见
-[build 19 恢复说明](docs/RECOVERY_0.5.0b5_BUILD19.md)。2026-10-08 用户明确改选本机新版，
-旧 CoLink 恢复标签已删除；历史文档仅保留当时记录。
+[build 33 恢复说明](docs/RECOVERY_0.5.0b7_BUILD33.md)。历史 build 19 材料保留；
+这些维护者本机恢复材料不随公共源码发行分发。

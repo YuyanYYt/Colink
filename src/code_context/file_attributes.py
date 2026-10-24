@@ -12,8 +12,9 @@ macOS ACLs retain entry order, UUIDs, permissions and inheritance flags. Linux
 POSIX ACLs remain their original xattr bytes. Unsupported attributes fail closed;
 there is no copyfile, AppleDouble, permission-relaxing or partial-copy fallback.
 Darwin supports native APFS/HFS volumes; Linux requires zero inode flags and
-fd xattr support. Kernel-managed attributes which cannot be made equal, or modes
-preventing complete native verification, are rejected rather than ignored.
+fd xattr support. Coordinated replacements journal the new inode's own Darwin
+provenance rather than attempting to transplant the original inode's value.
+All captured attributes, including provenance, remain strictly verified.
 """
 
 import array
@@ -651,6 +652,35 @@ def capture_directory_attributes(fd: int) -> FileAttributes:
     Directory link counts are not file hardlink counts and are not restricted.
     """
     return _capture(fd, directory=True)
+
+
+def replacement_file_attributes(
+    original: FileAttributes, creation: FileAttributes
+) -> FileAttributes:
+    """Retain only the new inode's kernel-managed Darwin provenance.
+
+    Original records are never normalized: their complete attributes still prove
+    source ownership and conflicts. Callers must durably journal this new record
+    before writing a body, or use it solely to abort an uninstalled preparation
+    whose original, temp identity, full body and other attributes are verified.
+    No other xattr, ACL, owner, mode or flags are relaxed.
+    """
+    _validate(original)
+    _validate(creation)
+    if original.platform != creation.platform:
+        raise FileAttributesError("UNSUPPORTED_ATTRIBUTES: attribute platforms disagree")
+    if original.platform != "darwin":
+        return original
+    name = "com.apple.provenance"
+    return replace(
+        original,
+        xattrs=tuple(
+            sorted(
+                [(key, value) for key, value in original.xattrs if key != name]
+                + [(key, value) for key, value in creation.xattrs if key == name]
+            )
+        ),
+    )
 
 
 def verify_file_attributes(fd: int, attrs: FileAttributes) -> None:

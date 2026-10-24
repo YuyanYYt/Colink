@@ -1,5 +1,9 @@
 # CoLink · 架构与协议 v1
 
+当前源码发行是 [`0.5.0b7`](RELEASE_0.5.0b7.md)。Live 以 `read_code` 读取源码，
+`analyze_code` 返回结构关系、Python / Java 有界数据流和任务 Diff；当前契约见
+[统一入口](CODE_ANALYSIS_ENTRYPOINT.md)。以下带日期的架构说明保留各阶段的历史语义。
+
 2026-10-06 实施补充：下文主体保留**旧 mirror 兼容架构与协议**，不是新 live 的读取
 语义。开发分支 0.5.0-beta.1 已引入 SourceAccess / LiveQueries / ProjectRegistry / 有界
 ReadContexts、单生产线程按需 LiveIndexService 和 WatchCoordinator。本机私有控制
@@ -165,7 +169,7 @@ MCP 工具读取本身不进行清理，保留只读注解；源目录始终只�
 ## 维护约束
 
 协议版本、数据库 user_version 与包版本分别维护。同步协议/客户端 schema 为 1，
-镜像基础 schema 为 2，当前开发包版本为 0.4.2；新增 `ci_*` 派生表，不改变上传协议
+镜像基础 schema 为 2，当前源码包版本为 0.5.0b7；新增 `ci_*` 派生表，不改变上传协议
 或原始表格式，不自动升级未知数据库。派生表按解析版本启动回填，外键关联对应快照。
 增加工具优先复用 MirrorStore 的查询能力。加入索引时以 project_id + revision +
 content_hash 标记派生状态。变更测试通过后记录 CHANGELOG；自动清理只针对用户已确认的
@@ -177,6 +181,10 @@ content_hash 标记派生状态。变更测试通过后记录 CHANGELOG；自动
 官方私有 Tunnel 路径不暴露 HTTP 同步接口，也不增加多租户能力。
 
 ## 原生应用生命周期
+
+2026-10-10 低能耗待命设计见
+[完整方案、四策略推演与 build 24 实施](ENERGY_IDLE_DESIGN_20261010.md)。300 秒
+窗口用于缓存保温与空闲调度，不用于关闭连接、终止作业或替换既有任务时限。
 
 CoLink 原生应用不是新增的 MCP 工具。用户在本机界面操作后，原生应用通过受控的
 `desktop-run` / `desktop-status` 本机 CLI 管理既有隧道，不允许网页启动命令、

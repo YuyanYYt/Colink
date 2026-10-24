@@ -55,7 +55,15 @@ class WatchCoordinator:
         self.overflow_count = 0
         self.state = "stopped"
         self.failure = None
+        self.active = True
         self.reconfigure(sources)
+
+    def set_active(self, active):
+        """Idle still receives native events; only periodic compensation pauses."""
+        with self.lock:
+            if self.active != bool(active):
+                self.active = bool(active)
+                self.native_stop.set()
 
     def reconfigure(self, sources):
         if len(sources) > self.max_projects:
@@ -178,6 +186,7 @@ class WatchCoordinator:
                 "event_overflows": self.overflow_count,
                 "freshness_requires_validation": True,
                 "recursive": False,
+                "periodic_reconcile": self.active,
             }
 
     def consume(self, project):
@@ -209,6 +218,7 @@ class WatchCoordinator:
                 )
                 self.native_stop = threading.Event()
                 stop = self.native_stop
+                active = self.active
                 self.state = (
                     "degraded"
                     if any(item["partial"] for item in self.metadata.values())
@@ -230,7 +240,7 @@ class WatchCoordinator:
                     debounce=150,
                     step=30,
                     rust_timeout=500,
-                    yield_on_timeout=True,
+                    yield_on_timeout=active,
                     raise_interrupt=False,
                     debug=False,
                 ):
@@ -239,7 +249,7 @@ class WatchCoordinator:
                     if changes:
                         self.notify(changes)
                         break
-                    if time.monotonic() - last_reconcile >= self.reconcile_seconds:
+                    if active and time.monotonic() - last_reconcile >= self.reconcile_seconds:
                         self.reconcile()
                         last_reconcile = time.monotonic()
                         break

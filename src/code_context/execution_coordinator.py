@@ -126,6 +126,17 @@ class ExecutionCoordinator:
         )
         self.preparers = set()
         self.closed = False
+        self.on_activity = None
+
+    def active_count(self):
+        """No lease renewal: preparation remains protected until cleanup returns."""
+        with self.lock:
+            preparing = len(self.preparers)
+        return preparing + self.manager.active_count()
+
+    def _activity_changed(self):
+        if self.on_activity is not None:
+            self.on_activity()
 
     def _check_launch(self, argv, cwd, env):
         if not self.control_alive() or not self.grants or not self.gate():
@@ -615,6 +626,7 @@ class ExecutionCoordinator:
             )
             self.preparers.add(worker)
             worker.start()
+        self._activity_changed()
         ready.wait(max(0, deadline - time.monotonic()))
         output = {"chunks": [], "next_cursor": 0, "eof": False, "state": "preparing"}
         if not live.get("preparing"):
@@ -725,9 +737,13 @@ class ExecutionCoordinator:
                 self.store.update_completed_snapshot(job_id, snapshot)
         finally:
             live["ready"].set()
-            self.preparers.discard(threading.current_thread())
-            if not live.get("preparing") and not live.get("prepare_failed"):
-                self._release_workspace(job_id)
+            try:
+                if not live.get("preparing") and not live.get("prepare_failed"):
+                    self._release_workspace(job_id)
+            finally:
+                with self.lock:
+                    self.preparers.discard(threading.current_thread())
+                self._activity_changed()
 
     def _completed(self, job_id, snapshot):
         live = self.live[job_id]

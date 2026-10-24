@@ -6,10 +6,9 @@ from threading import RLock
 
 from code_context.fingerprint_cache import FingerprintCache
 from code_context.models import validate_project
-from code_context.policy import MAX_TOTAL_BYTES
-from code_context.read_context import ContextError, ReadContexts
+from code_context.read_context import ContextCapacityError, ContextError, ReadContexts
 from code_context.source_access import SourceAccess, SourceError
-from code_context.source_page import physical_lines, source_page
+from code_context.source_page import source_page
 
 
 class LiveQueries:
@@ -118,23 +117,50 @@ class LiveQueries:
                 self.watcher.reconfigure(self.sources)
 
     def resolve_snapshot(self, project_id, snapshot=None):
+        handle, _source_id = self._resolve_context(project_id, snapshot)
+        return handle, handle
+
+    def _resolve_context(self, project_id, snapshot=None):
         source = self.source(project_id)
         self.guard_read(project_id)
+        created = snapshot is None or snapshot == "current"
+        handle = None
+        completed = False
         try:
-            if snapshot is None or snapshot == "current":
+            if created:
                 handle = self.contexts.create(project_id, source.source_id)
             else:
                 handle = snapshot
                 self.contexts.get(project_id, source.source_id, handle)
             with self.fingerprint_batch(project_id, source):
                 self.contexts.validate(project_id, source.source_id, handle, source.fingerprint)
+            self.guard_read(project_id)
+            completed = True
+        except ContextCapacityError:
+            raise SourceError(
+                "LIVE_CONTEXT_CAPACITY: active read metadata is full; reuse a valid context "
+                "or retry after unused contexts expire"
+            ) from None
         except ContextError:
             raise SourceError(
                 "LIVE_CONTEXT_INVALID: restart analysis from repo_overview; "
                 "historical snapshots are not available in direct mode"
             ) from None
-        self.guard_read(project_id)
-        return handle, handle
+        finally:
+            if created and handle is not None and not completed:
+                self.contexts.discard(project_id, source.source_id, handle)
+        return handle, source.source_id
+
+    @contextmanager
+    def context_request(self, project_id, snapshot=None):
+        """Own new metadata until the request succeeds; preserve supplied contexts."""
+        handle, source_id = self._resolve_context(project_id, snapshot)
+        try:
+            yield handle, handle
+        except BaseException:
+            if snapshot is None or snapshot == "current":
+                self.contexts.discard(project_id, source_id, handle)
+            raise
 
     def guard_read(self, project_id):
         """Publication guard; never acquire the coordinator lock under Source locks."""
@@ -162,6 +188,11 @@ class LiveQueries:
             self.contexts.observe(
                 project_id, source.source_id, handle, document.path, document.sha256
             )
+        except ContextCapacityError:
+            raise SourceError(
+                "LIVE_CONTEXT_CAPACITY: active read metadata is full; reuse observed files "
+                "or retry after unused contexts expire"
+            ) from None
         except ContextError:
             raise SourceError("LIVE_CONTEXT_CHANGED: restart analysis from repo_overview") from None
 
@@ -173,26 +204,26 @@ class LiveQueries:
             or not 1 <= limit <= 1000
         ):
             raise SourceError("INVALID_PAGE: use nonnegative offset and 1-1000 files")
-        handle, _ = self.resolve_snapshot(project_id, selection)
-        source = self.source(project_id)
-        metadata = source.manifest()
-        files = metadata["files"]
-        page = [{"path": f["path"], "size": f["size"]} for f in files[offset : offset + limit]]
-        self.resolve_snapshot(project_id, handle)
-        return {
-            "project_id": project_id,
-            "snapshot": handle,
-            "source_mode": "live",
-            "created_at": datetime.now(UTC).isoformat(),
-            "files": page,
-            "file_count": len(files),
-            "offset": offset,
-            "has_more": offset + len(page) < len(files),
-            "discovery_partial": metadata["partial"],
-            "hashes_available": False,
-            "history_available": False,
-            "code_intelligence": {"status": "on_demand"},
-        }
+        with self.context_request(project_id, selection) as (handle, _):
+            source = self.source(project_id)
+            metadata = source.manifest()
+            files = metadata["files"]
+            page = [{"path": f["path"], "size": f["size"]} for f in files[offset : offset + limit]]
+            self.resolve_snapshot(project_id, handle)
+            return {
+                "project_id": project_id,
+                "snapshot": handle,
+                "source_mode": "live",
+                "created_at": datetime.now(UTC).isoformat(),
+                "files": page,
+                "file_count": len(files),
+                "offset": offset,
+                "has_more": offset + len(page) < len(files),
+                "discovery_partial": metadata["partial"],
+                "hashes_available": False,
+                "history_available": False,
+                "code_intelligence": {"status": "on_demand"},
+            }
 
     def read_file(
         self,
@@ -211,132 +242,95 @@ class LiveQueries:
         end_line = start_line + 199 if end_line is None else end_line
         if end_line - start_line + 1 > 1000:
             raise SourceError("read at most 1000 lines at a time")
-        handle, _ = self.resolve_snapshot(project_id, selection)
-        document = self.source(project_id).read(path)
-        self._observe(project_id, handle, document)
-        try:
-            page = source_page(
-                document.content, start_line, end_line, max_chars, char_offset, physical=True
-            )
-        except ValueError as exc:
-            raise SourceError(str(exc)) from None
-        self.resolve_snapshot(project_id, handle)
-        return {
-            "project_id": project_id,
-            "snapshot": handle,
-            "source_mode": "live",
-            "path": path,
-            "sha256": document.sha256,
-            "size": document.size,
-            "source_is_untrusted": True,
-            **page,
-        }
-
-    def search_code(self, project_id, query, selection=None, limit=50):
-        if not query or len(query) > 200 or not 1 <= limit <= 200:
-            raise SourceError("query must be 1-200 characters; limit must be 1-200")
-        handle, _ = self.resolve_snapshot(project_id, selection)
-        source = self.source(project_id)
-        metadata = source.manifest()
-        matches, scanned_bytes = [], 0
-        partial = metadata["partial"]
-        for item in metadata["files"]:
-            if scanned_bytes + item["size"] > MAX_TOTAL_BYTES:
-                partial = True
-                break
-            try:
-                document = source.read(item["path"])
-            except SourceError as exc:
-                if str(exc).startswith("FILE_EXCLUDED:"):
-                    continue
-                raise
-            scanned_bytes += document.size
+        with self.context_request(project_id, selection) as (handle, _):
+            document = self.source(project_id).read(path)
             self._observe(project_id, handle, document)
-            for number, line in enumerate(physical_lines(document.content), 1):
-                if query in line:
-                    if len(matches) >= limit:
-                        self.resolve_snapshot(project_id, handle)
-                        return {
-                            "project_id": project_id,
-                            "snapshot": handle,
-                            "source_mode": "live",
-                            "matches": matches,
-                            "has_more": True,
-                            "search_partial": partial,
-                        }
-                    column = line.index(query)
-                    begin = max(0, column - 200)
-                    matches.append(
-                        {
-                            "path": document.path,
-                            "line": number,
-                            "text": line[begin : begin + 1000],
-                            "column": column + 1,
-                            "truncated": len(line) > 1000,
-                        }
-                    )
-        self.resolve_snapshot(project_id, handle)
-        return {
-            "project_id": project_id,
-            "snapshot": handle,
-            "source_mode": "live",
-            "matches": matches,
-            "has_more": False,
-            "search_partial": partial,
-        }
+            try:
+                page = source_page(
+                    document.content, start_line, end_line, max_chars, char_offset, physical=True
+                )
+            except ValueError as exc:
+                raise SourceError(str(exc)) from None
+            self.resolve_snapshot(project_id, handle)
+            return {
+                "project_id": project_id,
+                "snapshot": handle,
+                "source_mode": "live",
+                "path": path,
+                "sha256": document.sha256,
+                "size": document.size,
+                "source_is_untrusted": True,
+                **page,
+            }
+
+    def search_code(self, project_id, query, selection=None, limit=50, **parameters):
+        from code_context.read_search import search_source
+
+        with self.context_request(project_id, selection) as (handle, _):
+            result = search_source(
+                self,
+                project_id,
+                self.source(project_id),
+                handle,
+                query,
+                limit=limit,
+                **parameters,
+            )
+            self.resolve_snapshot(project_id, handle)
+            return result
 
     def get_recent_diff(self, project_id, snapshot=None, path=None, **parameters):
-        handle, _ = self.resolve_snapshot(project_id, snapshot)
-        if self.write_coordinator is not None:
-            result = self.write_coordinator.get_diff(project_id, path=path, **parameters)
-        else:
-            from code_context.write_diff import TaskDiff
-
-            options = {
-                "baseline": "previous",
-                "detail": "summary",
-                "offset": 0,
-                "limit": 50,
-                "max_chars": 20_000,
-                **parameters,
-            }
-            TaskDiff._parameters(path, **options)
-            if options["baseline"] == "empty":
-                result = TaskDiff._empty(
-                    project_id,
-                    self.source(project_id),
-                    path,
-                    options["detail"],
-                    options["offset"],
-                    options["limit"],
-                    options["max_chars"],
-                )
+        with self.context_request(project_id, snapshot) as (handle, _):
+            if self.write_coordinator is not None:
+                result = self.write_coordinator.get_diff(project_id, path=path, **parameters)
             else:
-                result = {
-                    "project_id": project_id,
-                    "source_mode": "live",
-                    "changes_available": False,
-                    "baseline": None,
-                    "reason": "NO_TASK_BASELINE",
-                    "changes": [],
-                    "has_more": False,
-                    "next_offset": None,
-                    "truncated": False,
+                from code_context.write_diff import TaskDiff
+
+                options = {
+                    "baseline": "previous",
+                    "detail": "summary",
+                    "offset": 0,
+                    "limit": 50,
+                    "max_chars": 20_000,
+                    **parameters,
                 }
-        self.resolve_snapshot(project_id, handle)
-        return {**result, "snapshot": handle}
+                TaskDiff._parameters(path, **options)
+                if options["baseline"] == "empty":
+                    result = TaskDiff._empty(
+                        project_id,
+                        self.source(project_id),
+                        path,
+                        options["detail"],
+                        options["offset"],
+                        options["limit"],
+                        options["max_chars"],
+                    )
+                else:
+                    result = {
+                        "project_id": project_id,
+                        "source_mode": "live",
+                        "changes_available": False,
+                        "baseline": None,
+                        "reason": "NO_TASK_BASELINE",
+                        "changes": [],
+                        "has_more": False,
+                        "next_offset": None,
+                        "truncated": False,
+                    }
+            self.resolve_snapshot(project_id, handle)
+            return {**result, "snapshot": handle}
 
     def code_query(self, project_id, snapshot, operation, **parameters):
-        handle, _ = self.resolve_snapshot(project_id, snapshot)
-        if self.index_service is None:
-            raise SourceError("INDEX_NOT_READY: live structural indexing is not attached")
-        result = self.index_service.query(self, project_id, handle, operation, **parameters)
-        # The index service validates the entire context and inventory before
-        # and after its query. Recheck authorization/publication here without
-        # repeating a fifth complete fingerprint pass over a large project.
-        self.source(project_id)
-        self.guard_read(project_id)
-        return result
+        with self.context_request(project_id, snapshot) as (handle, _):
+            if self.index_service is None:
+                raise SourceError("INDEX_NOT_READY: live structural indexing is not attached")
+            result = self.index_service.query(self, project_id, handle, operation, **parameters)
+            # The index service validates the entire context and inventory before
+            # and after its query. Recheck authorization/publication here without
+            # repeating a fifth complete fingerprint pass over a large project.
+            self.source(project_id)
+            self.guard_read(project_id)
+            return result
 
     def mcp_status(self):
         runtime = getattr(self, "workspace_runtime", None)

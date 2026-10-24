@@ -6,6 +6,7 @@ an unmarked workspace root is a container, even when locally registered. Local
 registration can explicitly split other directories into independent projects.
 """
 
+import fcntl
 import hashlib
 import json
 import math
@@ -56,7 +57,7 @@ _PRUNED = frozenset(
     }
 )
 _STATE_FILE = "projects.json"
-_STATE_SCHEMA = 2
+_STATE_SCHEMA = 3
 _MAX_STATE_BYTES = 1024 * 1024
 
 
@@ -77,6 +78,7 @@ class _Project:
     aliases: tuple[str, ...]
     enabled: bool
     name_origin: str
+    stable_id: str | None
 
 
 class _RegisteredSource(SourceAccess):
@@ -86,8 +88,9 @@ class _RegisteredSource(SourceAccess):
         super().__init__(registry.workspace / project.relative_root)
         self._registry = registry
         self._project_id = project.project_id
-        if self.source_id != project.source_id:
+        if self.stable_id != project.stable_id:
             raise RegistryError("PROJECT_SOURCE_CHANGED: register and enable the source locally")
+        self.retain_source_id(project.source_id)
 
     @contextmanager
     def root_fd(self):
@@ -113,6 +116,9 @@ class ProjectRegistry:
         max_depth: int = 5,
         max_directories: int = 5000,
         max_seconds: float = 3,
+        *,
+        legacy_device: int | None = None,
+        identity_guard=None,
     ) -> None:
         for value in (max_projects, max_directories):
             if type(value) is not int or value < 1:
@@ -148,6 +154,10 @@ class ProjectRegistry:
         self._lock = RLock()
         self._state_directory: SourceAccess | None = None
         self._persisted_version: tuple | None = None
+        self._legacy_device = legacy_device
+        self._migration_sources = []
+        self.identity_upgraded = False
+        self._identity_guard = identity_guard
         if self.data_dir is not None:
             self._prepare_data_directory()
             self._state_directory = SourceAccess(self.data_dir)
@@ -156,6 +166,12 @@ class ProjectRegistry:
                 self._save()
             else:
                 self._load(state)
+                if state["schema"] < _STATE_SCHEMA:
+                    self._backup_legacy_state()
+                    self._save()
+                    self.identity_upgraded = True
+                elif self.identity_upgraded:
+                    self._save()
                 self._refresh()
 
     def discover(self) -> dict:
@@ -280,6 +296,7 @@ class ProjectRegistry:
                     aliases,
                     enabled,
                     "custom" if display_name is not None else "auto",
+                    source.stable_id,
                 )
             )
             return project_id
@@ -354,6 +371,14 @@ class ProjectRegistry:
                 raise RegistryError(
                     "PROJECT_SOURCE_CHANGED: register and enable the source locally"
                 )
+            if project.stable_id is None:
+                source = self._probe_root(project.relative_root)
+                if not self._source_matches(project, source):
+                    raise RegistryError("PROJECT_SOURCE_CHANGED: reauthorize locally")
+                source.ensure_available()
+                with self._change():
+                    project = replace(project, stable_id=source.stable_id)
+                    self._projects[project_id] = project
             if project_id not in self._sources:
                 self._sources[project_id] = _RegisteredSource(self, project)
             source = self._sources[project_id]
@@ -362,6 +387,8 @@ class ProjectRegistry:
 
     def _check_workspace(self):
         try:
+            if self._identity_guard is not None:
+                self._identity_guard()
             self._workspace.ensure_available()
         except SourceError:
             raise RegistryError("WORKSPACE_CHANGED: reauthorize the workspace locally") from None
@@ -451,7 +478,12 @@ class ProjectRegistry:
 
     def _probe_root(self, relative):
         try:
-            return SourceAccess(self.workspace / relative)
+            source = SourceAccess(self.workspace / relative)
+            for project in self._projects.values():
+                if project.relative_root == relative and self._source_matches(project, source):
+                    source.retain_source_id(project.source_id)
+                    break
+            return source
         except SourceError:
             raise RegistryError(
                 "PROJECT_SOURCE_UNAVAILABLE: use a real directory in the workspace"
@@ -459,9 +491,14 @@ class ProjectRegistry:
 
     def _available(self, project):
         try:
-            return self._probe_root(project.relative_root).source_id == project.source_id
+            return self._source_matches(project, self._probe_root(project.relative_root))
         except RegistryError:
             return False
+
+    def _source_matches(self, project, source):
+        if project.stable_id is not None:
+            return source.stable_id == project.stable_id
+        return source.legacy_source_id(self._legacy_device) == project.source_id
 
     def _project_id(self, relative, source_id):
         encoded = json.dumps([self._workspace.source_id, relative, source_id]).encode()
@@ -493,7 +530,14 @@ class ProjectRegistry:
         if project_id in self._projects:
             return self._projects[project_id]
         project = _Project(
-            project_id, relative, source.source_id, self._default_name(relative), (), False, "auto"
+            project_id,
+            relative,
+            source.source_id,
+            self._default_name(relative),
+            (),
+            False,
+            "auto",
+            source.stable_id,
         )
         self._put(project)
         return project
@@ -535,6 +579,12 @@ class ProjectRegistry:
         with self._change():
             for project_id, project in list(self._projects.items()):
                 available[project_id] = self._available(project)
+                if project.stable_id is None and available[project_id]:
+                    source = self._probe_root(project.relative_root)
+                    if not self._source_matches(project, source):
+                        raise RegistryError("PROJECT_SOURCE_CHANGED: reauthorize locally")
+                    project = replace(project, stable_id=source.stable_id)
+                    self.identity_upgraded = True
                 if project.name_origin == "auto":
                     project = replace(
                         project, display_name=self._default_name(project.relative_root)
@@ -666,17 +716,26 @@ class ProjectRegistry:
                 "authorized_projects",
             }:
                 raise ValueError
-            if type(state["schema"]) is not int or state["schema"] not in (1, _STATE_SCHEMA):
+            if type(state["schema"]) is not int or state["schema"] not in (1, 2, _STATE_SCHEMA):
                 raise RegistryError(
                     "UNKNOWN_REGISTRY_SCHEMA: unsupported registry metadata version"
                 )
-            if state["workspace"] != {
-                "path": str(self.workspace),
-                "source_id": self._workspace.source_id,
-            }:
+            workspace = state["workspace"]
+            legacy = state["schema"] < _STATE_SCHEMA
+            expected = {"path": str(self.workspace), "source_id": workspace.get("source_id")}
+            if not legacy:
+                expected["stable_id"] = self._workspace.stable_id
+            source_id = workspace.get("source_id")
+            if (
+                workspace != expected
+                or not isinstance(source_id, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", source_id)
+                or (legacy and source_id != self._workspace.legacy_source_id(self._legacy_device))
+            ):
                 raise RegistryError(
                     "REGISTRY_WORKSPACE_MISMATCH: use the original workspace binding"
                 )
+            self._workspace.retain_source_id(source_id)
             rows = state["projects"]
             if not isinstance(rows, list) or len(rows) > self._max_projects:
                 raise ValueError
@@ -690,8 +749,10 @@ class ProjectRegistry:
                     "aliases",
                     "enabled",
                 }
-                if state["schema"] == _STATE_SCHEMA:
+                if state["schema"] >= 2:
                     keys.add("name_origin")
+                if not legacy:
+                    keys.add("stable_id")
                 if not isinstance(row, dict) or set(row) != keys:
                     raise ValueError
                 relative = self._relative_root(row["relative_root"])
@@ -704,9 +765,34 @@ class ProjectRegistry:
                 if not isinstance(row["aliases"], list):
                     raise ValueError
                 self._validate_enabled(row["enabled"])
-                name_origin = row["name_origin"] if state["schema"] == _STATE_SCHEMA else "legacy"
+                name_origin = row["name_origin"] if state["schema"] >= 2 else "legacy"
                 if name_origin not in ("auto", "custom", "legacy"):
                     raise ValueError
+                stable_id = row.get("stable_id")
+                if legacy:
+                    try:
+                        source = SourceAccess(self.workspace / relative)
+                        if source.legacy_source_id(self._legacy_device) == source_id:
+                            stable_id = source.stable_id
+                            self._migration_sources.append(source)
+                        elif self._legacy_device is not None:
+                            raise RegistryError("PROJECT_SOURCE_CHANGED: reauthorize locally")
+                    except SourceError:
+                        if self._legacy_device is not None:
+                            raise RegistryError(
+                                "PROJECT_SOURCE_CHANGED: reauthorize locally"
+                            ) from None
+                elif stable_id is not None and (
+                    not isinstance(stable_id, str) or not re.fullmatch(r"[0-9a-f]{64}", stable_id)
+                ):
+                    raise ValueError
+                elif stable_id is None and self._legacy_device is not None:
+                    source = SourceAccess(self.workspace / relative)
+                    if source.legacy_source_id(self._legacy_device) != source_id:
+                        raise RegistryError("PROJECT_SOURCE_CHANGED: reauthorize locally")
+                    stable_id = source.stable_id
+                    self._migration_sources.append(source)
+                    self.identity_upgraded = True
                 self._projects[project_id] = _Project(
                     project_id,
                     relative,
@@ -715,6 +801,7 @@ class ProjectRegistry:
                     self._aliases(tuple(row["aliases"])),
                     row["enabled"],
                     name_origin,
+                    stable_id,
                 )
                 roots.add(relative)
             authorized = state["authorized_projects"]
@@ -724,15 +811,78 @@ class ProjectRegistry:
                 raise ValueError
         except RegistryError:
             raise
-        except (ValueError, TypeError, KeyError):
+        except (ValueError, TypeError, KeyError, AttributeError):
             raise RegistryError("INVALID_REGISTRY_METADATA: invalid registration records") from None
+
+    def _backup_legacy_state(self):
+        from code_context.write_move import WriteError, _rename_no_replace
+
+        self._check_workspace()
+        for source in self._migration_sources:
+            source.ensure_available()
+        with self._state_directory.root_fd() as directory:
+            fd = os.open(_STATE_FILE, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+            try:
+                info = os.fstat(fd)
+                self._private(info)
+                if _version(info) != self._persisted_version:
+                    raise RegistryError("REGISTRY_STORAGE_CHANGED: reload registry metadata")
+                raw = os.read(fd, _MAX_STATE_BYTES + 1)
+                if len(raw) != info.st_size or _version(os.fstat(fd)) != self._persisted_version:
+                    raise RegistryError("REGISTRY_STORAGE_CHANGED: reload registry metadata")
+            finally:
+                os.close(fd)
+            name = "projects.pre-volume-v1.json"
+            temporary = name + ".tmp-" + secrets.token_hex(12)
+            backup = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=directory,
+            )
+            with os.fdopen(backup, "wb") as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            self._check_workspace()
+            try:
+                _rename_no_replace(directory, temporary, directory, name)
+            except WriteError as exc:
+                if not str(exc).startswith("WRITE_MOVE_TARGET_EXISTS:"):
+                    raise RegistryError(
+                        "REGISTRY_BACKUP_FAILED: preserve original metadata"
+                    ) from None
+                backup = os.open(
+                    name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory
+                )
+                try:
+                    before = os.fstat(backup)
+                    self._private(before)
+                    if (
+                        os.read(backup, _MAX_STATE_BYTES + 1) != raw
+                        or _version(os.fstat(backup)) != _version(before)
+                        or _version(os.stat(name, dir_fd=directory, follow_symlinks=False))
+                        != _version(before)
+                    ):
+                        raise RegistryError(
+                            "REGISTRY_BACKUP_CONFLICT: preserve the original backup"
+                        )
+                finally:
+                    os.close(backup)
+                os.unlink(temporary, dir_fd=directory)
+            os.fsync(directory)
 
     def _save(self):
         if self._state_directory is None:
             return
+        self._check_workspace()
         state = {
             "schema": _STATE_SCHEMA,
-            "workspace": {"path": str(self.workspace), "source_id": self._workspace.source_id},
+            "workspace": {
+                "path": str(self.workspace),
+                "source_id": self._workspace.source_id,
+                "stable_id": self._workspace.stable_id,
+            },
             "projects": [
                 {
                     "project_id": p.project_id,
@@ -742,6 +892,7 @@ class ProjectRegistry:
                     "aliases": list(p.aliases),
                     "enabled": p.enabled,
                     "name_origin": p.name_origin,
+                    "stable_id": p.stable_id,
                 }
                 for p in sorted(self._projects.values(), key=lambda p: p.relative_root)
             ],
@@ -780,12 +931,57 @@ class ProjectRegistry:
                 current = self._state_info(directory)
                 if (_version(current) if current is not None else None) != version:
                     raise RegistryError("REGISTRY_STORAGE_CHANGED: reload registry metadata")
+                self._workspace.ensure_available()
+                if self._identity_guard is not None:
+                    self._identity_guard()
+                for source in self._migration_sources:
+                    source.ensure_available()
                 os.replace(temporary, _STATE_FILE, src_dir_fd=directory, dst_dir_fd=directory)
                 self._persisted_version = _version(self._state_info(directory))
                 os.fsync(directory)
+                self._migration_sources = []
         except RegistryError:
             raise
         except (OSError, SourceError):
             raise RegistryError(
                 "REGISTRY_SAVE_FAILED: registration metadata could not be saved"
             ) from None
+
+
+def upgrade_legacy_registry_identity(root: Path, data_dir: Path, legacy_device: int):
+    """Explicit local maintenance only; never exposed as an MCP tool."""
+    if type(legacy_device) is not int or legacy_device < 1:
+        raise RegistryError("INVALID_LEGACY_DEVICE: provide the verified original device number")
+    state = SourceAccess(data_dir.parent)
+    # A running workspace owns this lock. Reserve it even for never-started state.
+    with state.root_fd() as directory:
+        ProjectRegistry._private(os.fstat(directory), directory=True)
+        fd = os.open(
+            "runtime.lock",
+            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+            0o600,
+            dir_fd=directory,
+        )
+        try:
+            ProjectRegistry._private(os.fstat(fd))
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise RegistryError(
+                    "WORKSPACE_ALREADY_RUNNING: stop the connection first"
+                ) from None
+            if not (data_dir / _STATE_FILE).is_file():
+                raise RegistryError("REGISTRY_NOT_INITIALIZED: preserve the existing selection")
+            registry = ProjectRegistry(
+                root,
+                data_dir=data_dir,
+                legacy_device=legacy_device,
+                identity_guard=state.ensure_available,
+            )
+            return {
+                "upgraded": registry.identity_upgraded,
+                "schema": _STATE_SCHEMA,
+                **registry.list_projects(False),
+            }
+        finally:
+            os.close(fd)

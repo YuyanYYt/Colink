@@ -80,6 +80,7 @@ class WriteCoordinator:
                 "INSERT OR IGNORE INTO settings VALUES('next_task_request',?)",
                 ("req_" + uuid.uuid4().hex,),
             )
+        from code_context.write_batch import WriteBatch
         from code_context.write_deletion import WriteDeletion
         from code_context.write_diff import TaskDiff
         from code_context.write_move import WriteMove
@@ -93,6 +94,7 @@ class WriteCoordinator:
         self.rollback = WriteRollback(self)
         self.deletion = WriteDeletion(self)
         self.movement = WriteMove(self)
+        self.batches = WriteBatch(self)
 
     def _pending(self):
         return bool(
@@ -555,32 +557,62 @@ class WriteCoordinator:
             raise WriteError("WRITE_ORIGIN_CONFLICT: late-added file differs from the task origin")
 
     def apply_edit(self, project_id, task_id, request_id, path, expected_sha256, edit):
-        return self.operations.apply_edit(
-            project_id, task_id, request_id, path, expected_sha256, edit
-        )
+        with self.lock:
+            self._batch_namespace(task_id, request_id)
+            return self.operations.apply_edit(
+                project_id, task_id, request_id, path, expected_sha256, edit
+            )
 
     def create_file(self, project_id, task_id, request_id, path, content):
-        return self.operations.create_file(project_id, task_id, request_id, path, content)
+        with self.lock:
+            self._batch_namespace(task_id, request_id)
+            return self.operations.create_file(project_id, task_id, request_id, path, content)
 
     def create_directory(self, project_id, task_id, request_id, path):
-        return self.operations.create_directory(project_id, task_id, request_id, path)
+        with self.lock:
+            self._batch_namespace(task_id, request_id)
+            return self.operations.create_directory(project_id, task_id, request_id, path)
 
     def delete_file(self, project_id, task_id, request_id, path, expected_sha256):
-        return self.deletion.delete_file(project_id, task_id, request_id, path, expected_sha256)
+        with self.lock:
+            self._batch_namespace(task_id, request_id)
+            return self.deletion.delete_file(project_id, task_id, request_id, path, expected_sha256)
 
     def move_path(
         self, project_id, task_id, request_id, source_path, target_path, expected_sha256=None
     ):
-        return self.movement.move_path(
-            project_id, task_id, request_id, source_path, target_path, expected_sha256
-        )
+        with self.lock:
+            self._batch_namespace(task_id, request_id)
+            return self.movement.move_path(
+                project_id, task_id, request_id, source_path, target_path, expected_sha256
+            )
+
+    def _batch_namespace(self, task_id, request_id):
+        if (
+            isinstance(task_id, str)
+            and isinstance(request_id, str)
+            and self.store.query(
+                "SELECT request_id FROM write_batches WHERE task_id=? AND request_id=?",
+                (task_id, request_id),
+            )
+        ):
+            raise WriteError("REQUEST_ID_CONFLICT: identifier belongs to a write batch")
+
+    def write_batch(self, project_id, task_id, request_id, operations):
+        return self.batches.write(project_id, task_id, request_id, operations)
+
+    def batch_status(self, project_id):
+        with self.lock:
+            return self.batches.status(project_id)
 
     def move_path_status(self, project_id, path):
         """Read-only bounded move digest, including recognized static binaries."""
         return self.movement.status(project_id, path)
 
     def finish_write_task(self, project_id, task_id, request_id):
-        return self.operations.finish_write_task(project_id, task_id, request_id)
+        with self.lock:
+            self._batch_namespace(task_id, request_id)
+            return self.operations.finish_write_task(project_id, task_id, request_id)
 
     def recover(self, project_id):
         """Authenticated local control only. Never expose this method as an MCP tool."""
