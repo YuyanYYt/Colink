@@ -1,6 +1,11 @@
 # Security and privacy
 
-The public prerelease is 0.5.0b5 build 22. It adds compact modes, direct host terminals,
+The current source release is 0.5.0b7. Its source archive includes unified Live
+reads, bounded Python/Java static value flow, recoverable batch writes, and
+explicit analysis limitations. See [the source release notes](docs/RELEASE_0.5.0b7.md).
+The independent Rust prototypes are evaluation tools, not a production backend.
+
+The published macOS installer prerelease is 0.5.0b5 build 22. It adds compact modes, direct host terminals,
 fixed read-only database commands, and configurable local storage.
 Host terminals require the default-off project development grant. They are NOT sandboxed. Actual source, native, webpage and installed
 application evidence are recorded separately; no production security audit is claimed.

@@ -19,8 +19,9 @@ until their owner approves cleanup. macOS desktop tests reject `/private` source
 roots; do not disable that protection to run tests from `/tmp`.
 
 Storage/protocol changes must test idempotent retry, conflicts, immutable reads,
-two-state retention, disconnect and restart recovery. Tools must remain read-only;
-ordinary answers must not reveal growing internal revision counters. Update
+two-state retention, disconnect and restart recovery. Read-only annotations must
+stay accurate; source writes must use the project grants and recovery coordinator.
+Ordinary answers must not reveal growing internal revision counters. Update
 CHANGELOG and the relevant documentation, and label local versus real web proof.
 
 Native build instructions are in docs/MACOS_APP.md. Do not commit dependencies,

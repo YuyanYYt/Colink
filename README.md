@@ -10,18 +10,22 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b7">本期源码发行</a> ·
   <a href="https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b5">下载 macOS 安装包</a> ·
   <a href="docs/INSTALL.md">安装与使用</a> ·
   <a href="docs/AGENT_INSTALL.md">让 Agent 帮你安装</a> ·
   <a href="https://github.com/YuyanYYt/Colink/releases">历史版本</a>
 </p>
 
-**公开预发行：0.5.0 Beta 5（`0.5.0b5`，build 22）** · macOS 14+ · Apple Silicon · [MIT](LICENSE)
+**macOS 安装包：0.5.0 Beta 5（`0.5.0b5`，build 22）** · macOS 14+ · Apple Silicon · [MIT](LICENSE)
 
-本机维护版：`0.5.0b7 / build 33`，包含统一源码读取、联合分析及可选正文、M2 Python
-数据流与本机工作区清理；见 [读取与分析入口](docs/CODE_ANALYSIS_ENTRYPOINT.md)、
-[M1 接口](docs/CODE_INTELLIGENCE_M1.md)与 [M2 边界](docs/CODE_INTELLIGENCE_M2.md)。
-本机升级未发布到 GitHub。
+**本期最终源码：`0.5.0b7`**，见 [固定版本 `v0.5.0b7`](https://github.com/YuyanYYt/Colink/tree/v0.5.0b7)
+和[本期发行说明](docs/RELEASE_0.5.0b7.md)。源码中的 macOS 构建元数据沿用 build 34。
+包含统一源码读取、联合分析、Python / Java 有界数据流、分析限制诊断和本机工作区管理；
+见[读取与分析入口](docs/CODE_ANALYSIS_ENTRYPOINT.md)、[M1 接口](docs/CODE_INTELLIGENCE_M1.md)、
+[M2 边界](docs/CODE_INTELLIGENCE_M2.md)与[Java 数据流说明](docs/JAVA_DATAFLOW_BUILD34_20261016.md)。
+本期发行提供源码。当前可下载的 macOS 安装包仍为 `0.5.0b5 / build 22`；本机历史
+build 34 热修复包只包含写入恢复修复，与本期完整源码的功能范围不同。
 
 Live 主要使用两个入口：`read_code` 定向读取文件、符号、搜索和少量显式文件，
 `analyze_code` 查询关系、数据传播及任务 Diff，需要正文时可在同一次分析中附带。
@@ -156,6 +160,7 @@ uv run colink live --root examples/sample_project --project sample \
 
 | 版本 | 主要变化 |
 | --- | --- |
+| [**0.5.0 Beta 7 · 本期最终源码**](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b7) | Python / Java 有界数据流、结构分析覆盖与限制诊断、可恢复批量写入与工作区管理；见[本期发行说明](docs/RELEASE_0.5.0b7.md)。本期提供源码 |
 | [**0.5.0 Beta 5 · 公开预发行**](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b5) | 只读 / 写入 / 开发三档、原生终端、固定数据库只读、局部索引和自定义运行数据目录；见 [发行说明](docs/RELEASE_0.5.0b5.md) |
 | **0.5.0 Beta 4 · 维护源码** | 网页独立开发作业、原生隔离与有界存储、环境/端口/数据库引导、受控移动与本地 Git；公开发行状态和实际验收另行记录 |
 | **0.5.0 Beta 2 · 公开发行** | 改善无 Git 项目发现和同名项目区分；发布直读、多项目及受控写入安装包；移除主动代码回退，代码历史交给项目 Git 管理 |
@@ -200,7 +205,8 @@ CoLink 使用 [MIT 许可证](LICENSE)。这是每位用户独立运行的开源
 
 ## 软件恢复锚点
 
-当前首选：`anchor/colink-0.5.0b5-build19-verified`（恢复基准为 `0.5.0b5 · build 19`，对应源码 `79ad2ae`；当前发布版为 build 22）。
+维护者当前首选恢复基准：`0.5.0b7 / build 33`，本机固定标签为
+`anchor/colink-0.5.0b7-build33-before-cross-language-20261016T152045`。
 恢复前保留当前改动并检查运行数据兼容性，具体步骤和归档记录见
-[build 19 恢复说明](docs/RECOVERY_0.5.0b5_BUILD19.md)。2026-10-08 用户明确改选本机新版，
-旧 CoLink 恢复标签已删除；历史文档仅保留当时记录。
+[build 33 恢复说明](docs/RECOVERY_0.5.0b7_BUILD33.md)。历史 build 19 材料保留；
+这些维护者本机恢复材料不随公共源码发行分发。

@@ -68,7 +68,7 @@ Ruff 检查通过，src/tests/macos/scripts 格式检查 161 文件通过；全�
 五个既有工作区、13 项登记保留原 ID、名称与授权；不存在的旧测试目录登记未改写。
 10 个实际恢复文件完成绑定，内容、任务/操作/引用/状态不变。原数据库与一致性备份
 保存在 CoLink-data/.code-context/identity-backups/20261009。除恢复库外原清单的 46 个
-配置/数据库文件哈希保持一致。安装时实际选定的 /Users/yuyan/工作/项目 保留。
+配置/数据库文件哈希保持一致。安装时选定的项目根目录保留。
 
 原生面板显示“已连接”；实际后端 running/ready 为 true。关闭、退出应用、重新打开
 和再次连接成功，写入/开发仍默认关闭，原完成任务继续可见。最终包内 Python 通过
@@ -87,7 +87,7 @@ Ruff 检查通过，src/tests/macos/scripts 格式检查 161 文件通过；全�
 用户明确要求“一轮能够成功就算成功”，因此只运行一轮，没有追加网页提示重测。
 通过原生 Chrome 窗口在 ChatGPT 中选择 CoLink，连接新建的独立目录
 `examples/sample_project/colink_web_acceptance_20261009`；开发授权仅授予该目录。
-会话为 `https://chatgpt.com/c/6ac8bbfe-1a28-83ee-a7e2-9053938c4013`。
+会话为 维护者私有网页验收对话（链接不公开）。
 
 网页 AI 实际完成 begin/create/read/edit/delete/diff/finish 写入流程；创建私有 .venv，
 从 PyPI 下载并安装 colorama 0.4.6，运行 unittest（1 项通过）、compileall 与 app.py
@@ -98,7 +98,7 @@ Ruff 检查通过，src/tests/macos/scripts 格式检查 161 文件通过；全�
 停止连接后，按用户明确清理授权，移除上述测试目录（含 .venv、依赖缓存、源码、
 字节码和日志）、仅属于该目录的 desktop/workspaces 派生目录，以及该测试的已完成
 写入任务恢复材料。确认测试目录与派生目录不存在，相关进程为零，端口已释放。
-选择已恢复到测试前的 `/Users/yuyan/工作/项目`。最终面板连接确认遇到 Mac 锁屏，
+选择已恢复到测试前的项目根目录。最终面板连接确认遇到 Mac 锁屏，
 当前连接保持关闭；安装后的实际连接、退出重开与网页测试连接此前均已成功。
 
 清理核验还发现既有写入恢复保留机制的副作用：`finish_write_task` 在完成新任务后

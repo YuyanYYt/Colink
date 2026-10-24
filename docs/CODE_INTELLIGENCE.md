@@ -1,5 +1,11 @@
 # CoLink 0.4.3 · Python / Java 按需结构查询
 
+本页前半部分保留历史 Mirror 接口说明。当前 Live 源码已更新至
+[`0.5.0b7` 本期源码定版](https://github.com/YuyanYYt/Colink/tree/v0.5.0b7)，
+当前读取与分析入口见 [CODE_ANALYSIS_ENTRYPOINT.md](CODE_ANALYSIS_ENTRYPOINT.md)，
+Java 值传播边界见 [build 34 说明](JAVA_DATAFLOW_BUILD34_20261016.md)。公开安装包仍为
+`0.5.0b5 / build 22`，不要把源码分支的能力当成该安装包已具备的能力。
+
 以下是历史镜像模式的功能说明。当前 0.5.0b5 原文件直读模式在结构请求时按需建索引，
 新增局部重绑与局部发布，见 [live 局部更新](LIVE_INDEX_LOCAL_PUBLICATION_20261008.md)。
 镜像模式保留以下快照及同步语义，不套用 live 当前一版的清理方式。

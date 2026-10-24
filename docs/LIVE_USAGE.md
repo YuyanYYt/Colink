@@ -1,9 +1,11 @@
 # CoLink · 原文件直读与任务写入
 
-当前接口：**本机维护版 `0.5.0b7 / build 33`**、当前源码与 `workspace` 入口。
-公开预发行 `0.5.0b5 / build 22` 的历史写入能力保留；本文的新双入口需更新本机应用。
+当前源码接口：**`0.5.0b7` 本期定版**、当前源码与 `workspace` 入口，见
+[固定版本 `v0.5.0b7`](https://github.com/YuyanYYt/Colink/tree/v0.5.0b7)。
+公开预发行安装包仍为 `0.5.0b5 / build 22`；源码分支的新增能力不代表安装包已更新。
+本文的新双入口需使用对应源码或新版应用。
 旧 0.4.1 包及 mirror 兼容入口不使用这些语义。安装和升级见
-[INSTALL.md](INSTALL.md)，[下载新版](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b5)。
+[INSTALL.md](INSTALL.md)，[下载 macOS 安装包](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b5)。
 
 本版包含单文件 `delete_file`，已移除用户主动代码回退；无 Git 项目发现与同名
 消歧已改善。代码历史由项目 Git 管理。登记格式兼容限制见
@@ -170,6 +172,6 @@ uv run python macos/package.py --output-dir .artifacts/releases/colink-0.5.0b2 -
 这种包绑定维护者独立状态，不是公开分发物；通用包不能带这两个参数。实际验收
 与候选归档分别留证，不把生成 DMG 当成系统安装/任意账号网页成功。
 
-维护者当前首选软件恢复基线为本机 0.5.0b5 / build 19，见
-[当前恢复说明](RECOVERY_0.5.0b5_BUILD19.md)。旧 CoLink 恢复标签已按用户指令撤销。
+维护者当前首选软件恢复基线为本机 0.5.0b7 / build 33，见
+[当前恢复说明](RECOVERY_0.5.0b7_BUILD33.md)。历史 build 19 材料保留。
 软件恢复前保留当前工作并检查持久数据兼容性，不靠删除运行数据库绕过问题。
