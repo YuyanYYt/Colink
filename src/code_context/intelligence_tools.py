@@ -83,6 +83,9 @@ def register_analysis_tool(mcp, store, authorize, display_name, annotations):
         Include source to receive bounded actual text with the same validated context and shared
         response/time budget. Source evidence needs max_chars >= 3000. Ambiguous definitions
         require selection; source is never picked from the first candidate.
+        Java class.method may omit its parameter signature when unique; overloads return
+        candidates. Unmatched symbols return selection_not_found with current-symbol search
+        guidance; stale identifiers are never rebound to another definition.
         Absence of a static path is not proof of absence of runtime behavior. Budgeted results
         expose partial coverage and continuation, never execute source or change permissions.
         Value columns use one-based UTF-8 byte offsets. File/symbol-only requests do not
@@ -167,7 +170,12 @@ def register_analysis_tool(mcp, store, authorize, display_name, annotations):
                 )
                 if with_source:
                     remaining_ms = max_ms - int((time.monotonic() - started) * 1000)
-                    if result.get("analysis_status") == "ambiguous":
+                    if result.get("analysis_status") == "selection_not_found":
+                        source = {"read_status": "selection_not_found"}
+                    elif (
+                        result.get("analysis_status") == "ambiguous"
+                        and result.get("ambiguous_selector") != "target"
+                    ):
                         source = {
                             "analysis_status": "ambiguous",
                             "selection_required": "choose one candidate symbol_id",
@@ -198,7 +206,7 @@ def register_analysis_tool(mcp, store, authorize, display_name, annotations):
                             max_ms=remaining_ms,
                         )
                     result["source"] = source
-                    if (
+                    if result.get("analysis_status") not in {"target_not_found", "ambiguous"} and (
                         source.get("analysis_status") == "partial"
                         or source.get("read_status") in {"partial", "index_not_ready"}
                         or source.get("content_truncated")

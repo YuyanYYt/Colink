@@ -271,9 +271,12 @@ def analyze_live_dataflow(
                 facts, project_id, revision, target, offset=offset, limit=limit
             )
             if ambiguity is not None:
-                return annotate_dataflow_result(
-                    {"mode": mode, **ambiguity, "ambiguous_selector": "target"}
-                )
+                result = {"mode": mode, **ambiguity, "selection_scope": "target"}
+                if ambiguity["analysis_status"] == "ambiguous":
+                    result["ambiguous_selector"] = "target"
+                else:
+                    result["analysis_status"] = "target_not_found"
+                return annotate_dataflow_result(result)
             resolved_target = {"symbol_id": end["symbol_id"], "value": target["value"]}
     except AnalysisBudgetExceeded:
         return annotate_dataflow_result(

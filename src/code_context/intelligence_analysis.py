@@ -18,7 +18,6 @@ from code_context.analysis_context import attach_context, structure_evidence
 from code_context.analysis_response import AnalysisRequestError, AnalysisResponseBudgetExceeded
 from code_context.intelligence_models import CLASS_KINDS, is_traversable_call
 from code_context.intelligence_queries import (
-    _symbol,
     decode_relation,
     file_dependencies,
     symbol_graph,
@@ -77,28 +76,68 @@ def _selector(value) -> AnalysisSelector:
         ) from None
 
 
+def _selection_not_found(selected):
+    """A valid lookup with no current fact is a recoverable query outcome."""
+    continuation = {"tool": "read_code", "action": "search_current_symbol"}
+    if selected.qualname:
+        name = selected.qualname.split("(", 1)[0].rsplit(".", 1)[-1]
+        if 0 < len(name) <= 200:
+            continuation["next_request"] = {
+                "request": {
+                    "mode": "search",
+                    "kind": "symbol",
+                    "query": name,
+                    "exact": True,
+                    "path_prefix": selected.path,
+                }
+            }
+    return {
+        "analysis_status": "selection_not_found",
+        "selection_status": "symbol_not_found",
+        "reason": "No matching definition in current indexed facts; source absence is not proven.",
+        "candidates": [],
+        "total": 0,
+        "has_more": False,
+        "next_offset": None,
+        "selection_required": "search current definitions, then select a returned symbol_id",
+        "next_request_reuses": ["project_id", "snapshot"],
+        "continuation": continuation,
+    }
+
+
 def select_symbol(db, project_id, revision, selector, *, offset=0, limit=20):
-    """Return one exact symbol or a bounded ambiguity result for caller presentation."""
+    """Select exact facts, accepting only an unambiguous Java callable signature stem."""
     selected = _selector(selector)
     if selected.symbol_id is not None:
-        try:
-            return _symbol(db, project_id, revision, selected.symbol_id), None
-        except ValueError:
-            raise AnalysisRequestError(
-                "SYMBOL_NOT_FOUND: select a definition in this context"
-            ) from None
+        row = db.execute(
+            "SELECT data FROM ci_symbols WHERE project_id=? AND revision=? AND symbol_id=?",
+            (project_id, revision, selected.symbol_id),
+        ).fetchone()
+        if row is None:
+            return None, _selection_not_found(selected)
+        return json.loads(row["data"]), None
     if selected.qualname is None:
         raise AnalysisRequestError("symbol selection requires symbol_id or path + qualname")
+    where = "project_id=? AND revision=? AND path=? AND qualname=?"
     args = (project_id, revision, selected.path, selected.qualname)
     total = db.execute(
-        "SELECT COUNT(*) FROM ci_symbols WHERE project_id=? AND revision=? "
-        "AND path=? AND qualname=?",
+        f"SELECT COUNT(*) FROM ci_symbols WHERE {where}",
         args,
     ).fetchone()[0]
+    if total == 0 and "." in selected.qualname and "(" not in selected.qualname:
+        # Java facts include parameter types in qualname. An exact class.method
+        # stem can omit that signature, but overloads must still be selected.
+        # Never broaden to another file, project, class or a fuzzy name match.
+        where = (
+            "project_id=? AND revision=? AND path=? "
+            "AND kind IN ('method','constructor') AND json_extract(data,'$.language')='java' "
+            "AND substr(qualname,1,instr(qualname,'(')-1)=?"
+        )
+        total = db.execute(f"SELECT COUNT(*) FROM ci_symbols WHERE {where}", args).fetchone()[0]
     if total == 0:
-        raise AnalysisRequestError("SYMBOL_NOT_FOUND: select a definition in this code context")
+        return None, _selection_not_found(selected)
     rows = db.execute(
-        "SELECT data FROM ci_symbols WHERE project_id=? AND revision=? AND path=? AND qualname=? "
+        f"SELECT data FROM ci_symbols WHERE {where} "
         "ORDER BY start_line, symbol_id LIMIT ? OFFSET ?",
         (*args, 1 if total == 1 else limit, 0 if total == 1 else offset),
     ).fetchall()
@@ -898,6 +937,8 @@ def _analyze_structure(
         )
         if ambiguity is not None:
             result.update(ambiguity)
+            if result["analysis_status"] == "selection_not_found":
+                result.pop("coverage", None)
             return bound_analysis_result(result, max_chars)
         if mode == "class_relations" and root["kind"] not in CLASS_KINDS:
             raise AnalysisRequestError("class relations require a class or interface selector")
@@ -908,7 +949,12 @@ def _analyze_structure(
                 db, project_id, revision, target, offset=offset, limit=limit
             )
             if ambiguity is not None:
-                result.update(ambiguity, ambiguous_selector="target")
+                result.update(ambiguity, selection_scope="target")
+                if ambiguity["analysis_status"] == "ambiguous":
+                    result["ambiguous_selector"] = "target"
+                else:
+                    result["analysis_status"] = "target_not_found"
+                    result.pop("coverage", None)
                 return bound_analysis_result(result, max_chars)
             result.update(
                 _call_path(

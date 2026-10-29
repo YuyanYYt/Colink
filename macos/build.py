@@ -124,7 +124,7 @@ def build(
                 "CFBundlePackageType": "APPL",
                 "CFBundleShortVersionString": release[1],
                 "CoLinkVersion": version,
-                "CFBundleVersion": "36",
+                "CFBundleVersion": "37",
                 "CFBundleIconFile": "CodeConnect",
                 "LSApplicationCategoryType": "public.app-category.developer-tools",
                 # Declare the menu-bar agent at launch; the installed bundle

@@ -7,6 +7,9 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError,
 from code_context.policy import validate_path
 from code_context.source_access import SourceError
 
+MAX_READ_CHARS = 50_000
+MAX_REQUESTED_READ_CHARS = (1 << 53) - 1
+
 
 class ReadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, revalidate_instances="always")
@@ -143,7 +146,23 @@ def validate_read_request(request):
 
 
 def read_budgets(max_chars, max_ms):
-    if type(max_chars) is not int or not 1000 <= max_chars <= 50_000:
+    if type(max_chars) is not int or not 1000 <= max_chars <= MAX_READ_CHARS:
         raise SourceError("INVALID_READ_BUDGET: max_chars must be between 1000 and 50000")
     if type(max_ms) is not int or not 100 <= max_ms <= 10_000:
         raise SourceError("INVALID_READ_BUDGET: max_ms must be between 100 and 10000")
+
+
+def normalize_read_budgets(max_chars, max_ms):
+    """Accept an oversized request without expanding the actual response limit."""
+    if type(max_chars) is not int or not 1000 <= max_chars <= MAX_REQUESTED_READ_CHARS:
+        raise SourceError(
+            "INVALID_READ_BUDGET: max_chars must be a JSON-safe integer of at least 1000"
+        )
+    effective = min(max_chars, MAX_READ_CHARS)
+    read_budgets(effective, max_ms)
+    adjustment = (
+        {"requested_max_chars": max_chars, "effective_max_chars": effective, "adjusted": True}
+        if effective != max_chars
+        else None
+    )
+    return effective, adjustment

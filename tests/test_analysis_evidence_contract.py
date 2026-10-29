@@ -127,7 +127,6 @@ def test_single_value_direction_selects_requested_flow_without_public_mode(
     "options,explanation",
     [
         ({"max_depth": 6}, "max_depth bounds"),
-        ({"selector": {"path": "flow.py", "qualname": "missing"}}, "SYMBOL_NOT_FOUND"),
         ({"mode": "data_path", "target": selected(value="return")}, "explicit value selector"),
     ],
 )

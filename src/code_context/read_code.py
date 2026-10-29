@@ -9,7 +9,7 @@ from code_context.read_requests import (
     SymbolReadRequest,
     SymbolSearchRequest,
     TextSearchRequest,
-    read_budgets,
+    normalize_read_budgets,
     validate_read_request,
 )
 from code_context.read_search import (
@@ -129,6 +129,19 @@ def _read_symbol(backend, project_id, handle, request, max_chars, max_ms, base):
             "selection_required": "choose one candidate symbol_id before reading source",
         }
         return _bound_candidates(result, max_chars)
+    if selected.get("analysis_status") == "selection_not_found":
+        result = {**selected, **base, "read_status": "selection_not_found"}
+        # No analysis was computed: the lookup reason already states the
+        # indexed-facts boundary, so avoid duplicating structural graph prose.
+        result.pop("coverage", None)
+        result.pop("analysis_status", None)
+        if "index_coverage" in result:
+            result["index_coverage"] = bound_index_coverage(
+                result["index_coverage"], max_chars, compact=True
+            )
+        if json_chars(result) > max_chars:
+            raise _budget_error()
+        return result
     if selected.get("index_not_ready") or "symbol" not in selected:
         result = {**selected, **base, "read_status": "index_not_ready"}
         if json_chars(result) > max_chars:
@@ -348,7 +361,13 @@ def execute_read_code(
 ):
     """Read saved source under one live context and one complete JSON response budget."""
     request = validate_read_request(request)
-    read_budgets(max_chars, max_ms)
+    response_limit, adjustment = normalize_read_budgets(max_chars, max_ms)
+    # Every result is a nonempty JSON object. Adding one field costs exactly
+    # this standalone object's encoded size, including its comma separator.
+    # Reserve it before paging so cursors always describe the source returned.
+    max_chars = response_limit - (
+        json_chars({"response_budget": adjustment}) if adjustment is not None else 0
+    )
     if snapshot is not None and not isinstance(snapshot, str):
         raise SourceError("INVALID_READ_CONTEXT: snapshot must be a returned string handle")
     if display_name is not None and not isinstance(display_name, str):
@@ -408,7 +427,9 @@ def execute_read_code(
             result = _read_batch(backend, project_id, handle, request, max_chars, max_ms, base)
         else:
             raise SourceError("INVALID_READ_REQUEST: select a supported reading mode")
-        if json_chars(result) > max_chars:
+        if adjustment is not None:
+            result["response_budget"] = adjustment
+        if json_chars(result) > response_limit:
             raise _budget_error()
         backend.resolve_snapshot(project_id, handle)
         return result
