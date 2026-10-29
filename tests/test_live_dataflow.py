@@ -210,14 +210,15 @@ def test_value_selector_is_strict_and_does_not_disclose_invalid_input(value):
         flow.FlowSelector.model_validate({"path": "flow.py", "qualname": "entry", "value": value})
 
 
-def test_public_mcp_schema_discovers_all_modes_and_rejects_unknown_nested_fields(parts):
+def test_public_mcp_schema_hides_legacy_modes_but_validates_compatibility_requests(parts):
     _, backend, _, handle = parts
 
     async def run():
         mcp = build_mcp(backend)
         tool = next(tool for tool in await mcp.list_tools() if tool.name == "analyze_code")
         encoded = json.dumps(tool.input_schema)
-        assert all(mode in encoded for mode in flow.DATAFLOW_MODES)
+        assert "mode" not in tool.input_schema["properties"]
+        assert not any(mode in encoded for mode in flow.DATAFLOW_MODES)
         arguments = {
             "project_id": "sample",
             "snapshot": handle,

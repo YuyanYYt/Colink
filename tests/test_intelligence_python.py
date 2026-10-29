@@ -264,7 +264,9 @@ def test_real_annotation_metadata_and_enum_values_are_lexical_evidence():
                 status: Literal[Status.READY, '__LITERAL_VALUE__']):
             return item
     """)
-    assert references(parsed, "CALL", "marker")[0].source_qualname == "run"
+    # Real annotation calls run while the enclosing frame defines the function.
+    assert references(parsed, "CALL", "marker")[0].source_qualname == ""
+    assert references(parsed, "CALL", "marker")[0].execution_context == "definition"
     assert not references(parsed, "CALL", "marker")[0].type_only
     assert references(parsed, "REFERENCE", "Config")
     assert references(parsed, "REFERENCE", "Status.READY")

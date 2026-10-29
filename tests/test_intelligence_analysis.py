@@ -8,6 +8,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import ValidationError
 
 import code_context.intelligence_analysis as analysis_module
+from code_context.analysis_response import AnalysisResponseBudgetExceeded
 from code_context.intelligence_analysis import (
     AnalysisBudgetExceeded,
     AnalysisSelector,
@@ -290,6 +291,50 @@ def test_shared_bounding_prefers_dataflow_value_ids_over_symbol_metadata():
     assert all(
         edge["source"] in ids and edge["target"] in ids for edge in bounded["dataflow"]["edges"]
     )
+
+
+def test_symbol_page_survives_large_composite_sections():
+    symbols = [
+        {"symbol_id": f"sym_{index}", "name": "definition" * 20, "qualname": f"Owner.f{index}"}
+        for index in range(20)
+    ]
+    result = {
+        "mode": "file_context",
+        "symbols": symbols,
+        "total": 20,
+        "offset": 0,
+        "has_more": False,
+        "next_offset": None,
+        "owners": [],
+        "ownership": [
+            {
+                "source_symbol_id": "sym_0",
+                "target_symbol_id": f"sym_{index}",
+                "evidence": "ownership" * 60,
+            }
+            for index in range(1, 20)
+        ],
+        "dependencies": {
+            "root": "a.py",
+            "nodes": [{"path": "a.py"}],
+            "edges": [
+                {"source": "a.py", "target": None, "evidence": "dependency" * 70} for _ in range(5)
+            ],
+        },
+    }
+    bounded = bound_analysis_result(result, 2000)
+    assert len(json.dumps(bounded, ensure_ascii=False)) <= 2000
+    assert bounded["symbols"][0]["symbol_id"] == "sym_0"
+    assert bounded["has_more"] and bounded["next_offset"] == len(bounded["symbols"])
+    assert bounded["analysis_status"] == "partial"
+
+
+def test_indivisible_response_has_a_distinct_safe_capacity_error():
+    result = {"symbol": {"qualname": "private_input" * 200}}
+    with pytest.raises(AnalysisResponseBudgetExceeded) as failure:
+        bound_analysis_result(result, 1000)
+    assert str(failure.value).startswith("ANALYSIS_RESPONSE_BUDGET_EXCEEDED:")
+    assert "private_input" not in str(failure.value)
 
 
 @pytest.mark.parametrize(

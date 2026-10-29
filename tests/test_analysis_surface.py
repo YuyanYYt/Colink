@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sys
 import tempfile
 from pathlib import Path
 
@@ -216,6 +217,10 @@ def test_complete_workspace_schema_count_and_terminal_permissions_are_preserved(
 
 @pytest.mark.parametrize("detail", ["summary", "patch"])
 @pytest.mark.parametrize("baseline", ["previous", "empty"])
+@pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="write coordinator requires supported Darwin file attributes",
+)
 def test_diff_preserves_baseline_patch_and_pagination_without_index_queries(
     parts, monkeypatch, detail, baseline
 ):

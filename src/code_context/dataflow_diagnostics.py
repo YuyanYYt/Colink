@@ -10,7 +10,7 @@ from collections import Counter
 _GROUPS = {
     "language_support": (
         "Value-flow analysis is unavailable for this language or source form.",
-        {"PYTHON_ONLY", "PYTHON_STUB_UNSUPPORTED"},
+        {"PYTHON_ONLY", "PYTHON_STUB_UNSUPPORTED", "DATAFLOW_LANGUAGE_UNSUPPORTED"},
     ),
     "call_resolution": (
         "Call targets or argument bindings are uncertain; flow through these calls is unknown.",

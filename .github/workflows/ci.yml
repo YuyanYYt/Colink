@@ -25,6 +25,21 @@ jobs:
       - run: uv run python scripts/check-publication.py
       - run: uv run ruff check src tests macos scripts/check-publication.py
       - run: uv run ruff format --check src tests macos scripts/check-publication.py
+      - name: Code intelligence contracts
+        run: |
+          mkdir -p .artifacts
+          colink_analysis_dir=$(mktemp -d .artifacts/ci-analysis.XXXXXX)
+          uv run pytest -q --basetemp "$colink_analysis_dir" \
+            tests/test_intelligence_python.py tests/test_intelligence_java.py \
+            tests/test_intelligence_typescript.py tests/test_intelligence.py \
+            tests/test_intelligence_analysis.py tests/test_live_analysis.py \
+            tests/test_intelligence_dataflow.py tests/test_live_dataflow.py \
+            tests/test_read_search.py tests/test_read_code.py \
+            tests/test_analysis_surface.py tests/test_analysis_source.py \
+            tests/test_analysis_routing.py tests/test_index_coverage.py \
+            tests/test_intelligence_query_optimization.py tests/test_build_manifest.py
+          uv run pytest -q --basetemp "${colink_analysis_dir}-stdio" \
+            tests/test_live_stdio.py tests/test_live.py tests/test_cli_imports.py
       # The native process and isolated-runner suite is validated on Darwin 27.
       - name: macOS 14 source, write, index, and packaging regression
         if: runner.os == 'macOS'

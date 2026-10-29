@@ -9,7 +9,7 @@ from code_context.live import LiveQueries
 from code_context.live_index import LiveIndexService
 from code_context.models import FileChange, SyncBatch, content_hash
 from code_context.read_code import execute_read_code
-from code_context.source_access import SourceAccess
+from code_context.source_access import SourceAccess, SourceError
 from code_context.storage import MirrorStore
 
 
@@ -21,7 +21,7 @@ def mixed_source(tmp_path):
         "good.py": "def run(value):\n    return value\n",
         "bad.py": "def broken(\n",
         "Service.java": "class Service { int run(int value) { return value; } }\n",
-        "client.ts": "export const run = (value: number) => value;\n",
+        "client.swift": "func run(_ value: Int) -> Int { return value }\n",
         "README.md": "Source description\n",
     }
     for path, content in files.items():
@@ -56,7 +56,7 @@ def test_live_partial_success_reports_files_and_preserves_source_reading(mixed_s
         details = {item["path"]: item for item in coverage["details"]}
         assert details["bad.py"]["diagnostics"][0]["code"] == "PYTHON_PARSE_ERROR"
         assert details["good.py"]["capability"] == "structure_extracted"
-        assert details["client.ts"]["capability"] == "structure_unavailable"
+        assert details["client.swift"]["capability"] == "structure_unavailable"
         assert coverage["details_are_samples"] and coverage["static_only"]
         assert backend.read_file("sample", "bad.py", handle)["content"] == files["bad.py"]
     finally:
@@ -72,13 +72,51 @@ def test_requested_file_is_prioritized_over_partial_index_examples(mixed_source,
             handle,
             "analyze_code",
             mode="file_context",
-            selector={"path": "client.ts"},
+            selector={"path": "client.swift"},
             max_chars=6000,
         )
         assert result["analysis_status"] == "partial"
-        assert result["index_coverage"]["details"][0]["path"] == "client.ts"
+        assert result["index_coverage"]["details"][0]["path"] == "client.swift"
         assert result["index_coverage"]["details"][0]["status"] == "unsupported"
-        assert result["index_coverage"]["details"][0]["language"] == "typescript"
+        assert result["index_coverage"]["details"][0]["language"] == "swift"
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("budget", [1600, 6000])
+def test_selected_extraction_is_separate_from_project_completeness(mixed_source, tmp_path, budget):
+    root, _ = mixed_source
+    backend, handle = _live(root, tmp_path)
+    try:
+        result = backend.code_query(
+            "sample",
+            handle,
+            "analyze_code",
+            mode="file_context",
+            selector={"path": "good.py"},
+            max_chars=budget,
+        )
+        assert result["index_partial"] and result["analysis_status"] == "partial"
+        assert result["index_coverage"]["status"] == "partial"
+        assert result["index_coverage"]["selected_structure"] == "structure_extracted"
+        assert len(json.dumps(result, ensure_ascii=False)) <= budget
+    finally:
+        backend.close()
+
+
+def test_selected_extraction_reports_capacity_error_at_minimum_budget(mixed_source, tmp_path):
+    root, _ = mixed_source
+    backend, handle = _live(root, tmp_path)
+    try:
+        with pytest.raises(SourceError, match="^ANALYSIS_RESPONSE_BUDGET_EXCEEDED:"):
+            backend.code_query(
+                "sample",
+                handle,
+                "analyze_code",
+                mode="file_context",
+                selector={"path": "good.py"},
+                max_chars=1000,
+            )
     finally:
         backend.close()
 
@@ -87,7 +125,7 @@ def test_unsupported_file_is_partial_even_when_supported_files_indexed_successfu
     root = tmp_path / "source"
     root.mkdir()
     (root / "good.py").write_text("def run(): return 1\n")
-    (root / "client.ts").write_text("export const run = () => 1;\n")
+    (root / "client.swift").write_text("func run() -> Int { return 1 }\n")
     backend, handle = _live(root, tmp_path)
     try:
         result = backend.code_query(
@@ -95,7 +133,7 @@ def test_unsupported_file_is_partial_even_when_supported_files_indexed_successfu
             handle,
             "analyze_code",
             mode="file_context",
-            selector={"path": "client.ts"},
+            selector={"path": "client.swift"},
             max_chars=1000,
         )
         assert not result["index_partial"]

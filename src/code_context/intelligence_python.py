@@ -140,6 +140,8 @@ class _Extractor(ast.NodeVisitor):
             for statement in tree.body
         )
         self.owner_override: str | None = None
+        self.execution_context = "body"
+        self.immediate_lambdas: set[int] = set()
         self.reference_keys: set[tuple] = set()
         local, globals_, nonlocals = _declarations(tree.body)
         module_scope = parsed.scopes[0]
@@ -175,7 +177,23 @@ class _Extractor(ast.NodeVisitor):
     ) -> None:
         line, column = self._position(origin or node)
         owner = self.frame.owner if self.owner_override is None else self.owner_override
-        key = (name, kind, line, column, self.frame.scope.qualname, owner)
+        execution_context, execution_scope = "body", ""
+        if kind == "CALL":
+            # Declaration ownership describes the decorated/annotated symbol;
+            # calls in its header execute in the enclosing frame instead.
+            owner = self.frame.owner
+            execution_context = self.execution_context
+            if self.frame.scope.kind == "lambda":
+                execution_scope = self.frame.scope.qualname
+        key = (
+            name,
+            kind,
+            line,
+            column,
+            self.frame.scope.qualname,
+            owner,
+            execution_context,
+        )
         if key in self.reference_keys:
             return
         if len(self.parsed.references) >= MAX_FILE_REFERENCES:
@@ -192,6 +210,8 @@ class _Extractor(ast.NodeVisitor):
                 self.type_only if type_only is None else type_only,
                 self.conditional,
                 arity,
+                execution_context,
+                execution_scope,
             )
         )
 
@@ -304,6 +324,18 @@ class _Extractor(ast.NodeVisitor):
             yield
         finally:
             self.owner_override = previous
+
+    @contextmanager
+    def _call_context(self, context: str):
+        previous = self.execution_context
+        # An immediate expression nested inside an unexecuted lambda still
+        # depends on invocation of that outer lambda.
+        if previous != "deferred_lambda":
+            self.execution_context = context
+        try:
+            yield
+        finally:
+            self.execution_context = previous
 
     @contextmanager
     def _condition(self, *, type_only: bool = False):
@@ -606,7 +638,7 @@ class _Extractor(ast.NodeVisitor):
         parent = self.frame
         qualname = _join(parent.scope.qualname, node.name)
         kind = "method" if parent.scope.kind == "class" else "function"
-        with self._owner(qualname):
+        with self._owner(qualname), self._call_context("definition"):
             self._decorators(node.decorator_list)
             annotations = {
                 arg.arg: self._annotation(arg.annotation) for arg in self._arguments(node.args)
@@ -648,7 +680,7 @@ class _Extractor(ast.NodeVisitor):
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         qualname = _join(self.frame.scope.qualname, node.name)
-        with self._owner(qualname):
+        with self._owner(qualname), self._call_context("definition"):
             self._decorators(node.decorator_list)
             for base in node.bases:
                 target = base.value if isinstance(base, ast.Subscript) else base
@@ -667,12 +699,14 @@ class _Extractor(ast.NodeVisitor):
                 self.visit(statement)
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
-        for value in [*node.args.defaults, *node.args.kw_defaults]:
-            if value is not None:
-                self.visit(value)
+        with self._call_context("definition"):
+            for value in [*node.args.defaults, *node.args.kw_defaults]:
+                if value is not None:
+                    self.visit(value)
         line, column = self._position(node)
         qualname = _join(self.frame.scope.qualname, f"<lambda>@{line}:{column}")
-        with self._scope(qualname, "lambda", [node.body]):
+        context = "immediate_lambda" if id(node) in self.immediate_lambdas else "deferred_lambda"
+        with self._scope(qualname, "lambda", [node.body]), self._call_context(context):
             self._parameters(node.args, {})
             self.visit(node.body)
 
@@ -738,7 +772,14 @@ class _Extractor(ast.NodeVisitor):
         name = _name(node.func)
         self._ref(name, "CALL", node.func, arity=arity)
         if name.startswith(_DYNAMIC):
-            self.visit(node.func.value if isinstance(node.func, ast.Attribute) else node.func)
+            if isinstance(node.func, ast.Lambda):
+                self.immediate_lambdas.add(id(node.func))
+                try:
+                    self.visit(node.func)
+                finally:
+                    self.immediate_lambdas.discard(id(node.func))
+            else:
+                self.visit(node.func.value if isinstance(node.func, ast.Attribute) else node.func)
         for argument in node.args:
             self.visit(argument)
         for keyword in node.keywords:

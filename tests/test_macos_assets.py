@@ -106,6 +106,10 @@ def test_app_is_discoverable_but_runs_as_a_menu_bar_utility():
 def test_build_reuses_one_workspace_cache_across_output_directories(tmp_path, monkeypatch):
     builder = runpy.run_path(str(WORKSPACE / "macos/build.py"))["build"]
     workspace = tmp_path / "workspace"
+    source = workspace / "src/code_context"
+    source.mkdir(parents=True)
+    (source / "__init__.py").write_text('__version__="0.4.0"\n')
+    (workspace / "pyproject.toml").write_text('[project]\nversion="0.4.0"\n')
     assets = workspace / "macos/assets"
     assets.mkdir(parents=True)
     for name in ("logo.svg", "menubar.svg"):
@@ -116,6 +120,9 @@ def test_build_reuses_one_workspace_cache_across_output_directories(tmp_path, mo
     commands = []
     monkeypatch.setattr(shutil, "which", lambda _: "/usr/local/bin/uv")
     monkeypatch.setattr("subprocess.run", lambda args, **_: commands.append(args))
+    monkeypatch.setattr(
+        "code_context.build_manifest._git", lambda *args: {"commit": "unknown", "dirty": None}
+    )
     for release in ("first", "second"):
         output = workspace / "dist" / release / "Colink.app"
         assert builder(workspace, output, "node", "sharp") == output

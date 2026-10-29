@@ -7,7 +7,7 @@ from itertools import islice
 
 from code_context.fact_payloads import FactCacheError, decode_fact
 from code_context.intelligence_dependencies import DependencyClassifier
-from code_context.intelligence_models import CLASS_KINDS, Relation, module_id
+from code_context.intelligence_models import CLASS_KINDS, Relation, is_traversable_call, module_id
 from code_context.policy import validate_path
 from code_context.source_page import source_page
 
@@ -15,7 +15,11 @@ from code_context.source_page import source_page
 def decode_relation(payload: str | bytes) -> dict:
     """Decode legacy JSON or bounded, compressed live-index relation facts."""
     value = decode_fact(payload, prefix=b"CL1:", max_bytes=65_536)
-    if value.keys() != Relation.__dataclass_fields__.keys():
+    fields = Relation.__dataclass_fields__.keys()
+    optional = {"execution_context", "execution_scope"}
+    if not fields - optional <= value.keys() <= fields:
+        raise FactCacheError("invalid derived relation") from None
+    if any(key in value and not isinstance(value[key], str) for key in optional):
         raise FactCacheError("invalid derived relation") from None
     return value
 
@@ -114,8 +118,8 @@ def symbol_search(
     else:
         where.append("kind<>'module'")
     if language:
-        if language not in {"python", "java"}:
-            raise ValueError("supported languages are python and java")
+        if language not in {"python", "java", "typescript", "javascript"}:
+            raise ValueError("unsupported structure language filter")
         where.append("json_extract(data, '$.language')=?")
         args.append(language)
     if path_prefix:
@@ -404,6 +408,8 @@ def symbol_graph(
         else {"INHERITANCE", "IMPLEMENTS", "CONTAINS", "TYPE_REFERENCE", "INSTANTIATION"}
     )
     frontier, nodes, edges, seen = [symbol_id], {symbol_id: root}, [], set()
+    scheduled = {symbol_id}
+    execution_context_partial = False
     mode = getattr(db, "source_mode", None)
     live = (
         mode == "live"
@@ -443,6 +449,9 @@ def symbol_graph(
                     if current in stopped:
                         continue
                     relation = decode_relation(row["data"])
+                    traversable = graph != "call" or is_traversable_call(relation)
+                    if not traversable:
+                        execution_context_partial = True
                     key = row["data"]
                     if key in seen:
                         continue
@@ -467,7 +476,10 @@ def symbol_graph(
                         continue
                     for endpoint, item in added:
                         nodes[endpoint] = item
-                        next_frontier.append(endpoint)
+                    if traversable:
+                        for endpoint in sorted((endpoints & nodes.keys()) - scheduled):
+                            scheduled.add(endpoint)
+                            next_frontier.append(endpoint)
                     edges.append(relation)
                 if len(edges) >= max_edges and truncated:
                     break
@@ -479,7 +491,7 @@ def symbol_graph(
         frontier = next_frontier
         if len(edges) >= max_edges and truncated:
             break
-    return {
+    result = {
         "graph": graph,
         "root": symbol_id,
         "direction": direction,
@@ -489,6 +501,13 @@ def symbol_graph(
         "truncated": truncated,
         "coverage": "static candidates, not a complete runtime dispatch graph",
     }
+    if execution_context_partial:
+        result["execution_context_partial"] = True
+        result["coverage"] = (
+            "static candidates; deferred calls remain source evidence but are not traversed; "
+            "not a complete runtime dispatch graph"
+        )
+    return result
 
 
 def _aggregate_file_edges(rows) -> dict[tuple[str, str], dict]:
@@ -644,7 +663,7 @@ def file_dependencies(
         "edges": list(selected.values()),
         "chains": chains,
         "truncated": truncated,
-        "coverage": "resolved static edges in authorized Python/Java source only",
+        "coverage": "resolved static edges in authorized indexed source only",
     }
 
 
@@ -702,7 +721,7 @@ def project_architecture(
         validate_path(path_prefix.rstrip("/"))
     rows = db.execute(
         "SELECT path FROM ci_files WHERE project_id=? AND revision=? "
-        "AND language IN ('python', 'java') ORDER BY path",
+        "AND language IN ('python', 'java', 'typescript', 'javascript') ORDER BY path",
         (project_id, revision),
     )
     nodes = {r["path"] for r in rows if not path_prefix or r["path"].startswith(path_prefix)}

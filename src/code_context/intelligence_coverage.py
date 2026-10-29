@@ -7,24 +7,12 @@ It is selected from the same publication as a query; source is never read here.
 from __future__ import annotations
 
 import json
-from pathlib import PurePosixPath
+
+from code_context.language_frontends import detect_language, structure_language
 
 _MAX_EXAMPLES = 12
 _MAX_DIAGNOSTICS = 5
 _MAX_SELECTED_PATHS = 2
-_SOURCE_LANGUAGES = {
-    ".py": "python",
-    ".pyi": "python",
-    ".java": "java",
-    ".ts": "typescript",
-    ".tsx": "typescript",
-    ".js": "javascript",
-    ".jsx": "javascript",
-    ".mjs": "javascript",
-    ".cjs": "javascript",
-    ".vue": "vue",
-    ".rs": "rust",
-}
 
 
 def count_index_diagnostics(counts, diagnostics):
@@ -65,6 +53,7 @@ def bound_index_coverage(coverage, max_chars, *, compact=False):
             "status": coverage["status"],
             "ready": files.get("structure_ready", 0),
             "limited": files.get("structure_limited", 0),
+            "selected_structure": coverage.get("selected_structure", "not_selected"),
             "details_omitted": True,
         }
     budget = min(3500, max(300, max_chars // 4))
@@ -74,7 +63,15 @@ def bound_index_coverage(coverage, max_chars, *, compact=False):
         result = {
             key: value
             for key, value in result.items()
-            if key in {"status", "files", "limitations", "static_only", "inventory_complete"}
+            if key
+            in {
+                "status",
+                "files",
+                "limitations",
+                "static_only",
+                "inventory_complete",
+                "selected_structure",
+            }
         }
         result["details_omitted"] = True
         return result
@@ -123,9 +120,11 @@ def _selected_paths(parameters, result):
 def _file_detail(row):
     status = row["status"] or "not_analyzed"
     diagnostics = _diagnostics(row["diagnostics"]) if row["diagnostics"] else []
-    detected = _SOURCE_LANGUAGES.get(PurePosixPath(row["path"]).suffix.lower())
+    detected = detect_language(row["path"])
+    if detected == "unsupported":
+        detected = None
     if row["status"] is None:
-        if detected in {"python", "java"}:
+        if structure_language(row["path"]) != "unsupported":
             status = "not_indexed"
             diagnostics = [{"code": "PROJECT_INDEX_BUDGET_EXCEEDED"}]
         elif detected is not None:
@@ -221,8 +220,6 @@ def index_coverage(
     }
     # Leave most of the response budget to the actual answer and its evidence.
     budget = min(3500, max(300, max_chars // 4))
-    if budget < 800:
-        return bound_index_coverage(coverage, max_chars)
     coverage.update(
         supported_languages=stats.get("supported_languages", []),
         files_by_language=languages,
@@ -262,6 +259,18 @@ def index_coverage(
                     "source_reading": "independent_of_index; source policy still applies",
                 }
             )
+    selected_capabilities = {item["capability"] for item in coverage["details"]}
+    if not paths:
+        coverage["selected_structure"] = "not_selected"
+    elif len(selected_capabilities) == 1:
+        coverage["selected_structure"] = next(iter(selected_capabilities))
+    else:
+        coverage["selected_structure"] = "mixed" if selected_capabilities else "unavailable"
+    # Selected-file extraction never proves complete incoming references or
+    # paths when the whole-project index has omissions.
+    coverage["relations_require_global_coverage"] = True
+    if budget < 800:
+        return bound_index_coverage(coverage, max_chars)
     limited_rows = db.execute(
         "SELECT path,language,status,diagnostics FROM ci_files "
         "WHERE project_id=? AND revision=? AND status NOT IN ('ready','unsupported') "

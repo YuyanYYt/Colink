@@ -177,7 +177,7 @@ def test_stdio_service_commands_still_dispatch_and_close(tmp_path, monkeypatch, 
     elif command == "live":
         import code_context.live as live
 
-        monkeypatch.setattr(live, "LiveQueries", lambda *_: backend)
+        monkeypatch.setattr(live, "LiveQueries", lambda *_, **options: backend)
     elif command == "local":
         import code_context.local as local
 
