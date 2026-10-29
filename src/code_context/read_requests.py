@@ -81,7 +81,7 @@ class SymbolSearchRequest(ReadModel):
     exact: bool = False
     symbol_kind: str | None = Field(default=None, min_length=1, max_length=100)
     path_prefix: str | None = Field(default=None, min_length=1, max_length=1024)
-    language: Literal["python", "java"] | None = None
+    language: Literal["python", "java", "typescript", "javascript"] | None = None
     limit: int = Field(default=20, ge=1, le=100)
     context_lines: int = Field(default=0, ge=0, le=3)
     cursor: str | None = Field(default=None, max_length=200)

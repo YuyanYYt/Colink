@@ -21,6 +21,8 @@ import sysconfig
 import tomllib
 from pathlib import Path
 
+from code_context.build_manifest import write_build_manifest
+
 CHAT_URL = "https://chatgpt.com/plugins"
 RUNTIME = {
     "mode": "bundled",
@@ -503,12 +505,14 @@ def verify_relocation(app: Path, output_dir: Path) -> None:
             "import pathlib,sys,ssl,sqlite3; import code_context.cli,mcp,httpx; "
             "import code_context.terminal,code_context.terminal_read; "
             "import pydantic_core,watchfiles,cryptography.hazmat.bindings._rust; "
-            "import tree_sitter,tree_sitter_java; "
-            "tree_sitter.Parser(tree_sitter.Language(tree_sitter_java.language())); "
+            "import tree_sitter,tree_sitter_java,tree_sitter_javascript,tree_sitter_typescript; "
+            "[tree_sitter.Parser(tree_sitter.Language(factory())) for factory in "
+            "(tree_sitter_java.language,tree_sitter_javascript.language,"
+            "tree_sitter_typescript.language_typescript,tree_sitter_typescript.language_tsx)]; "
             "root=pathlib.Path(sys.executable).resolve().parents[2]; "
             "assert all(pathlib.Path(m.__file__).resolve().is_relative_to(root) "
             "for m in (code_context.cli,mcp,httpx,pydantic_core,watchfiles,"
-            "tree_sitter,tree_sitter_java)); "
+            "tree_sitter,tree_sitter_java,tree_sitter_javascript,tree_sitter_typescript)); "
             "assert sys.dont_write_bytecode; "
         )
         run_tool(
@@ -669,6 +673,12 @@ def package(
             "@rpath/libpython3.11.dylib",
             str(app / "Contents/Resources/python/lib/libpython3.11.dylib"),
         ]
+    )
+    write_build_manifest(
+        workspace,
+        app / "Contents/Resources",
+        bundled_source=app / "Contents/Resources/backend/src/code_context",
+        bundle_info=info,
     )
     sign_app(app)
     verify_relocation(app, output_dir)

@@ -13,6 +13,38 @@ import pytest
 GUARD = runpy.run_path(str(Path(__file__).parents[1] / "scripts/check-publication.py"))["inspect"]
 
 
+@pytest.mark.parametrize("unsafe_addition", [False, True])
+def test_publication_guard_checks_the_index_after_addition_and_deletion(tmp_path, unsafe_addition):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+
+    def git(*arguments):
+        subprocess.run(["git", *arguments], cwd=repository, check=True, capture_output=True)
+
+    git("init", "-q")
+    git("config", "user.name", "Publication fixture")
+    git("config", "user.email", "fixture@example.invalid")
+    (repository / "completed-plan.md").write_text("Completed fixture\n")
+    git("add", "completed-plan.md")
+    git("commit", "-qm", "fixture baseline")
+    # Removing the index entry is sufficient: preserve the generated file too.
+    git("rm", "--cached", "completed-plan.md")
+    content = "sk-" + "q" * 40 if unsafe_addition else "print('source fixture')\n"
+    (repository / "added.py").write_text(content)
+    git("add", "added.py")
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).parents[1] / "scripts/check-publication.py")],
+        cwd=repository,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == int(unsafe_addition), result.stderr
+    assert "fatal:" not in result.stderr
+    assert "1 files" in result.stdout
+    if unsafe_addition:
+        assert "literal-api-key" in result.stderr and content not in result.stderr
+
+
 def test_publication_guard_does_not_echo_secret():
     secret = b"sk-" + b"q" * 40
     result = GUARD("example.py", secret)

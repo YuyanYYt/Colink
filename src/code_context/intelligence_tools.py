@@ -6,12 +6,14 @@ from contextlib import nullcontext
 from typing import Any, Literal
 
 from mcp.server.mcpserver.exceptions import ToolError
+from pydantic.json_schema import SkipJsonSchema
 
 from code_context.analysis_diff import bound_diff_result
+from code_context.analysis_response import AnalysisResponseBudgetExceeded
+from code_context.analysis_routing import AnalysisMode, resolve_analysis_mode
 from code_context.intelligence_analysis import (
     AnalysisSelector,
     StructureInclude,
-    StructureMode,
     bound_analysis_result,
 )
 from code_context.intelligence_queries import bound_result
@@ -50,8 +52,7 @@ def register_analysis_tool(mcp, store, authorize, display_name, annotations):
     @mcp.tool(annotations=annotations, structured_output=True)
     def analyze_code(
         project_id: str,
-        mode: StructureMode
-        | Literal["data_origin", "data_impact", "data_path", "combined", "diff"],
+        mode: SkipJsonSchema[AnalysisMode | None] = None,
         selector: AnalysisSelector | FlowSelector | None = None,
         snapshot: str | None = None,
         target: AnalysisSelector | FlowSelector | None = None,
@@ -68,33 +69,32 @@ def register_analysis_tool(mcp, store, authorize, display_name, annotations):
         baseline: Literal["previous", "empty"] = "previous",
         detail: Literal["summary", "patch"] = "summary",
     ) -> dict[str, Any]:
-        """Analyze one saved file or exact symbol in a single validated Live context.
-        File modes select {path}; symbol modes select {symbol_id} or {path, qualname}.
+        """Analyze saved source from one explicit selector; no mode choice is needed.
+        Select {path} for file context or {symbol_id}/{path,qualname} for a symbol.
+        Add value={kind:parameter,name}, {kind:return,line?,column?} or
+        {kind:occurrence,line,column} for bounded source-and-impact value flow.
+        A target exact symbol requests a directed call path; a target value requests
+        a value path. Select values at both endpoints; missing values are never guessed.
         Repeated definitions return candidates rather than a guessed symbol. Context views
         optionally include ownership, calls, dependencies and source; symbol pages use next_offset.
         Include source to receive bounded actual text with the same validated context and shared
         response/time budget. Source evidence needs max_chars >= 3000. Ambiguous definitions
         require selection; source is never picked from the first candidate.
-        call_path requires a target and follows directed static calls, maximum five hops.
-        call_graph keeps outgoing, incoming or both directions; file_dependencies can
-        exclude type-only edges with include_type_only=false.
         Absence of a static path is not proof of absence of runtime behavior. Budgeted results
         expose partial coverage and continuation, never execute source or change permissions.
-        Python/Java value modes add value={kind:parameter,name} or {kind:return,line?,column?}
-        or {kind:occurrence,line,column}; columns use one-based UTF-8 byte offsets.
-        data_path needs a target value. combined returns typed structure and may-flow edges.
-        Values and contexts are local to one request; select saved source positions to continue.
+        Value columns use one-based UTF-8 byte offsets. File/symbol-only requests do not
+        start value flow. Values and contexts are local to one request; use saved positions
+        to continue. Paths are directed and bounded to at most five hops.
         Loops, exceptions, recursion, dynamic calls and unknown side effects report partial
         coverage. Analysis never imports the project and is not a runtime execution trace.
-        diff uses an optional {path} selector, baseline=previous or explicit empty,
-        detail=summary or patch and offset/limit. It compares a retained write task's
-        original files with verified current source, without building the code index.
-        NO_TASK_BASELINE means history is unavailable, not zero changes. For arbitrary
-        Git history use the project's Git tools/terminal. Source reads, reference search
-        and reverse-dependency impact retain their dedicated tools and distinct semantics.
+        Existing explicit mode requests remain a validated compatibility interface.
+        Task diff compares a retained write origin with current files; baseline/detail
+        apply only to that compatibility request. NO_TASK_BASELINE means unavailable.
+        Source reads, references and reverse file-dependency impact keep distinct tools.
         """
         authorize(project_id)
         try:
+            mode = resolve_analysis_mode(selector, target, mode)
             if mode == "diff":
                 if target is not None or include is not None or isinstance(selector, FlowSelector):
                     raise ValueError("diff accepts only an optional path selector")
@@ -204,10 +204,14 @@ def register_analysis_tool(mcp, store, authorize, display_name, annotations):
                         result["truncated"] = True
                         result.setdefault("truncated_reason", []).append("source_budget")
                     if len(json.dumps(result, ensure_ascii=False)) > max_chars:
-                        raise ValueError("analysis and source metadata exceed the response budget")
+                        raise AnalysisResponseBudgetExceeded
                     if hasattr(store, "resolve_snapshot"):
                         store.resolve_snapshot(project_id, result.get("snapshot", handle))
                 return result
+        except AnalysisResponseBudgetExceeded:
+            raise ToolError(
+                "ANALYSIS_RESPONSE_BUDGET_EXCEEDED: narrow the query or increase max_chars"
+            ) from None
         except (MirrorError, ValueError) as exc:
             raise ToolError(str(exc)) from None
 

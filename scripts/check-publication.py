@@ -102,9 +102,9 @@ def main() -> int:
                 if rules:
                     findings.append((str(path.relative_to(root)), rules))
     else:
-        names = subprocess.check_output(["git", "diff", "--cached", "--name-only", "-z"])
-        # For subsequent commits also check already tracked files, not just the diff.
-        names += subprocess.check_output(["git", "ls-files", "-z"])
+        # The index contains staged additions and unchanged tracked files, while
+        # excluding staged deletions that no longer have a blob to inspect.
+        names = subprocess.check_output(["git", "ls-files", "--cached", "-z"])
         for name in sorted(set(names.decode().strip("\0").split("\0")) - {""}):
             count += 1
             data = subprocess.check_output(["git", "show", ":" + name])

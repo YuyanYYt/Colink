@@ -14,6 +14,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from code_context.analysis_response import AnalysisResponseBudgetExceeded
 from code_context.intelligence_queries import (
     _symbol,
     decode_relation,
@@ -34,7 +35,7 @@ StructureMode = Literal[
 ]
 StructureInclude = Literal["ownership", "calls", "dependencies"]
 STRUCTURE_MODES = frozenset(StructureMode.__args__)
-_COVERAGE = "static authorized Python/Java facts; unresolved or absent paths are not runtime proof"
+_COVERAGE = "static authorized structure facts; unresolved or absent paths are not runtime proof"
 
 
 class AnalysisBudgetExceeded(RuntimeError):
@@ -535,6 +536,7 @@ def bound_analysis_result(result: dict, max_chars: int) -> dict:
                 if (
                     isinstance(item, list)
                     and item
+                    and (key not in {"symbols", "candidates"} or len(item) > 1)
                     and key
                     not in {
                         "nodes",
@@ -549,9 +551,7 @@ def bound_analysis_result(result: dict, max_chars: int) -> dict:
 
         collect(result)
         if not lists:
-            raise ValueError(
-                "response metadata exceeds budget; narrow the query or increase max_chars"
-            )
+            raise AnalysisResponseBudgetExceeded
         container, key, values = max(
             lists, key=lambda item: len(json.dumps(item[2], ensure_ascii=False))
         )
@@ -559,7 +559,11 @@ def bound_analysis_result(result: dict, max_chars: int) -> dict:
         # for every discarded edge would turn clipping into quadratic work.
         excess = len(json.dumps(result, ensure_ascii=False)) - max_chars + 96
         removed = 0
-        while values and removed < excess:
+        # A page must retain one selectable fact. Other sections and their
+        # endpoints may be the real source of excess; exhausting the symbol
+        # page before pruning those sections misdiagnoses a valid query.
+        minimum = 1 if key in {"symbols", "candidates"} else 0
+        while len(values) > minimum and removed < excess:
             removed += len(json.dumps(values.pop(), ensure_ascii=False)) + 2
         _reason(result, "max_chars")
         if key in {"symbols", "candidates"}:
@@ -569,8 +573,6 @@ def bound_analysis_result(result: dict, max_chars: int) -> dict:
                 if container["has_more"] and not container.get("value_selection_candidates")
                 else None
             )
-            if not values and container["has_more"]:
-                raise ValueError("one symbol exceeds response budget; choose a larger max_chars")
         if isinstance(result.get("symbols"), list) and isinstance(result.get("ownership"), list):
             visible = {s["symbol_id"] for s in result["symbols"]}
             result["ownership"] = [

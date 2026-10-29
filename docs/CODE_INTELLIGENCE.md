@@ -1,4 +1,12 @@
-# CoLink 0.4.3 · Python / Java 按需结构查询
+# CoLink 代码智能
+
+2026-10-29 开发源码新增 TypeScript/JavaScript 有界结构前端、选择器驱动的常用
+分析入口、精确搜索预算和独立的响应容量错误。Python/Java 继续提供有界值传播；
+Swift、Rust、Vue 等可识别为源码但尚未获得同等级结构/值流能力。当前变化及验证
+见[本轮实现说明](CODE_INTELLIGENCE_20261029.md)，调用方式见
+[统一入口](CODE_ANALYSIS_ENTRYPOINT.md)。安装包未随此次源码开发更新。
+
+## 历史 0.4.3 · Python / Java 按需结构查询
 
 本页前半部分保留历史 Mirror 接口说明。当前 Live 源码已更新至
 [`0.5.0b7` 本期源码定版](https://github.com/YuyanYYt/Colink/tree/v0.5.0b7)，

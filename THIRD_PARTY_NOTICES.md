@@ -9,8 +9,9 @@ The self-contained macOS build includes:
   applicable third-party notices, preserved inside `Contents/Resources/python`.
 - Runtime Python dependencies locked by `uv.lock`: their `.dist-info` metadata
   and license directories are preserved inside `Contents/Resources/vendor`.
-- Tree-sitter Python bindings 0.26.0 and tree-sitter-java 0.23.5: MIT, used only
-  for static Java parsing. Their bundled metadata/license files are preserved
+- Tree-sitter Python bindings 0.26.0, tree-sitter-java 0.23.5,
+  tree-sitter-javascript 0.25.0 and tree-sitter-typescript 0.23.2: MIT, used only
+  for static Java, JavaScript/JSX and TypeScript/TSX parsing. Their metadata/license files are preserved
   with the other locked runtime dependencies. Python extraction uses the
   standard-library AST parser; no JDK, project compiler or language server runs.
 - OpenAI `tunnel-client` 0.0.15: Apache-2.0 and its dependency notices. The

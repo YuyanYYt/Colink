@@ -637,7 +637,7 @@ def test_parse_failure_unknown_language_and_invalid_roots_report_partial(tmp_pat
             "a": {
                 "bad.py": "def BROKEN(\n",
                 "ok.py": "def value(): pass\n",
-                "ignored.ts": "export const value = 1;\n",
+                "ignored.swift": "let value = 1\n",
                 "pyproject.toml": '[tool.colink]\npython_source_roots=["../escape"]\n',
             }
         },
@@ -650,7 +650,7 @@ def test_parse_failure_unknown_language_and_invalid_roots_report_partial(tmp_pat
     assert service.status("a")["stats"]["python_source_roots_diagnostics"] == [
         {"code": "PYTHON_SOURCE_ROOT_CONFIG_INVALID"}
     ]
-    assert rows(service, "SELECT path FROM li_parse_cache WHERE path='ignored.ts'") == []
+    assert rows(service, "SELECT path FROM li_parse_cache WHERE path='ignored.swift'") == []
     assert backend.read_file("a", "bad.py", snapshot)["content"] == "def BROKEN(\n"
 
 

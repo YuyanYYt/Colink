@@ -114,8 +114,8 @@ def symbol_search(
     else:
         where.append("kind<>'module'")
     if language:
-        if language not in {"python", "java"}:
-            raise ValueError("supported languages are python and java")
+        if language not in {"python", "java", "typescript", "javascript"}:
+            raise ValueError("unsupported structure language filter")
         where.append("json_extract(data, '$.language')=?")
         args.append(language)
     if path_prefix:
@@ -644,7 +644,7 @@ def file_dependencies(
         "edges": list(selected.values()),
         "chains": chains,
         "truncated": truncated,
-        "coverage": "resolved static edges in authorized Python/Java source only",
+        "coverage": "resolved static edges in authorized indexed source only",
     }
 
 
@@ -702,7 +702,7 @@ def project_architecture(
         validate_path(path_prefix.rstrip("/"))
     rows = db.execute(
         "SELECT path FROM ci_files WHERE project_id=? AND revision=? "
-        "AND language IN ('python', 'java') ORDER BY path",
+        "AND language IN ('python', 'java', 'typescript', 'javascript') ORDER BY path",
         (project_id, revision),
     )
     nodes = {r["path"] for r in rows if not path_prefix or r["path"].startswith(path_prefix)}

@@ -155,3 +155,16 @@ def test_unknown_project_and_expired_context_remain_denied(parts):
     backend.contexts.invalidate_project("sample")
     with pytest.raises(SourceError):
         query(backend, handle)
+
+
+def test_response_capacity_is_not_an_invalid_query_or_cache_invalidation(parts, monkeypatch):
+    _, backend, service, handle = parts
+
+    def oversized(*args, **kwargs):
+        return {"mode": "file_context", "symbol": {"qualname": "private_input" * 200}}
+
+    monkeypatch.setattr(analysis, "analyze_structure", oversized)
+    with pytest.raises(SourceError, match="^ANALYSIS_RESPONSE_BUDGET_EXCEEDED:") as failure:
+        query(backend, handle, max_chars=1000)
+    assert "private_input" not in str(failure.value)
+    assert service.status("sample")["status"] == "ready"

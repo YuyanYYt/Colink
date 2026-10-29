@@ -15,7 +15,12 @@ class LiveQueries:
     source_mode = "live"
 
     def __init__(
-        self, sources: dict[str, SourceAccess] | None = None, contexts=None, registry=None
+        self,
+        sources: dict[str, SourceAccess] | None = None,
+        contexts=None,
+        registry=None,
+        *,
+        index_factory=None,
     ):
         sources = sources or (registry.authorized_sources() if registry is not None else {})
         for project_id in sources:
@@ -31,6 +36,7 @@ class LiveQueries:
         self.registry = registry
         self.contexts = contexts or ReadContexts()
         self.index_service = None
+        self._index_factory = index_factory
         self.write_coordinator = None
         self.watcher = None
 
@@ -322,6 +328,12 @@ class LiveQueries:
 
     def code_query(self, project_id, snapshot, operation, **parameters):
         with self.context_request(project_id, snapshot) as (handle, _):
+            if self.index_service is None and self._index_factory is not None:
+                with self._source_lock:
+                    if self._closed:
+                        raise SourceError("LIVE_CLOSED: restart the live backend")
+                    if self.index_service is None:
+                        self.index_service = self._index_factory()
             if self.index_service is None:
                 raise SourceError("INDEX_NOT_READY: live structural indexing is not attached")
             result = self.index_service.query(self, project_id, handle, operation, **parameters)

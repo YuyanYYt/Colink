@@ -9,7 +9,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-PARSER_VERSION = f"facts-v3-py{sys.version_info.major}.{sys.version_info.minor}-java023"
+PARSER_VERSION = f"facts-v4-py{sys.version_info.major}.{sys.version_info.minor}-java023-ts023-js025"
 MAX_FILE_SYMBOLS = 5_000
 MAX_FILE_REFERENCES = 20_000
 MAX_FILE_NODES = 250_000

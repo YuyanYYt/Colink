@@ -1,6 +1,8 @@
 """Conservative static binding: visible definitions/imports, never name guessing."""
 
+import posixpath
 from collections import defaultdict
+from dataclasses import replace
 
 from code_context.binding_dependencies import BindingReads, binding_shape
 from code_context.intelligence_models import (
@@ -13,6 +15,7 @@ from code_context.intelligence_models import (
     module_id,
 )
 from code_context.intelligence_roots import PythonSourceRoots, python_modules, select_source_roots
+from code_context.language_frontends import SCRIPT_LANGUAGES
 
 
 class Resolver:
@@ -24,6 +27,7 @@ class Resolver:
         track_dependencies: bool = False,
     ):
         self.files = files
+        self.languages = {path: parsed.language for path, parsed in files.items()}
         self.python_roots = select_source_roots(files, roots or PythonSourceRoots())
         self.python_source_roots = self.python_roots.roots or ()
         self.modules: dict[tuple[str, str], list[str]] = defaultdict(list)
@@ -51,7 +55,10 @@ class Resolver:
                     self.roots.add((parsed.language, name.split(".")[0]))
             for symbol in parsed.symbols:
                 self.symbols[path, symbol.qualname].append(symbol)
-                self.named[path, symbol.scope, symbol.name].append(symbol)
+                # Module records anchor ownership, rather than declaring a
+                # lexical name that shadows same-named functions or classes.
+                if symbol.kind != "module":
+                    self.named[path, symbol.scope, symbol.name].append(symbol)
                 self.by_id[symbol.id] = symbol
                 if parsed.language == "java" and symbol.kind in CLASS_KINDS:
                     full_name = ".".join(filter(None, [parsed.module, symbol.qualname]))
@@ -136,6 +143,8 @@ class Resolver:
         arity: int | None,
         trail: frozenset = frozenset(),
     ) -> dict:
+        if parsed.language in SCRIPT_LANGUAGES:
+            return self._script_import_target(parsed, imp, suffix, arity, trail)
         name = self._import_module(parsed, imp)
         if not name:
             return self._unknown(imp.module, "invalid_relative_import")
@@ -183,6 +192,8 @@ class Resolver:
     def _export(
         self, path: str, names: list[str], arity: int | None, trail: frozenset = frozenset()
     ) -> dict:
+        if self.languages[path] in SCRIPT_LANGUAGES:
+            return self._script_export(path, names, arity, trail)
         key = (path, ".".join(names))
         if key in trail or len(trail) >= 8:
             return self._unknown(key[1], "cyclic_or_deep_reexport")
@@ -223,8 +234,32 @@ class Resolver:
     def _binding_target(self, parsed: ParsedFile, ref: Reference, depth: int = 0) -> dict:
         if depth >= 5:
             return self._unknown(ref.name, "dynamic_or_deep_binding")
+        if parsed.language in SCRIPT_LANGUAGES:
+            return self._script_binding_target(parsed, ref)
+        if parsed.language == "java" and "::" in ref.name:
+            receiver, separator, method = ref.name.partition("::")
+            if (
+                not separator
+                or not method.replace("$", "_").isidentifier()
+                or not all(part.replace("$", "_").isidentifier() for part in receiver.split("."))
+            ):
+                return self._unknown(ref.name, "java_method_reference_partial")
+            if method == "new":
+                return self._unknown(ref.name, "java_constructor_reference_partial")
+            candidate = self._binding_target(
+                parsed, replace(ref, name=receiver + "." + method), depth + 1
+            )
+            if candidate.get("resolution") == "resolved":
+                target = self.by_id.get(candidate.get("target_symbol_id"))
+                if target is None or target.kind != "method":
+                    return self._unknown(ref.name, "java_method_reference_partial")
+                candidate["evidence"] = "java_method_reference_possible_dispatch"
+            return candidate
         parts = ref.name.split(".")
-        if not parts or not all(part.isidentifier() for part in parts):
+        if not parts or not all(
+            (part.replace("$", "_") if parsed.language == "java" else part).isidentifier()
+            for part in parts
+        ):
             return self._unknown(ref.name, "dynamic_expression")
         base, suffix = parts[0], parts[1:]
         # Explicit self/cls/this qualifies a member, unlike an arbitrary object's name.
@@ -332,6 +367,147 @@ class Resolver:
                 return self._unknown(ref.name, "wildcard_import_or_ambiguous_target")
         return self._unknown(ref.name, "dynamic_receiver" if suffix else "no_static_binding")
 
+    def _script_module_paths(self, parsed, specifier):
+        """Resolve only an unambiguous relative path inside the supplied inventory."""
+        if not specifier.startswith(("./", "../")) or "\\" in specifier or "\0" in specifier:
+            return []
+        base = posixpath.normpath(posixpath.join(posixpath.dirname(parsed.path), specifier))
+        if base == ".." or base.startswith("../") or base.startswith("/"):
+            return []
+        suffix = posixpath.splitext(base)[1]
+        extensions = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+        if suffix:
+            candidates = [base]
+            # TS commonly uses emitted .js specifiers, but no compiler-mode
+            # precedence is assumed when multiple source targets are visible.
+            if suffix in {".js", ".jsx", ".mjs", ".cjs"}:
+                candidates += [base[: -len(suffix)] + ext for ext in (".ts", ".tsx")]
+        else:
+            candidates = [base + ext for ext in extensions]
+            candidates += [posixpath.join(base, "index" + ext) for ext in extensions]
+        return sorted(
+            {
+                path
+                for path in candidates
+                if self.files.get(path) is not None
+                and self.files[path].language in SCRIPT_LANGUAGES
+            }
+        )
+
+    def _script_module_target(self, parsed, specifier):
+        paths = self._script_module_paths(parsed, specifier)
+        if len(paths) == 1:
+            return {
+                "target_path": paths[0],
+                "target_symbol_id": module_id(paths[0]),
+                "target_qualname": "",
+                "target_module": paths[0],
+                "resolution": "resolved",
+                "evidence": "script_relative_module",
+            }
+        if paths:
+            return {"resolution": "ambiguous", "evidence": "script_multiple_module_candidates"}
+        return {
+            "target_module": specifier,
+            "resolution": "unavailable" if specifier.startswith(".") else "external_or_unavailable",
+            "evidence": "script_module_not_in_authorized_inventory",
+        }
+
+    def _script_import_target(self, parsed, imp, suffix, arity, trail=frozenset()):
+        paths = self._script_module_paths(parsed, imp.module)
+        if len(paths) != 1:
+            return self._script_module_target(parsed, imp.module)
+        if not imp.imported_name or imp.imported_name == "*":
+            if not suffix:
+                return self._script_module_target(parsed, imp.module)
+            names = suffix
+        else:
+            names = [imp.imported_name, *suffix]
+        return self._script_export(paths[0], names, arity, trail)
+
+    def _script_export(self, path, names, arity, trail=frozenset()):
+        from code_context.intelligence_typescript import EXPORT_SCOPE
+
+        key = (path, ".".join(names))
+        if not names or key in trail or len(trail) >= 8:
+            return self._unknown(".".join(names), "cyclic_or_deep_reexport")
+        parsed = self.files[path]
+        exports = [
+            imp
+            for imp in parsed.imports
+            if imp.scope == EXPORT_SCOPE and imp.local_name == names[0]
+        ]
+        if len(exports) != 1:
+            wildcard = any(
+                imp.scope == EXPORT_SCOPE and imp.local_name == "*" for imp in parsed.imports
+            )
+            return {
+                "target_path": path,
+                "resolution": "ambiguous" if exports else "unresolved",
+                "evidence": "script_ambiguous_export"
+                if exports
+                else "script_wildcard_export_partial"
+                if wildcard
+                else "script_export_not_visible",
+            }
+        export = exports[0]
+        if export.type_only and arity is not None:
+            return self._unknown(names[0], "type_only_export_is_not_runtime_value")
+        if export.module:
+            return self._script_import_target(parsed, export, names[1:], arity, trail | {key})
+        local = export.imported_name
+        imports = self.imports.get((path, "", local), [])
+        if imports:
+            if len(imports) != 1:
+                return self._unknown(local, "script_ambiguous_local_export")
+            return self._script_import_target(parsed, imports[0], names[1:], arity, trail | {key})
+        if len(names) > 1:
+            return self._unknown(".".join(names), "script_member_requires_runtime_type")
+        bindings = self.bindings.get((path, "", local), [])
+        if any(b.kind != "symbol" for b in bindings):
+            return self._unknown(local, "script_export_value_not_statically_callable")
+        return self._select(self.named.get((path, "", local), []), "script_explicit_export", arity)
+
+    def _script_binding_target(self, parsed, ref):
+        parts = ref.name.split(".")
+        if not parts or not all(part.replace("$", "_").isidentifier() for part in parts):
+            return self._unknown(ref.name, "dynamic_expression")
+        base, suffix = parts[0], parts[1:]
+        if base == "this" and suffix:
+            owners = [
+                s
+                for s in parsed.symbols
+                if s.kind in CLASS_KINDS and ref.source_qualname.startswith(s.qualname + ".")
+            ]
+            if owners and len(suffix) == 1:
+                owner = max(owners, key=lambda s: len(s.qualname))
+                return self._select(
+                    self.named.get((parsed.path, owner.qualname, suffix[0]), []),
+                    "script_receiver_possible_dispatch",
+                    ref.arity,
+                )
+            return self._unknown(ref.name, "script_dynamic_receiver")
+        for scope in self._scopes(parsed, ref.scope):
+            bindings = self.bindings.get((parsed.path, scope, base), [])
+            if any(binding.kind != "symbol" for binding in bindings):
+                return self._unknown(ref.name, "local_or_parameter_shadowing")
+            imports = self.imports.get((parsed.path, scope, base), [])
+            if imports:
+                if len(imports) != 1:
+                    return self._unknown(ref.name, "script_ambiguous_import")
+                imp = imports[0]
+                if imp.type_only and not ref.type_only:
+                    return self._unknown(ref.name, "type_only_import_is_not_runtime_value")
+                if imp.imported_name == "*" and not suffix and ref.kind == "CALL":
+                    return self._unknown(ref.name, "script_namespace_is_not_callable")
+                return self._script_import_target(parsed, imp, suffix, ref.arity)
+            definitions = self.named.get((parsed.path, scope, base), [])
+            if definitions:
+                if suffix:
+                    return self._unknown(ref.name, "script_member_requires_runtime_type")
+                return self._select(definitions, "lexical_definition", ref.arity)
+        return self._unknown(ref.name, "dynamic_receiver" if suffix else "no_static_binding")
+
     def resolve_file(self, path: str) -> list[Relation]:
         reads = self.binding_reads
         if reads is None:
@@ -369,7 +545,9 @@ class Resolver:
         for ref in parsed.references:
             if ref.kind == "IMPORT":
                 imports = [i for i in parsed.imports if i.line == ref.line]
-                import_name = ref.name.lstrip(".")
+                import_name = (
+                    ref.name if parsed.language in SCRIPT_LANGUAGES else ref.name.lstrip(".")
+                )
                 matches = [
                     i
                     for i in imports
@@ -384,8 +562,12 @@ class Resolver:
                     target = self._import_target(parsed, imp, [], None)
                     # Wildcards still establish a module dependency, not symbol bindings.
                     if imp.imported_name == "*":
-                        target = self._module_target(
-                            parsed.language, self._import_module(parsed, imp)
+                        target = (
+                            self._script_module_target(parsed, imp.module)
+                            if parsed.language in SCRIPT_LANGUAGES
+                            else self._module_target(
+                                parsed.language, self._import_module(parsed, imp)
+                            )
                         )
                         target["evidence"] = "wildcard_module_import"
                 else:

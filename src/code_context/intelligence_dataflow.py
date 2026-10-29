@@ -18,6 +18,7 @@ from typing import Any
 
 from code_context.dataflow_diagnostics import annotate_dataflow_result, diagnostic_details
 from code_context.intelligence_models import MAX_FILE_NODES, MAX_PARSE_BYTES
+from code_context.language_frontends import VALUE_FLOW_LANGUAGES
 
 _MODES = frozenset({"data_origin", "data_impact", "data_path", "combined"})
 _MAX_WORK_NODES = 10_000
@@ -187,7 +188,7 @@ class _Analysis:
         language = symbol.get("language", "python" if symbol else "unknown")
         if "root" in self.frames:
             availability = "available"
-        elif language not in {"python", "java", "unknown"}:
+        elif language not in VALUE_FLOW_LANGUAGES | {"unknown"}:
             availability = "unsupported_language"
         elif symbol.get("path", "").lower().endswith(".pyi"):
             availability = "unsupported_source"
@@ -275,7 +276,7 @@ class _Analysis:
         if symbol.get("language", "python") != "python" or not path.lower().endswith(
             (".py", ".pyi")
         ):
-            self.diagnostic("PYTHON_ONLY", symbol=symbol)
+            self.diagnostic("DATAFLOW_LANGUAGE_UNSUPPORTED", symbol=symbol)
             return None
         if path.lower().endswith(".pyi"):
             self.diagnostic("PYTHON_STUB_UNSUPPORTED", symbol=symbol)
