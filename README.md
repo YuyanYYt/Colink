@@ -10,31 +10,18 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b7">本期源码发行</a> ·
-  <a href="https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b5">下载 macOS 安装包</a> ·
+  <a href="https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b8">最新版：0.5.0 Beta 8</a> ·
+  <a href="https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b8">下载 macOS 安装包</a> ·
   <a href="docs/INSTALL.md">安装与使用</a> ·
   <a href="docs/AGENT_INSTALL.md">让 Agent 帮你安装</a> ·
   <a href="https://github.com/YuyanYYt/Colink/releases">历史版本</a>
 </p>
 
-**macOS 安装包：0.5.0 Beta 5（`0.5.0b5`，build 22）** · macOS 14+ · Apple Silicon · [MIT](LICENSE)
+**macOS 安装包：0.5.0 Beta 8（`0.5.0b8`，build 39）** · macOS 14+ · Apple Silicon · [MIT](LICENSE)
 
-**本期最终源码：`0.5.0b7`**，见 [固定版本 `v0.5.0b7`](https://github.com/YuyanYYt/Colink/tree/v0.5.0b7)
-和[本期发行说明](docs/RELEASE_0.5.0b7.md)。源码中的 macOS 构建元数据沿用 build 34。
-包含统一源码读取、联合分析、Python / Java 有界数据流、分析限制诊断和本机工作区管理；
-见[读取与分析入口](docs/CODE_ANALYSIS_ENTRYPOINT.md)、[M1 接口](docs/CODE_INTELLIGENCE_M1.md)、
-[M2 边界](docs/CODE_INTELLIGENCE_M2.md)与[Java 数据流说明](docs/JAVA_DATAFLOW_BUILD34_20261016.md)。
-本期发行提供源码。当前可下载的 macOS 安装包仍为 `0.5.0b5 / build 22`；本机历史
-build 34 热修复包只包含写入恢复修复，与本期完整源码的功能范围不同。
-
-2026-10-29 开发源码进一步修复分析预算误报，增加按选择器路由的常用分析入口、
-TypeScript/JavaScript 有界结构关系、搜索预算优化及构建溯源清单。Python/Java
-仍是值传播支持范围；这些开发改动尚未打包安装或公开发布，详见
-[实现与验证记录](docs/CODE_INTELLIGENCE_20261029.md)。
-
-后续 build 36 修复网页实测发现的 include 组合冲突、Python 调用阶段混淆和裁剪完整性，
-保持默认 mode 隐藏与自动路由，复用 direction 表达单值来源/影响。相关验证和网页
-验收分别记录，见 [网页实测修复说明](docs/CODE_INTELLIGENCE_REPAIR_20261029.md)。
+**当前源码与公开安装包均对应 `v0.5.0b8`**，包含统一源码读取与分析、Python / Java
+值传播、TypeScript / JavaScript 结构关系、读取预算与符号定位修复，以及本机工作区管理。
+发行细节和验证边界见[发行说明](docs/RELEASE_0.5.0b8.md)。
 
 Live 主要使用两个入口：`read_code` 定向读取文件、符号、搜索和少量显式文件，
 `analyze_code` 查询关系、数据传播及任务 Diff，需要正文时可在同一次分析中附带。
@@ -49,10 +36,9 @@ Live 主要使用两个入口：`read_code` 定向读取文件、符号、搜索
 源码、全局连接配置与写入恢复库保留；具体范围和恢复方式见
 [本机工作区](docs/PROJECT_WORKSPACE_STORAGE.md)。升级前的正式 `build 29` 保留可安装回退包。
 
-本版增加本机开发终端、固定数据库只读工具和局部代码索引更新。原生终端按当前
-macOS 用户权限运行；可选隔离执行器目前只在已验证的 Darwin 27 上开放。
-安装包声明最低 macOS 14；完整原生运行验收目前来自维护者的 macOS 27。
-更新内容和验证边界见 [Beta 5 发行说明](docs/RELEASE_0.5.0b5.md)。
+本版保留本机开发终端、固定数据库只读工具和局部代码索引更新，并更新源码分析与读取能力。
+原生终端按当前 macOS 用户权限运行；可选隔离执行器目前只在已验证的 Darwin 27 上开放。
+安装包声明最低 macOS 14；更新内容和验证边界见 [Beta 8 发行说明](docs/RELEASE_0.5.0b8.md)。
 
 CoLink 把你选定的本机项目接入 MCP。你可以在 ChatGPT 网页端询问项目结构、查找
 函数、理解跨文件依赖；需要改代码时，在本机打开写入开关，让 AI 精准编辑、创建
@@ -90,7 +76,7 @@ Skill 是否自动匹配由客户端决定，不保证每轮触发。
 
 ### 1. 安装应用
 
-打开 [0.5.0 Beta 5 下载页](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b5)，
+打开 [0.5.0 Beta 8 下载页](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b8)，
 下载 `Colink-macos-arm64.dmg`，将 `Colink.app` 拖入“应用程序”，然后打开 **CoLink**。
 也可以下载 ZIP 安装。
 
@@ -169,7 +155,8 @@ uv run colink live --root examples/sample_project --project sample \
 
 | 版本 | 主要变化 |
 | --- | --- |
-| [**0.5.0 Beta 7 · 本期最终源码**](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b7) | Python / Java 有界数据流、结构分析覆盖与限制诊断、可恢复批量写入与工作区管理；见[本期发行说明](docs/RELEASE_0.5.0b7.md)。本期提供源码 |
+| [**0.5.0 Beta 8 · 最新 macOS 安装包**](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b8) | 当前主分支源码、自包含 Live 模式 macOS 应用（build 39）、Skill 备用包及校验清单；见[发行说明](docs/RELEASE_0.5.0b8.md) |
+| [**0.5.0 Beta 7 · 源码发行**](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b7) | Python / Java 有界数据流、结构分析覆盖与限制诊断、可恢复批量写入与工作区管理；见[发行说明](docs/RELEASE_0.5.0b7.md)。本期仅提供源码 |
 | [**0.5.0 Beta 5 · 公开预发行**](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b5) | 只读 / 写入 / 开发三档、原生终端、固定数据库只读、局部索引和自定义运行数据目录；见 [发行说明](docs/RELEASE_0.5.0b5.md) |
 | **0.5.0 Beta 4 · 维护源码** | 网页独立开发作业、原生隔离与有界存储、环境/端口/数据库引导、受控移动与本地 Git；公开发行状态和实际验收另行记录 |
 | **0.5.0 Beta 2 · 公开发行** | 改善无 Git 项目发现和同名项目区分；发布直读、多项目及受控写入安装包；移除主动代码回退，代码历史交给项目 Git 管理 |
@@ -214,7 +201,7 @@ CoLink 使用 [MIT 许可证](LICENSE)。这是每位用户独立运行的开源
 
 ## 软件恢复锚点
 
-维护者当前首选恢复基准：`0.5.0b7 / build 33`，本机固定标签为
+维护者保留的固定恢复锚点：`0.5.0b7 / build 33`，本机标签为
 `anchor/colink-0.5.0b7-build33-before-cross-language-20261016T152045`。
 恢复前保留当前改动并检查运行数据兼容性，具体步骤和归档记录见
 [build 33 恢复说明](docs/RECOVERY_0.5.0b7_BUILD33.md)。历史 build 19 材料保留；

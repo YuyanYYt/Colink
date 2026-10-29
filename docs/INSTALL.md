@@ -1,17 +1,17 @@
 # 安装与使用 CoLink
 
-当前公开 macOS 安装包为 **0.5.0 Beta 5（`0.5.0b5`，build 22）**，提供原文件按需直读、
-多项目管理、默认关闭的受控写入，以及单独授权的本机开发终端。旧版安装包仍保留在
-历史发行页；本版功能与验证边界见 [发行说明](RELEASE_0.5.0b5.md)，日常源码读取、
+当前公开 macOS 安装包为 **0.5.0 Beta 8（`0.5.0b8`，build 39）**，提供原文件按需直读、
+多项目管理、默认关闭的受控写入、本机开发终端和更新后的代码分析能力。旧版安装包仍保留在
+历史发行页；本版功能与验证边界见 [发行说明](RELEASE_0.5.0b8.md)，日常源码读取、
 写入和 Diff 见 [LIVE_USAGE.md](LIVE_USAGE.md)。
 
 ## 推荐：直接安装 macOS 应用
 
 安装包面向 **Apple Silicon（M 系列芯片）**，声明最低 **macOS 14**；完整原生运行
-验收在 macOS 27 完成，版本边界见 [发行说明](RELEASE_0.5.0b5.md)。
+验收在 macOS 27 完成，版本边界见 [发行说明](RELEASE_0.5.0b8.md)。
 Intel Mac、Windows 暂无对应图形安装包；macOS/Linux 可使用源码 CLI。
 
-1. 打开 [0.5.0 Beta 5 下载页](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b5)。
+1. 打开 [0.5.0 Beta 8 下载页](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b8)。
 2. 下载 `Colink-macos-arm64.dmg`，双击打开，将 `Colink.app` 拖入“应用程序”。
    也可下载 ZIP，解压后把应用放入 `/Applications` 或 `~/Applications`。
 3. 从 Finder“应用程序”打开 **CoLink**，点击菜单栏图标。

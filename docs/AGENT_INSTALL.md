@@ -4,7 +4,7 @@
 它负责下载、校验、安装及检查；账户登录、运行密钥和代码共享权限仍由你确认。
 Colink 不会自己安装一个通用 Agent；终端能力需要用户在本机为准确项目开启开发授权。
 
-下方安装流程针对 **0.5.0 Beta 5（`v0.5.0b5`，build 22）** 自包含安装包。
+下方安装流程针对 **0.5.0 Beta 8（`v0.5.0b8`，build 39）** 自包含安装包。
 只使用正式上传的公开资产，不分发绑定维护者目录的私有验收 runtime。
 日常读取/写入见 [LIVE_USAGE.md](LIVE_USAGE.md)，旧版升级见 [INSTALL.md](INSTALL.md)。
 
@@ -13,7 +13,7 @@ Colink 不会自己安装一个通用 Agent；终端能力需要用户在本机�
 ```text
 请帮我安装开源 CoLink：https://github.com/YuyanYYt/Colink。
 先读取该仓库 docs/AGENT_INSTALL.md、docs/INSTALL.md 和 SECURITY.md。
-只从 YuyanYYt/Colink 的 GitHub Releases 获取安装包；当前 Beta 为 v0.5.0b5，检查 SHA256SUMS。
+只从 YuyanYYt/Colink 的 GitHub Releases 获取安装包；当前 Beta 为 v0.5.0b8，检查 SHA256SUMS。
 检查我的系统和芯片；支持的 Apple Silicon macOS 优先安装自包含应用，不要求我安装开发工具。
 先展示下载版本、安装位置、会写入哪些文件，再征得我的安装确认。
 保留现有用户配置和数据；遇到已有应用先说明升级方案，不未经确认直接覆盖。
