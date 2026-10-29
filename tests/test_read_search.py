@@ -81,6 +81,72 @@ def test_text_context_is_narrow_and_lf_lines_keep_unicode_separator(searcher):
     assert match["context"]["content"] == "before\nvalue='one\u2028needle'\nafter\n"
 
 
+def test_many_matches_encode_the_accumulated_payload_and_cursor_only_at_return(
+    searcher, monkeypatch
+):
+    (searcher.source("a").root / "many.txt").write_text(
+        "".join(f"needle {number}\n" for number in range(300))
+    )
+    whole_payload_sizes, cursors = [], []
+    original_chars, original_cursor = module.json_chars, module.encode_search_cursor
+
+    def measured(value):
+        if isinstance(value, dict) and isinstance(value.get("matches"), list):
+            whole_payload_sizes.append(len(value["matches"]))
+        return original_chars(value)
+
+    def signed(*args, **kwargs):
+        cursors.append(1)
+        return original_cursor(*args, **kwargs)
+
+    monkeypatch.setattr(module, "json_chars", measured)
+    monkeypatch.setattr(module, "encode_search_cursor", signed)
+    result = search(
+        searcher,
+        {
+            "mode": "search",
+            "kind": "text",
+            "query": "needle",
+            "path_prefix": "many.txt",
+            "limit": 100,
+        },
+        max_chars=50_000,
+    )
+    assert [match["line"] for match in result["matches"]] == list(range(1, 101))
+    assert result["has_more"] is True
+    assert [size for size in whole_payload_sizes if size] == [100]
+    assert len(cursors) == 1
+
+
+@pytest.mark.parametrize("max_chars", [1000, 1600, 3000, 6000])
+def test_incremental_budget_keeps_escaped_context_pages_complete(searcher, max_chars):
+    (searcher.source("a").root / "escaped.txt").write_text(
+        "".join(f'needle 中\\"\t {number} ' + '\\"' * 70 + "\n" for number in range(40))
+    )
+    request = {
+        "mode": "search",
+        "kind": "text",
+        "query": "needle",
+        "path_prefix": "escaped.txt",
+        "context_lines": 1,
+        "limit": 200,
+    }
+    snapshot, lines = None, []
+    for _ in range(100):
+        result = search(searcher, request, snapshot, max_chars=max_chars)
+        assert len(json.dumps(result, ensure_ascii=False)) <= max_chars
+        lines.extend(match["line"] for match in result["matches"])
+        if not result["has_more"]:
+            assert result["search_complete"]
+            break
+        assert result["matches"], "a successful page must advance beyond one matching line"
+        snapshot = result["snapshot"]
+        request = {**request, "cursor": result["next_cursor"]}
+    else:
+        pytest.fail("search pages did not finish")
+    assert lines == list(range(1, 41))
+
+
 @pytest.mark.parametrize(
     "change",
     [

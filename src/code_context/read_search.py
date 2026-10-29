@@ -16,6 +16,7 @@ from code_context.source_access import SourceError
 from code_context.source_page import physical_lines, source_page
 
 _CURSOR = struct.Struct(">BIId32s")
+_CURSOR_CHARS = 5 + ((_CURSOR.size + 32) * 8 + 5) // 6
 _CURSOR_LOCK = RLock()
 _CURSOR_KEYS = weakref.WeakKeyDictionary()
 
@@ -191,18 +192,23 @@ def search_source(
     if position[0] > len(files) or position[0] == len(files) and position[1]:
         raise SourceError("INVALID_READ_CURSOR: search position is outside discovered files")
     matches, scanned_bytes, excluded = [], 0, 0
+    match_chars = 0
     base = {**read_base(project_id, handle, "search", display_name), "kind": "text", "query": query}
 
-    def response(pos, reasons):
+    def response(pos, reasons, *, measure=False):
         unfinished = pos[0] < len(files)
         partial = metadata["partial"] or any(
             reason in {"max_ms", "max_bytes"} for reason in reasons
         )
         return {
             **base,
-            "matches": matches,
+            "matches": [] if measure else matches,
             "has_more": unfinished,
-            "next_cursor": encode_search_cursor(backend, binding, *pos, inventory)
+            "next_cursor": (
+                "x" * _CURSOR_CHARS
+                if measure
+                else encode_search_cursor(backend, binding, *pos, inventory)
+            )
             if unfinished
             else None,
             "search_complete": not unfinished and not metadata["partial"],
@@ -214,6 +220,20 @@ def search_source(
             "truncated": bool(reasons),
             "truncated_reason": list(reasons),
         }
+
+    metadata_key, metadata_chars = None, 0
+
+    def response_chars(pos, reasons, values_chars):
+        nonlocal metadata_key, metadata_chars
+        # Position is carried inside a fixed-width, unescaped cursor. Only these
+        # counters/flags can change the remaining JSON cost while scanning.
+        key = pos[0] < len(files), tuple(reasons), scanned_bytes, excluded
+        if key != metadata_key:
+            metadata_key = key
+            metadata_chars = json_chars(response(pos, reasons, measure=True))
+        # The metadata already includes []; account for each complete encoded
+        # match and the default JSON list separators without re-encoding old hits.
+        return metadata_chars + values_chars + 2 * max(0, len(matches) - 1)
 
     def finish(pos, reasons):
         result = response(pos, reasons)
@@ -259,32 +279,37 @@ def search_source(
                 position = following
                 continue
             candidate = _match(document, lines, line_index + 1, query, context_lines)
+            previous_chars = match_chars
+            match_chars += json_chars(candidate)
             matches.append(candidate)
-            if json_chars(response(following, ["max_chars"])) > max_chars:
-                if "context" in candidate:
-                    candidate.pop("context")
-                    candidate["context_omitted"] = True
+            if response_chars(following, ["max_chars"], match_chars) > max_chars:
                 low, high = len(query), min(1000, len(lines[line_index]))
-                best = None
+                best, best_chars = None, 0
                 while low <= high:
                     middle = (low + high) // 2
                     narrowed = _match(document, lines, line_index + 1, query, 0, middle)
                     if context_lines:
                         narrowed["context_omitted"] = True
-                    matches[-1] = narrowed
-                    if json_chars(response(following, ["max_chars"])) <= max_chars:
+                    narrowed_chars = json_chars(narrowed)
+                    if (
+                        response_chars(following, ["max_chars"], previous_chars + narrowed_chars)
+                        <= max_chars
+                    ):
                         best = narrowed
+                        best_chars = narrowed_chars
                         low = middle + 1
                     else:
                         high = middle - 1
                 if best is None:
                     matches.pop()
+                    match_chars = previous_chars
                     if matches:
                         return finish(position, ["max_chars"])
                     raise SourceError(
                         "READ_ITEM_EXCEEDS_BUDGET: increase max_chars to fit one search match"
                     )
                 matches[-1] = best
+                match_chars = previous_chars + best_chars
                 return finish(following, ["max_chars"])
             position = following
             if len(matches) >= limit:
