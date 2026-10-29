@@ -29,7 +29,7 @@ from pathlib import Path
 from threading import RLock
 from typing import TYPE_CHECKING
 
-from code_context.analysis_response import AnalysisResponseBudgetExceeded
+from code_context.analysis_response import AnalysisRequestError, AnalysisResponseBudgetExceeded
 from code_context.binding_dependencies import declaration_summary, summary_file
 from code_context.fact_payloads import FactCacheError, decode_fact
 from code_context.intelligence_analysis import AnalysisBudgetExceeded
@@ -878,6 +878,8 @@ class LiveIndexService:
                     raise SourceError("INDEX_NOT_READY: fact cache needs rebuilding") from None
             return self._not_ready(project_id, handle, "INDEX_CACHE_INVALID")
         except AnalysisResponseBudgetExceeded as exc:
+            raise SourceError(str(exc)) from None
+        except AnalysisRequestError as exc:
             raise SourceError(str(exc)) from None
         except (ValueError, TypeError, AttributeError):
             raise SourceError(

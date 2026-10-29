@@ -32,6 +32,10 @@ TypeScript/JavaScript 有界结构关系、搜索预算优化及构建溯源清�
 仍是值传播支持范围；这些开发改动尚未打包安装或公开发布，详见
 [实现与验证记录](docs/CODE_INTELLIGENCE_20261029.md)。
 
+后续 build 36 修复网页实测发现的 include 组合冲突、Python 调用阶段混淆和裁剪完整性，
+保持默认 mode 隐藏与自动路由，复用 direction 表达单值来源/影响。相关验证和网页
+验收分别记录，见 [网页实测修复说明](docs/CODE_INTELLIGENCE_REPAIR_20261029.md)。
+
 Live 主要使用两个入口：`read_code` 定向读取文件、符号、搜索和少量显式文件，
 `analyze_code` 查询关系、数据传播及任务 Diff，需要正文时可在同一次分析中附带。
 已知文件可直接读取；跨文件理解先取得必要关系与源码证据。Live 完整工具集合为

@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import plistlib
 import shutil
 import subprocess
 from pathlib import Path
@@ -203,7 +204,8 @@ def test_native_builder_writes_provenance_before_signing(workspace, tmp_path, mo
                 (output / "Contents/Resources/colink-build-manifest.json").read_text()
             )
             assert manifest["source"]["kind"] == "workspace"
-            assert manifest["bundle"]["build"] == "34"
+            info = plistlib.loads((output / "Contents/Info.plist").read_bytes())
+            assert manifest["bundle"]["build"] == info["CFBundleVersion"]
             assert verify_build_manifest(manifest, workspace / "src/code_context")["matches"]
 
     monkeypatch.setattr(module.subprocess, "run", command)

@@ -9,7 +9,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic.json_schema import SkipJsonSchema
 
 from code_context.analysis_diff import bound_diff_result
-from code_context.analysis_response import AnalysisResponseBudgetExceeded
+from code_context.analysis_response import AnalysisRequestError, AnalysisResponseBudgetExceeded
 from code_context.analysis_routing import AnalysisMode, resolve_analysis_mode
 from code_context.intelligence_analysis import (
     AnalysisSelector,
@@ -72,11 +72,14 @@ def register_analysis_tool(mcp, store, authorize, display_name, annotations):
         """Analyze saved source from one explicit selector; no mode choice is needed.
         Select {path} for file context or {symbol_id}/{path,qualname} for a symbol.
         Add value={kind:parameter,name}, {kind:return,line?,column?} or
-        {kind:occurrence,line,column} for bounded source-and-impact value flow.
+        {kind:occurrence,line,column} for bounded value flow. With one value, direction
+        incoming selects origins, outgoing selects impact, both selects combined context.
         A target exact symbol requests a directed call path; a target value requests
         a value path. Select values at both endpoints; missing values are never guessed.
-        Repeated definitions return candidates rather than a guessed symbol. Context views
-        optionally include ownership, calls, dependencies and source; symbol pages use next_offset.
+        Repeated definitions return candidates rather than a guessed symbol. include may request
+        ownership, calls and dependencies on any analysis: path/value views attach this evidence
+        as context without changing the primary analysis. Include source for actual saved text.
+        Symbol pages use next_offset; clipped graph sections have their own continuation guidance.
         Include source to receive bounded actual text with the same validated context and shared
         response/time budget. Source evidence needs max_chars >= 3000. Ambiguous definitions
         require selection; source is never picked from the first candidate.
@@ -94,14 +97,14 @@ def register_analysis_tool(mcp, store, authorize, display_name, annotations):
         """
         authorize(project_id)
         try:
-            mode = resolve_analysis_mode(selector, target, mode)
+            mode = resolve_analysis_mode(selector, target, mode, direction)
             if mode == "diff":
                 if target is not None or include is not None or isinstance(selector, FlowSelector):
-                    raise ValueError("diff accepts only an optional path selector")
+                    raise AnalysisRequestError("diff accepts only an optional path selector")
                 if selector is not None and (
                     selector.symbol_id is not None or selector.qualname is not None
                 ):
-                    raise ValueError("diff accepts only an optional path selector")
+                    raise AnalysisRequestError("diff accepts only an optional path selector")
                 result = store.get_recent_diff(
                     project_id,
                     snapshot,
@@ -116,14 +119,14 @@ def register_analysis_tool(mcp, store, authorize, display_name, annotations):
                     {**result, "mode": mode, "display_name": display_name(project_id)}, max_chars
                 )
             if selector is None:
-                raise ValueError("this analysis mode requires a selector")
+                raise AnalysisRequestError("this analysis requires a selector")
             if baseline != "previous" or detail != "summary":
-                raise ValueError("baseline and detail are only supported by diff")
+                raise AnalysisRequestError("baseline and detail are only supported by task diff")
             if include is not None and len(include) != len(set(include)):
-                raise ValueError("include values must be unique")
+                raise AnalysisRequestError("include values must be unique")
             with_source = include is not None and "source" in include
             if with_source and max_chars < 3000:
-                raise ValueError("source evidence requires max_chars of at least 3000")
+                raise AnalysisRequestError("source evidence requires max_chars of at least 3000")
             structural_include = (
                 [item for item in include if item != "source"] if include is not None else None
             )

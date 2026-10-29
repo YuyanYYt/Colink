@@ -593,6 +593,8 @@ class Resolver:
                     column=ref.column,
                     type_only=ref.type_only,
                     conditional=ref.conditional,
+                    execution_context=ref.execution_context,
+                    execution_scope=ref.execution_scope,
                     **target,
                 )
             )

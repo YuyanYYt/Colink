@@ -14,7 +14,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from code_context.analysis_response import AnalysisResponseBudgetExceeded
+from code_context.analysis_context import attach_context, structure_evidence
+from code_context.analysis_response import AnalysisRequestError, AnalysisResponseBudgetExceeded
+from code_context.intelligence_models import CLASS_KINDS, is_traversable_call
 from code_context.intelligence_queries import (
     _symbol,
     decode_relation,
@@ -70,7 +72,7 @@ def _selector(value) -> AnalysisSelector:
     try:
         return AnalysisSelector.model_validate(value, strict=True)
     except ValidationError:
-        raise ValueError(
+        raise AnalysisRequestError(
             "invalid analysis selector; use path, symbol_id or path + qualname"
         ) from None
 
@@ -79,9 +81,14 @@ def select_symbol(db, project_id, revision, selector, *, offset=0, limit=20):
     """Return one exact symbol or a bounded ambiguity result for caller presentation."""
     selected = _selector(selector)
     if selected.symbol_id is not None:
-        return _symbol(db, project_id, revision, selected.symbol_id), None
+        try:
+            return _symbol(db, project_id, revision, selected.symbol_id), None
+        except ValueError:
+            raise AnalysisRequestError(
+                "SYMBOL_NOT_FOUND: select a definition in this context"
+            ) from None
     if selected.qualname is None:
-        raise ValueError("symbol selection requires symbol_id or path + qualname")
+        raise AnalysisRequestError("symbol selection requires symbol_id or path + qualname")
     args = (project_id, revision, selected.path, selected.qualname)
     total = db.execute(
         "SELECT COUNT(*) FROM ci_symbols WHERE project_id=? AND revision=? "
@@ -89,7 +96,7 @@ def select_symbol(db, project_id, revision, selector, *, offset=0, limit=20):
         args,
     ).fetchone()[0]
     if total == 0:
-        raise ValueError("SYMBOL_NOT_FOUND: select a definition in this code context")
+        raise AnalysisRequestError("SYMBOL_NOT_FOUND: select a definition in this code context")
     rows = db.execute(
         "SELECT data FROM ci_symbols WHERE project_id=? AND revision=? AND path=? AND qualname=? "
         "ORDER BY start_line, symbol_id LIMIT ? OFFSET ?",
@@ -148,7 +155,7 @@ def _file_context(
 ):
     path = selected.path
     if path is None or selected.symbol_id is not None or selected.qualname is not None:
-        raise ValueError("file_context requires exactly a path selector")
+        raise AnalysisRequestError("file_context requires exactly a path selector")
     if (
         db.execute(
             "SELECT 1 FROM files WHERE project_id=? AND revision=? AND path=?",
@@ -156,7 +163,7 @@ def _file_context(
         ).fetchone()
         is None
     ):
-        raise ValueError("file is not in this code context")
+        raise AnalysisRequestError("FILE_NOT_FOUND: select an indexed file in this context")
     total = db.execute(
         "SELECT COUNT(*) FROM ci_symbols WHERE project_id=? AND revision=? AND path=?",
         (project_id, revision, path),
@@ -255,6 +262,7 @@ def _file_calls(db, project_id, revision, path, symbols, max_nodes, max_edges, d
         "truncated": truncated,
         "truncated_reason": sorted(set(reasons)),
         "coverage": _COVERAGE,
+        "execution_context_partial": any(not is_traversable_call(edge) for edge in edges),
     }
 
 
@@ -315,7 +323,7 @@ def _call_path(db, project_id, revision, root, target, max_depth, max_nodes, max
     nodes = {root_id: root}
     distances, parents, queue, edges, unresolved = {root_id: 0}, {}, deque([root_id]), [], []
     truncated, shortest = False, 0 if root_id == target_id else None
-    reasons = []
+    reasons, not_traversed = [], []
     while queue:
         if time.monotonic() >= deadline:
             truncated = True
@@ -340,11 +348,19 @@ def _call_path(db, project_id, revision, root, target, max_depth, max_nodes, max
             relations.append(decode_relation(row["data"]))
         found = _symbols(db, project_id, revision, [r["target_symbol_id"] for r in relations])
         for relation in relations:
-            if len(edges) + len(unresolved) >= max_edges:
+            if len(edges) + len(unresolved) + len(not_traversed) >= max_edges:
                 truncated = True
                 reasons.append("graph_budget")
                 break
             next_id = relation["target_symbol_id"]
+            if not is_traversable_call(relation):
+                not_traversed.append(
+                    {
+                        **relation,
+                        "not_traversed_reason": "deferred_or_type_only_execution_not_proven",
+                    }
+                )
+                continue
             if relation["resolution"] != "resolved" or next_id not in found:
                 unresolved.append(relation)
                 continue
@@ -388,6 +404,8 @@ def _call_path(db, project_id, revision, root, target, max_depth, max_nodes, max
         "nodes": [s for k, s in nodes.items() if k in used_nodes],
         "edges": path_edges,
         "unresolved": unresolved,
+        "not_traversed": not_traversed,
+        "execution_context_partial": bool(not_traversed),
         "path_found": bool(paths),
         "truncated": truncated,
         "truncated_reason": sorted(set(reasons)),
@@ -414,6 +432,25 @@ def _endpoints(edge):
         edge.get("source", edge.get("source_symbol_id")),
         edge.get("target", edge.get("target_symbol_id")),
     )
+
+
+def _mark_sections(result, sections, reason):
+    seen = set()
+    for section in (result, *sections):
+        if id(section) not in seen:
+            seen.add(id(section))
+            section.setdefault("truncated_reason", [])
+            _reason(section, reason)
+
+
+def _clipped_field(result, parents, section, field, before, reason="max_chars"):
+    _mark_sections(result, (*parents, section), reason)
+    fields = section.setdefault("clipped_fields", [])
+    previous = next((entry for entry in fields if entry["field"] == field), None)
+    if previous is None:
+        fields.append({"field": field, "before": before, "returned": len(section[field])})
+    else:
+        previous["returned"] = len(section[field])
 
 
 def apply_analysis_bounds(result, max_nodes, max_edges):
@@ -474,7 +511,14 @@ def apply_analysis_bounds(result, max_nodes, max_edges):
                     _reason(result, "graph_budget")
             result["ownership"] = selected
             result["owners"] = [node for key, node in owners.items() if key in owner_ids]
-    for graph in _graphs(result):
+    for graph, parents, _ in _analysis_sections(result):
+        if not isinstance(graph.get("nodes"), list) or not isinstance(graph.get("edges"), list):
+            continue
+        before_counts = {
+            key: len(graph[key])
+            for key in ("nodes", "edges", "paths", "chains", "unresolved", "not_traversed")
+            if isinstance(graph.get(key), list)
+        }
         available = {_node_id(node): node for node in graph["nodes"]}
         selected_nodes = {}
         for root in (graph.get("root", graph.get("path")), graph.get("target")):
@@ -508,15 +552,153 @@ def apply_analysis_bounds(result, max_nodes, max_edges):
             graph["chains"] = [
                 chain for chain in graph["chains"] if set(chain) <= selected_nodes.keys()
             ]
-        if "unresolved" in graph:
+        for field in ("unresolved", "not_traversed"):
+            if field not in graph:
+                continue
             kept = []
-            for edge in graph["unresolved"]:
+            for edge in graph[field]:
                 if add_edge(edge, []):
                     kept.append(edge)
                 else:
                     _reason(result, "graph_budget")
-            graph["unresolved"] = kept
+            graph[field] = kept
+        for key, before in before_counts.items():
+            if len(graph[key]) != before:
+                _clipped_field(result, parents, graph, key, before, "graph_budget")
     return result
+
+
+def _analysis_sections(result, parents=(), name=None):
+    """Visit response partitions, never the internals of an indivisible source fact."""
+    yield result, parents, name
+    protected = {
+        "symbol",
+        "selector",
+        "target",
+        "source",
+        "coverage",
+        "index_coverage",
+        "continuation",
+        "clipped_fields",
+    }
+    for key, child in list(result.items()):
+        if isinstance(child, dict) and key not in protected:
+            yield from _analysis_sections(child, (*parents, result), key)
+
+
+def _prune_clipped_graph(result, parents, graph):
+    """Remove orphan endpoints and path witnesses only from the graph that changed."""
+    used = {graph.get("root", graph.get("path")), graph.get("target")}
+    for edge in graph["edges"]:
+        used.update(_endpoints(edge))
+    before = graph["nodes"]
+    graph["nodes"] = [node for node in before if _node_id(node) in used]
+    removed = [node for node in before if _node_id(node) not in used]
+    if removed:
+        _clipped_field(result, parents, graph, "nodes", len(before))
+    ids = {_node_id(node) for node in graph["nodes"]}
+    pairs = {_endpoints(edge) for edge in graph["edges"]}
+    for field in ("paths", "chains"):
+        if field not in graph:
+            continue
+        old = graph[field]
+        graph[field] = [
+            path
+            for path in old
+            if set(path) <= ids
+            and (
+                field == "chains"
+                or all(pair in pairs for pair in zip(path, path[1:], strict=False))
+            )
+        ]
+        dropped = [path for path in old if path not in graph[field]]
+        if dropped:
+            removed.extend(dropped)
+            _clipped_field(result, parents, graph, field, len(old))
+            if field == "paths":
+                graph["paths_truncated"] = True
+                if graph.get("path_found") and not graph["paths"]:
+                    graph["path_evidence_omitted"] = True
+    return removed
+
+
+def _clip_continuation(result, parents, section, name, field, max_chars, removed):
+    """Suggest a narrower public request; symbol offsets never resume graph edges."""
+    result.setdefault("next_request_reuses", ["project_id", "snapshot"])
+    contexts = (section, *reversed(parents), result)
+    selector = None
+    for context in contexts:
+        saved = context.get("continuation", {}).get("selector")
+        symbol = context.get("symbol")
+        if saved:
+            selector = dict(saved)
+            break
+        if isinstance(symbol, dict) and symbol.get("symbol_id"):
+            selector = {"symbol_id": symbol["symbol_id"]}
+            break
+        root_node = next(
+            (node for node in context.get("nodes", []) if _node_id(node) == context.get("root")),
+            None,
+        )
+        if root_node is not None and root_node.get("symbol_id") and not root_node.get("id"):
+            selector = {"symbol_id": root_node["symbol_id"]}
+            break
+        if context.get("path"):
+            selector = {"path": context["path"]}
+            break
+    if field == "ownership" and removed and removed.get("target_symbol_id"):
+        selector = {"symbol_id": removed["target_symbol_id"]}
+    continuation = section.setdefault("continuation", {})
+    if field in {"symbols", "candidates"}:
+        section["next_offset_scope"] = "symbols" if field == "symbols" else "candidates"
+        if selector is not None and section.get("next_offset") is not None:
+            continuation[field] = {
+                "scope": section["next_offset_scope"],
+                "next_request": {"selector": selector, "offset": section["next_offset"]},
+            }
+        return
+    request = {"selector": selector, "max_chars": min(50_000, max_chars * 2)}
+    partition = name if name in {"ownership", "calls", "dependencies"} else field
+    if partition == "ownership" and not isinstance(section.get("nodes"), list):
+        continuation = continuation.setdefault("ownership", {})
+    if partition in {"ownership", "calls", "dependencies"}:
+        request["include"] = [partition]
+        if selector is not None and set(selector) == {"path"}:
+            request["limit"] = 1
+        for key in ("direction", "depth"):
+            if key in section:
+                request["max_depth" if key == "depth" else key] = section[key]
+    if selector is None:
+        # A bare graph can lack the original source selector. Never invent one
+        # from request-local value IDs or send an undeclared compatibility mode.
+        continuation["action"] = "narrow_source_selector"
+        return
+    if section.get("mode") in {"call_path", "data_path"}:
+        target = next(
+            (node for node in section.get("nodes", []) if _node_id(node) == section.get("target")),
+            None,
+        )
+        if target is not None and target.get("symbol_id"):
+            selected_target = {"symbol_id": target["symbol_id"]}
+            if target.get("id") and target.get("line") and target.get("column"):
+                selected_target["value"] = (
+                    {"kind": "parameter", "name": target["name"]}
+                    if target.get("kind") == "parameter"
+                    else {
+                        "kind": "return" if target.get("kind") == "return" else "occurrence",
+                        "line": target["line"],
+                        "column": target["column"],
+                    }
+                )
+            request["target"] = selected_target
+            coverage = section.get("coverage")
+            request["max_depth"] = (
+                coverage.get("cross_call_depth", 5) if isinstance(coverage, dict) else 5
+            )
+        else:
+            continuation["action"] = "narrow_source_selector"
+            return
+    continuation["next_request"] = request
 
 
 def bound_analysis_result(result: dict, max_chars: int) -> dict:
@@ -526,80 +708,97 @@ def bound_analysis_result(result: dict, max_chars: int) -> dict:
     result.setdefault("truncated_reason", [])
     result.setdefault("analysis_status", "ready")
     result.setdefault("truncated", False)
-    while len(json.dumps(result, ensure_ascii=False)) > max_chars:
-        lists = []
+    minimums = {
+        "symbols": 1,
+        "candidates": 1,
+        "ownership": 1,
+        "edges": 1,
+        "paths": 1,
+        "chains": 1,
+        "unresolved": 0,
+        "not_traversed": 0,
+        "diagnostics": 0,
+    }
+    sizes = {}
 
-        def collect(value, lists=lists):
-            if not isinstance(value, dict):
-                return
-            for key, item in value.items():
+    def size(fact):
+        identity = id(fact)
+        if identity not in sizes:
+            sizes[identity] = len(json.dumps(fact, ensure_ascii=False))
+        return sizes[identity]
+
+    while (encoded_size := len(json.dumps(result, ensure_ascii=False))) > max_chars:
+        candidates = []
+        for section, parents, name in _analysis_sections(result):
+            for key, minimum in minimums.items():
+                values = section.get(key)
+                if isinstance(values, list) and len(values) > minimum:
+                    candidates.append((section, parents, name, key, values, minimum))
+        if not candidates:
+            # Prefer one fact per requested graph, but the hard minimum is one
+            # selectable symbol/candidate. Empty graph evidence remains explicit.
+            for section, parents, name in _analysis_sections(result):
+                for key in ("ownership", "edges", "paths", "chains"):
+                    values = section.get(key)
+                    if isinstance(values, list) and values:
+                        candidates.append((section, parents, name, key, values, 0))
+        if not candidates:
+            for section, parents, name in _analysis_sections(result):
+                nodes = section.get("nodes")
                 if (
-                    isinstance(item, list)
-                    and item
-                    and (key not in {"symbols", "candidates"} or len(item) > 1)
-                    and key
-                    not in {
-                        "nodes",
-                        "owners",
-                        "truncated_reason",
-                        "frontier_symbol_ids",
-                    }
+                    isinstance(nodes, list)
+                    and nodes
+                    and not section.get("edges")
+                    and not section.get("paths")
+                    and not section.get("chains")
+                    and all("id" not in node for node in nodes)
                 ):
-                    lists.append((value, key, item))
-                elif isinstance(item, dict):
-                    collect(item)
-
-        collect(result)
-        if not lists:
+                    # A selected symbol remains intact in its own fact. Its
+                    # duplicate metadata in a now-empty graph may be omitted as
+                    # a whole field, with the original/returned counts retained.
+                    candidates.append((section, parents, name, "nodes", nodes, 0))
+        if not candidates:
             raise AnalysisResponseBudgetExceeded
-        container, key, values = max(
-            lists, key=lambda item: len(json.dumps(item[2], ensure_ascii=False))
+        section, parents, name, key, values, minimum = max(
+            candidates, key=lambda item: sum(size(fact) + 2 for fact in item[4][item[5] :])
         )
-        # Drop enough complete facts in one pass. Re-encoding a large graph once
-        # for every discarded edge would turn clipping into quadratic work.
-        excess = len(json.dumps(result, ensure_ascii=False)) - max_chars + 96
-        removed = 0
-        # A page must retain one selectable fact. Other sections and their
-        # endpoints may be the real source of excess; exhausting the symbol
-        # page before pruning those sections misdiagnoses a valid query.
-        minimum = 1 if key in {"symbols", "candidates"} else 0
-        while len(values) > minimum and removed < excess:
-            removed += len(json.dumps(values.pop(), ensure_ascii=False)) + 2
-        _reason(result, "max_chars")
+        excess, removed_size, before = encoded_size - max_chars + 96, 0, len(values)
+        removed = None
+        while len(values) > minimum and removed_size < excess:
+            removed = values.pop()
+            removed_size += size(removed) + 2
+            if key in {"edges", "unresolved"} and isinstance(section.get("nodes"), list):
+                removed_size += sum(
+                    size(fact) + 2 for fact in _prune_clipped_graph(result, parents, section)
+                )
+        _clipped_field(result, parents, section, key, before)
+        if key == "paths":
+            section["paths_truncated"] = True
+            if section.get("path_found") and not values:
+                section["path_evidence_omitted"] = True
         if key in {"symbols", "candidates"}:
-            container["has_more"] = container["offset"] + len(values) < container["total"]
-            container["next_offset"] = (
-                container["offset"] + len(values)
-                if container["has_more"] and not container.get("value_selection_candidates")
+            section["has_more"] = section["offset"] + len(values) < section["total"]
+            section["next_offset"] = (
+                section["offset"] + len(values)
+                if section["has_more"] and not section.get("value_selection_candidates")
                 else None
             )
-        if isinstance(result.get("symbols"), list) and isinstance(result.get("ownership"), list):
-            visible = {s["symbol_id"] for s in result["symbols"]}
-            result["ownership"] = [
-                e for e in result["ownership"] if e["target_symbol_id"] in visible
+        if key == "symbols" and isinstance(section.get("ownership"), list):
+            visible = {symbol["symbol_id"] for symbol in values}
+            ownership = section["ownership"]
+            section["ownership"] = [
+                edge for edge in ownership if edge["target_symbol_id"] in visible
             ]
-            owner_ids = {e["source_symbol_id"] for e in result["ownership"]} - visible
-            result["owners"] = [s for s in result.get("owners", []) if s["symbol_id"] in owner_ids]
-        for graph in _graphs(result):
-            used = {graph.get("root", graph.get("path")), graph.get("target")}
-            for edge in graph["edges"]:
-                used.update(_endpoints(edge))
-            graph["nodes"] = [n for n in graph["nodes"] if _node_id(n) in used]
-            node_ids = {_node_id(n) for n in graph["nodes"]}
-            pairs = {_endpoints(e) for e in graph["edges"]}
-            if "paths" in graph:
-                previous_count = len(graph["paths"])
-                graph["paths"] = [
-                    p
-                    for p in graph["paths"]
-                    if set(p) <= node_ids
-                    and all(pair in pairs for pair in zip(p, p[1:], strict=False))
-                ]
-                if len(graph["paths"]) != previous_count:
-                    graph["paths_truncated"] = True
-            if "chains" in graph:
-                graph["chains"] = [c for c in graph["chains"] if set(c) <= node_ids]
-            graph["truncated"] = True
+            if len(ownership) != len(section["ownership"]):
+                _clipped_field(result, parents, section, "ownership", len(ownership))
+        if isinstance(section.get("ownership"), list) and isinstance(section.get("owners"), list):
+            visible = {symbol["symbol_id"] for symbol in section.get("symbols", [])}
+            owners = {edge["source_symbol_id"] for edge in section["ownership"]} - visible
+            previous_owners = section["owners"]
+            section["owners"] = [s for s in previous_owners if s["symbol_id"] in owners]
+            if len(previous_owners) != len(section["owners"]):
+                _clipped_field(result, parents, section, "owners", len(previous_owners))
+        _clip_continuation(result, parents, section, name, key, max_chars, removed)
     return result
 
 
@@ -624,11 +823,11 @@ def _analyze_structure(
 ):
     """Compute one bounded view inside the caller's single validated read context."""
     if not isinstance(mode, str) or mode not in STRUCTURE_MODES:
-        raise ValueError("unsupported structure analysis mode")
+        raise AnalysisRequestError("unsupported structure analysis mode")
     if direction not in {"outgoing", "incoming", "both"}:
-        raise ValueError("invalid analysis direction")
+        raise AnalysisRequestError("invalid analysis direction")
     if type(include_type_only) is not bool:
-        raise ValueError("include_type_only must be a boolean")
+        raise AnalysisRequestError("include_type_only must be a boolean")
     for name, value, low, high in (
         ("max_depth", max_depth, 1, 5),
         ("max_nodes", max_nodes, 1, 200),
@@ -639,19 +838,19 @@ def _analyze_structure(
         ("offset", offset, 0, 1_000_000),
     ):
         if type(value) is not int or not low <= value <= high:
-            raise ValueError(f"invalid {name} bounds")
+            raise AnalysisRequestError(f"invalid {name} bounds")
     selected = _selector(selector)
     if target is not None and mode != "call_path":
-        raise ValueError("target is only supported by call_path")
+        raise AnalysisRequestError("target is only supported by call_path")
     included = ["ownership"] if include is None else include
     if (
         not isinstance(included, list)
         or any(item not in StructureInclude.__args__ for item in included)
         or len(included) != len(set(included))
     ):
-        raise ValueError("include must contain unique ownership, calls or dependencies values")
-    if include is not None and mode not in {"file_context", "symbol_context"}:
-        raise ValueError("include is only supported by context views")
+        raise AnalysisRequestError(
+            "include must contain unique ownership, calls or dependencies values"
+        )
     deadline = time.monotonic() + max_ms / 1000
     result = {
         "mode": mode,
@@ -679,7 +878,7 @@ def _analyze_structure(
         )
     elif mode == "file_dependencies":
         if selected.path is None or selected.symbol_id is not None or selected.qualname is not None:
-            raise ValueError("file_dependencies requires exactly a path selector")
+            raise AnalysisRequestError("file_dependencies requires exactly a path selector")
         result.update(
             file_dependencies(
                 db,
@@ -700,9 +899,11 @@ def _analyze_structure(
         if ambiguity is not None:
             result.update(ambiguity)
             return bound_analysis_result(result, max_chars)
+        if mode == "class_relations" and root["kind"] not in CLASS_KINDS:
+            raise AnalysisRequestError("class relations require a class or interface selector")
         if mode == "call_path":
             if target is None:
-                raise ValueError("call_path requires a target selector")
+                raise AnalysisRequestError("call_path requires a target selector")
             end, ambiguity = select_symbol(
                 db, project_id, revision, target, offset=offset, limit=limit
             )
@@ -757,6 +958,24 @@ def _analyze_structure(
                     max_edges=max_edges,
                 )
             )
+    if include and mode not in {"file_context", "symbol_context"}:
+        attach_context(
+            result,
+            structure_evidence(
+                db,
+                project_id,
+                revision,
+                selector=selected.model_dump(exclude_none=True),
+                include=include,
+                direction=direction,
+                max_depth=max_depth,
+                max_nodes=max_nodes,
+                max_edges=max_edges,
+                max_chars=max_chars,
+                deadline=deadline,
+                include_type_only=include_type_only,
+            ),
+        )
     graph_truncated = result.get("truncated")
     if graph_truncated and not result["truncated_reason"]:
         _reason(result, "graph_budget")
@@ -767,6 +986,8 @@ def _analyze_structure(
             if omitted:
                 result["omitted_sections"] = omitted
     for graph in _graphs(result):
+        if graph.get("execution_context_partial"):
+            result["analysis_status"] = "partial"
         if graph.get("truncated"):
             for reason in graph.get("truncated_reason") or ["graph_budget"]:
                 _reason(result, reason)
