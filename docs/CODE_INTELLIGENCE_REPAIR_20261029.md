@@ -63,4 +63,37 @@ next_offset_scope 说明符号或候选分页范围。分区的 continuation 提
 本轮独立冻结源码的 24 个相关测试文件共 931 项通过；两个本机 demo 通过。
 真实项目的 21 个源码请求已在新索引上重放，原来 C15/C18 的 include 组合错误不再出现，
 五处真实调用引用与源码一致。数据流受限处仍明确 partial/unknown，未将其改成虚假的完整路径。
-这些结果属于源码与本机协议证据，网页版结果另行记录。
+这些结果属于源码与本机协议证据。
+
+## 安装与网页验收记录
+
+修复源码提交为 `809a3abab04f701003d899bbfa6cc972a2d96185`。已覆盖安装
+`0.5.0b7 / build 36`，安装包与安装目录的文件树一致，105 个 Python 模块与提交源码
+一致；严格签名检查、包迁移检查和安装后的基础运行通过。既有项目、连接配置和只读
+授权范围保留，未开启写入或开发能力。旧 build 35 应用副本已移入废纸篓，可恢复。
+
+安装版使用新索引重放 21 项原始只读源码请求及 9 项对照请求，均无工具错误；
+当前项目任务状态另在网页查询。原项目三个对照源码文件在验收前后哈希一致。
+
+通过 Chrome 原生界面刷新 ChatGPT 的既有 CoLink 工具定义后，建立新会话执行两轮
+只读验收。网页会话共报告 14 次 CoLink 调用、其中 6 次 analyze_code，0 次工具错误，
+未执行写入、终端或项目代码。已观察页面完成并保存会话文本；这些文本不是原始协议
+包导出，原失败请求的参数与主要字段另由上述安装版 SDK 重放交叉核对。
+
+| 网页检查 | 观察结果 |
+| --- | --- |
+| chat 到 run_agent_call，附 calls/source | call_path、partial，直接路径成立；不再报 INVALID_STRUCTURE_QUERY |
+| request 到 chat 返回值，附 source/calls | data_path、partial，absence_proven=false；异步及高阶调用仍报告未知 |
+| 文件结构分析，max_chars=6000 | file_context、partial；裁剪计数、分区原因、symbols 续查范围保留 |
+| run_agent_call 引用 | 5 处静态 CALL，与源码 86、95、104、113、122 行一致；定义是额外文本命中 |
+| chat 到 get_agent | call_path、partial，不把延迟 lambda 自动扩展为已执行路径 |
+| 单值来源及影响 | 未传 mode，以 incoming/outgoing 分别路由到 data_origin/data_impact |
+| ChatRequest 继承问答 | 通过源码确认 ApiModel 父类及继承配置；不冒充高级关系图入口验收 |
+| 当前项目任务摘要 | recent_task=null，正确报告无保留任务起点，不新建任务或以 Git Diff 替代 |
+
+诊断汇总中的 21 包含 1 项 resource_budget 标记；裁剪计数中的 diagnostics.before=20
+指裁剪前的源码分析诊断数量，两者统计口径不同。返回的预算和覆盖提示应保留，
+不能把 partial 当作工具调用失败，也不能把没有静态路径当作运行时不可达。
+
+本轮结果支持继续保留自动入口与隐藏 mode；没有恢复该公开参数的必要。此次验收
+不构成自动路由与显式模式的统计成功率对照，也不宣称复杂异步值流已完整支持。
