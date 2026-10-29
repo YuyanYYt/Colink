@@ -122,14 +122,15 @@ SDK 模块缓存。该目录只在开发构建时使用，已安装应用运行�
 用 `--client` 指定已核验的官方客户端，可用 `--node`/`--sharp` 显式指定构建依赖。
 默认 ChatGPT 按钮打开通用插件页，不绑定任何维护者账户。
 
-发行包构建使用 `macos/package.py`，从同一 `uv.lock` 安装后的环境提取运行依赖，
+发行包构建使用 `macos/package.py`，从同一 `uv.lock` 安装后的环境提取运行依赖。
+公开版必须显式选择 `--source-mode live`；省略时保留旧 Mirror 兼容模式。
 复制可重定位的 CPython、源码、样例和官方客户端许可文件；runtime.json 仅含 bundle
 内部相对路径。新输出目录必须不存在，不覆盖任何已安装应用。
 
 ```sh
 uv sync --locked
 npm ci --prefix macos
-uv run python macos/package.py --output-dir .artifacts/releases/colink-0.4.1-new-build
+uv run python macos/package.py --source-mode live --output-dir .artifacts/releases/colink-0.5.0b8-build39
 ```
 
 打包会生成 DMG、ZIP、SHA256SUMS 和报告。校验搬移后的解释器、CLI/MCP 导入与
