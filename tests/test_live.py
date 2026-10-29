@@ -182,6 +182,10 @@ def test_live_read_search_lines_match_precise_edit_lines(backend):
     assert edited.content == original.replace("TARGET = 1", "TARGET = 2")
 
 
+@pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="write coordinator requires supported Darwin file attributes",
+)
 def test_prepared_write_blocks_only_its_project_publication(backend, tmp_path):
     from code_context.recovery_store import RecoveryStore
     from code_context.write_coordinator import WriteCoordinator
