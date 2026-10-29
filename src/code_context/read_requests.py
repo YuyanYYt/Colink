@@ -11,6 +11,23 @@ MAX_READ_CHARS = 50_000
 MAX_REQUESTED_READ_CHARS = (1 << 53) - 1
 
 
+class ReadRangeError(ValueError):
+    """An invalid explicit line range, distinct from field-type errors."""
+
+
+def read_validation_hint(error):
+    """Return a fixed explanation for our own range validator, never input data."""
+    if any(
+        isinstance(item.get("ctx", {}).get("error"), ReadRangeError)
+        for item in error.errors(include_input=False)
+    ):
+        return (
+            "INVALID_READ_REQUEST: choose a forward range of at most 1000 lines; "
+            "continue using the returned line and character offsets"
+        )
+    return None
+
+
 class ReadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, revalidate_instances="always")
 
@@ -26,7 +43,7 @@ class FileRange(ReadModel):
         validate_path(self.path)
         end = self.end_line if self.end_line is not None else self.start_line + 199
         if end < self.start_line or end - self.start_line >= 1000:
-            raise ValueError("read a forward range of at most 1000 lines")
+            raise ReadRangeError("read a forward range of at most 1000 lines")
         return self
 
 
@@ -139,7 +156,9 @@ READ_REQUEST_ADAPTER = TypeAdapter(ReadRequest)
 def validate_read_request(request):
     try:
         return READ_REQUEST_ADAPTER.validate_python(request, strict=True)
-    except (ValidationError, ValueError, TypeError):
+    except (ValidationError, ValueError, TypeError) as error:
+        if isinstance(error, ValidationError) and (hint := read_validation_hint(error)):
+            raise SourceError(hint) from None
         raise SourceError(
             "INVALID_READ_REQUEST: use a strict file, symbol, text/symbol search or batch request"
         ) from None

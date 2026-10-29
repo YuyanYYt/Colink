@@ -41,6 +41,7 @@ from code_context.policy import (
     MAX_TOTAL_BYTES,
 )
 from code_context.query_backend import MirrorQueryBackend, QueryBackend
+from code_context.read_requests import read_validation_hint
 from code_context.read_tools import register_read_tool
 from code_context.storage import MirrorError, MirrorStore, RevisionConflict
 from code_context.write_tools import WRITE_TOOL_NAMES, register_write_tools
@@ -87,7 +88,9 @@ class CodeMCPServer(MCPServer):
                 raise ToolError(f"{code}: unknown fields are not accepted")
             try:
                 tool.fn_metadata.arg_model.model_validate(arguments, strict=True)
-            except ValidationError:
+            except ValidationError as error:
+                if name == "read_code" and (hint := read_validation_hint(error)):
+                    raise ToolError(hint) from None
                 raise ToolError(f"{code}: use the declared field types") from None
         energy = getattr(self, "_energy_idle", None)
         if energy is None or name == "connection_status":

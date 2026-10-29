@@ -15,6 +15,28 @@ from code_context.server import build_mcp
 from code_context.source_access import SourceAccess, SourceError
 
 
+@pytest.mark.parametrize(
+    "input_request",
+    [
+        {"mode": "file", "path": "small.py", "end_line": 1001},
+        {"mode": "file", "path": "small.py", "start_line": 3, "end_line": 2},
+        {"mode": "batch", "items": [{"path": "small.py", "end_line": 1001}]},
+    ],
+)
+def test_range_errors_explain_the_constraint_instead_of_claiming_wrong_types(reader, input_request):
+    _, backend = reader
+    mcp = build_mcp(backend)
+    schema = mcp._tool_manager.get_tool("read_code").parameters
+    arguments = {"project_id": "sample", "request": input_request, "max_chars": 100000}
+    Draft202012Validator(schema).validate(arguments)
+    with pytest.raises(ToolError, match="forward range of at most 1000 lines") as failure:
+        asyncio.run(mcp.call_tool("read_code", arguments))
+    assert "small.py" not in str(failure.value) and "field types" not in str(failure.value)
+    with pytest.raises(SourceError, match="forward range of at most 1000 lines"):
+        execute_read_code(backend, **arguments)
+    assert "at most 1000" in mcp._tool_manager.get_tool("read_code").description
+
+
 @pytest.fixture
 def reader(tmp_path):
     root = tmp_path / "source"
