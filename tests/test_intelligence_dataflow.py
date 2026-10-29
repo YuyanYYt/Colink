@@ -475,7 +475,7 @@ def test_source_mismatch_and_non_python_are_explicit_partial():
     assert result["conclusion"]["status"] == "analysis_unavailable"
     project.symbols[project.symbol("f")]["language"] = "typescript"
     result = project.analyze("f", name="x")
-    assert "PYTHON_ONLY" in codes(result)
+    assert "DATAFLOW_LANGUAGE_UNSUPPORTED" in codes(result)
     assert result["analysis_status"] == "selection_not_found"  # Compatibility status.
     assert result["coverage"]["requested_language"] == "typescript"
     assert result["coverage"]["availability"] == "unsupported_language"

@@ -1,4 +1,14 @@
-# 统一源码读取与分析入口 · build 33
+# 统一源码读取与分析入口
+
+2026-10-29 build 36 修复网页实测的 include 组合、调用阶段和裁剪问题；继续隐藏 mode，
+单值方向复用 incoming/outgoing/both，路径与值流可附带 context 结构证据。
+具体契约与验收边界见 [修复说明](CODE_INTELLIGENCE_REPAIR_20261029.md)。
+
+2026-10-29 开发源码：常用 `analyze_code` 按精确选择器路由，不再要求选择 mode；
+原有显式 mode 继续在服务端严格校验并兼容。结构分析新增有界 TypeScript/JavaScript
+前端，值传播仍限 Python/Java。当前改动未更新正在使用的安装版，见
+[本轮实现与验证边界](CODE_INTELLIGENCE_20261029.md)。下文 build 32/33 的入口删除
+记录保留其历史含义。
 
 当前 Live 主要使用 `read_code` 与 `analyze_code`。前者按需读取已保存正文，后者
 查询结构、数据传播及任务 Diff，非 diff 分析可附带目标源码。Live 只读工具为
@@ -89,6 +99,23 @@ file 范围默认 200 行、最多 1000 行；symbol 的 max_lines 默认 200、
 
 ## analyze_code：关系与可选正文
 
+常用查询只提供选择器：文件得到文件上下文，精确符号得到符号上下文；一个具体值
+按 direction 选择来源（incoming）、影响（outgoing）或联合上下文（both，默认）；
+两个具体值得到值路径，两个精确符号得到有向调用路径。仅选择
+文件或方法不会启动值流，重复定义仍须消歧。
+
+```json
+{"project_id":"已授权项目","selector":{"path":"service.py","qualname":"Service.run"},"include":["source"]}
+```
+
+```json
+{"project_id":"已授权项目","selector":{"path":"service.py","qualname":"Service.run","value":{"kind":"parameter","name":"value"}}}
+```
+
+旧 mode 从默认发现 schema 隐藏；需要明确方向/关系的既有调用及任务 Diff 仍可使用
+下面的兼容写法。这些不属于默认公开 schema，严格客户端不应发送未声明字段。
+非法 mode 与未知字段仍被拒绝，不静默改成另一个查询。
+
 双向调用图与选定方法源码：
 
 ```json
@@ -102,7 +129,8 @@ file 范围默认 200 行、最多 1000 行；symbol 的 max_lines 默认 200、
 ```
 
 file_context/symbol_context 的 include 可选择 ownership/calls/dependencies；所有
-非 diff 模式还可追加 source。combined 返回类型明确的结构与数据流关系。
+非 diff 模式还可追加 source。其他路径/值流查询请求结构 include 时以 context 附带，
+combined 保留原有 structure/dataflow 结构。各部分共享来源、预算与期限。
 source 字段是选定文件或精确符号的有界读取结果，仅附带当前 selector，不自动
 收集全图节点或 target 的正文。重复定义只返回候选，先消歧再读实际定义。
 
@@ -111,6 +139,11 @@ source 字段是选定文件或精确符号的有界读取结果，仅附带当�
 的部分状态与续页信息；需要更多正文再定向调用 read_code。图、正文或索引的
 部分结果不能当作完整证据。索引等待和必要安全校验不保证在计算预算内完成，
 max_ms 不能解释为整条请求的严格墙钟期限。M1/M2 边界分别见对应文档。
+
+合法请求的结果大于预算时，先裁剪完整事实并保留可继续的符号页；最低限度结果
+仍装不下时返回 `ANALYSIS_RESPONSE_BUDGET_EXCEEDED`，不会将容量不足误报为
+`INVALID_STRUCTURE_QUERY`。`index_coverage.selected_structure` 只说明所选文件
+的结构提取状态；全局 `index_partial` 对引用、调用路径的限制仍然有效。
 
 查看最近仍保留的写入任务相对于起点的修改：
 

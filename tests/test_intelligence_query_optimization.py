@@ -202,7 +202,7 @@ def legacy_file_dependencies(
         "edges": list(selected.values()),
         "chains": chains,
         "truncated": truncated,
-        "coverage": "resolved static edges in authorized Python/Java source only",
+        "coverage": "resolved static edges in authorized indexed source only",
     }
 
 

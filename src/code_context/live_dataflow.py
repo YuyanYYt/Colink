@@ -9,6 +9,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from code_context.analysis_context import attach_context, structure_evidence
+from code_context.analysis_response import AnalysisRequestError
 from code_context.dataflow_diagnostics import annotate_dataflow_result
 from code_context.intelligence_analysis import (
     AnalysisBudgetExceeded,
@@ -137,7 +139,7 @@ def _resolved(db, project_id, revision, selector, *, offset, limit):
     try:
         selected = FlowSelector.model_validate(selector, strict=True)
     except ValidationError:
-        raise ValueError(
+        raise AnalysisRequestError(
             "data-flow selection requires an exact method and value location"
         ) from None
     symbol, ambiguity = select_symbol(
@@ -230,7 +232,7 @@ def analyze_live_dataflow(
 ):
     """One static slice with strict selection, shared deadline and output budgets."""
     if mode not in DATAFLOW_MODES:
-        raise ValueError("unsupported data-flow mode")
+        raise AnalysisRequestError("unsupported data-flow mode")
     for name, value, low, high in (
         ("max_depth", max_depth, 0, 5),
         ("max_nodes", max_nodes, 1, 200),
@@ -241,21 +243,21 @@ def analyze_live_dataflow(
         ("offset", offset, 0, 1_000_000),
     ):
         if type(value) is not int or not low <= value <= high:
-            raise ValueError(f"invalid {name} bounds")
+            raise AnalysisRequestError(f"invalid {name} bounds")
     if direction not in {"both", "incoming", "outgoing"}:
-        raise ValueError("invalid analysis direction")
-    if include is not None and mode != "combined":
-        raise ValueError("include is only supported by combined flow analysis")
+        raise AnalysisRequestError("invalid analysis direction")
     if include is not None and (
         not isinstance(include, list)
         or any(item not in {"ownership", "calls", "dependencies"} for item in include)
         or len(include) != len(set(include))
     ):
-        raise ValueError("include must contain unique ownership, calls or dependencies values")
+        raise AnalysisRequestError(
+            "include must contain unique ownership, calls or dependencies values"
+        )
     if target is not None and mode != "data_path":
-        raise ValueError("target is only supported by data_path")
+        raise AnalysisRequestError("target is only supported by data_path")
     if mode == "data_path" and target is None:
-        raise ValueError("data_path requires a target value selector")
+        raise AnalysisRequestError("data_path requires a target value selector")
     try:
         symbol, ambiguity = _resolved(
             facts, project_id, revision, selector, offset=offset, limit=limit
@@ -269,9 +271,12 @@ def analyze_live_dataflow(
                 facts, project_id, revision, target, offset=offset, limit=limit
             )
             if ambiguity is not None:
-                return annotate_dataflow_result(
-                    {"mode": mode, **ambiguity, "ambiguous_selector": "target"}
-                )
+                result = {"mode": mode, **ambiguity, "selection_scope": "target"}
+                if ambiguity["analysis_status"] == "ambiguous":
+                    result["ambiguous_selector"] = "target"
+                else:
+                    result["analysis_status"] = "target_not_found"
+                return annotate_dataflow_result(result)
             resolved_target = {"symbol_id": end["symbol_id"], "value": target["value"]}
     except AnalysisBudgetExceeded:
         return annotate_dataflow_result(
@@ -320,31 +325,21 @@ def analyze_live_dataflow(
         flow["truncated"] = True
         flow["truncated_reason"].append("relation_facts_budget")
     annotate_dataflow_result(flow)
-    if mode == "combined":
-        from code_context.intelligence_analysis import analyze_structure
-
-        structure = (
-            {
-                "analysis_status": "not_computed",
-                "truncated": True,
-                "truncated_reason": ["max_chars"],
-            }
-            if max_chars < 1500
-            else analyze_structure(
-                facts,
-                project_id,
-                revision,
-                mode="symbol_context",
-                selector={"symbol_id": symbol["symbol_id"]},
-                include=["ownership", "calls", "dependencies"] if include is None else include,
-                direction=direction,
-                max_depth=max(1, max_depth),
-                max_nodes=max_nodes,
-                max_edges=max_edges,
-                max_chars=max_chars,
-                max_ms=max(100, remaining_ms),
-            )
+    if mode == "combined" or include:
+        structure = structure_evidence(
+            facts,
+            project_id,
+            revision,
+            selector={"symbol_id": symbol["symbol_id"]},
+            include=["ownership", "calls", "dependencies"] if include is None else include,
+            direction=direction,
+            max_depth=max_depth,
+            max_nodes=max_nodes,
+            max_edges=max_edges,
+            max_chars=max_chars,
+            deadline=facts.deadline,
         )
+    if mode == "combined":
         flow = {
             "mode": mode,
             "analysis_status": "ready"
@@ -358,6 +353,8 @@ def analyze_live_dataflow(
             ),
             "coverage": "static Python/Java structure and bounded may-flow; not a runtime trace",
         }
+    elif include:
+        attach_context(flow, structure)
     flow["continuation"] = {"selector": selector, "value_ids_are_request_local": True}
     if max_chars < 1500:
         return bound_analysis_result(_compact_flow_output(flow), max_chars)

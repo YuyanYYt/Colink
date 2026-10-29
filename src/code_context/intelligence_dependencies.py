@@ -52,6 +52,8 @@ _PYTHON_IMPORTS = {
     "starlette": ("starlette",),
     "tree-sitter": ("tree_sitter",),
     "tree-sitter-java": ("tree_sitter_java",),
+    "tree-sitter-javascript": ("tree_sitter_javascript",),
+    "tree-sitter-typescript": ("tree_sitter_typescript",),
     "uvicorn": ("uvicorn",),
     "watchfiles": ("watchfiles",),
 }

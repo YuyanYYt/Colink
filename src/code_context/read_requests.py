@@ -7,6 +7,26 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError,
 from code_context.policy import validate_path
 from code_context.source_access import SourceError
 
+MAX_READ_CHARS = 50_000
+MAX_REQUESTED_READ_CHARS = (1 << 53) - 1
+
+
+class ReadRangeError(ValueError):
+    """An invalid explicit line range, distinct from field-type errors."""
+
+
+def read_validation_hint(error):
+    """Return a fixed explanation for our own range validator, never input data."""
+    if any(
+        isinstance(item.get("ctx", {}).get("error"), ReadRangeError)
+        for item in error.errors(include_input=False)
+    ):
+        return (
+            "INVALID_READ_REQUEST: choose a forward range of at most 1000 lines; "
+            "continue using the returned line and character offsets"
+        )
+    return None
+
 
 class ReadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, revalidate_instances="always")
@@ -23,7 +43,7 @@ class FileRange(ReadModel):
         validate_path(self.path)
         end = self.end_line if self.end_line is not None else self.start_line + 199
         if end < self.start_line or end - self.start_line >= 1000:
-            raise ValueError("read a forward range of at most 1000 lines")
+            raise ReadRangeError("read a forward range of at most 1000 lines")
         return self
 
 
@@ -81,7 +101,7 @@ class SymbolSearchRequest(ReadModel):
     exact: bool = False
     symbol_kind: str | None = Field(default=None, min_length=1, max_length=100)
     path_prefix: str | None = Field(default=None, min_length=1, max_length=1024)
-    language: Literal["python", "java"] | None = None
+    language: Literal["python", "java", "typescript", "javascript"] | None = None
     limit: int = Field(default=20, ge=1, le=100)
     context_lines: int = Field(default=0, ge=0, le=3)
     cursor: str | None = Field(default=None, max_length=200)
@@ -136,14 +156,32 @@ READ_REQUEST_ADAPTER = TypeAdapter(ReadRequest)
 def validate_read_request(request):
     try:
         return READ_REQUEST_ADAPTER.validate_python(request, strict=True)
-    except (ValidationError, ValueError, TypeError):
+    except (ValidationError, ValueError, TypeError) as error:
+        if isinstance(error, ValidationError) and (hint := read_validation_hint(error)):
+            raise SourceError(hint) from None
         raise SourceError(
             "INVALID_READ_REQUEST: use a strict file, symbol, text/symbol search or batch request"
         ) from None
 
 
 def read_budgets(max_chars, max_ms):
-    if type(max_chars) is not int or not 1000 <= max_chars <= 50_000:
+    if type(max_chars) is not int or not 1000 <= max_chars <= MAX_READ_CHARS:
         raise SourceError("INVALID_READ_BUDGET: max_chars must be between 1000 and 50000")
     if type(max_ms) is not int or not 100 <= max_ms <= 10_000:
         raise SourceError("INVALID_READ_BUDGET: max_ms must be between 100 and 10000")
+
+
+def normalize_read_budgets(max_chars, max_ms):
+    """Accept an oversized request without expanding the actual response limit."""
+    if type(max_chars) is not int or not 1000 <= max_chars <= MAX_REQUESTED_READ_CHARS:
+        raise SourceError(
+            "INVALID_READ_BUDGET: max_chars must be a JSON-safe integer of at least 1000"
+        )
+    effective = min(max_chars, MAX_READ_CHARS)
+    read_budgets(effective, max_ms)
+    adjustment = (
+        {"requested_max_chars": max_chars, "effective_max_chars": effective, "adjusted": True}
+        if effective != max_chars
+        else None
+    )
+    return effective, adjustment

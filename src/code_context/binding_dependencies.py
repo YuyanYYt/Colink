@@ -84,6 +84,7 @@ class BindingReads:
         self.digests = {}
         for name in (
             "files",
+            "languages",
             "modules",
             "symbols",
             "named",
@@ -115,6 +116,7 @@ class BindingReads:
         else:
             if name not in {
                 "files",
+                "languages",
                 "modules",
                 "symbols",
                 "named",

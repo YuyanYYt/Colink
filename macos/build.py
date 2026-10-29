@@ -10,6 +10,8 @@ import tomllib
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from code_context.build_manifest import write_build_manifest
+
 
 def build(
     workspace: Path,
@@ -122,7 +124,7 @@ def build(
                 "CFBundlePackageType": "APPL",
                 "CFBundleShortVersionString": release[1],
                 "CoLinkVersion": version,
-                "CFBundleVersion": "34",
+                "CFBundleVersion": "38",
                 "CFBundleIconFile": "CodeConnect",
                 "LSApplicationCategoryType": "public.app-category.developer-tools",
                 # Declare the menu-bar agent at launch; the installed bundle
@@ -134,6 +136,8 @@ def build(
             },
             stream,
         )
+    with (contents / "Info.plist").open("rb") as stream:
+        write_build_manifest(workspace, resources, bundle_info=plistlib.load(stream))
     subprocess.run(["codesign", "--force", "--sign", "-", str(output)], check=True)
     subprocess.run(["codesign", "--verify", "--strict", str(output)], check=True)
     return output

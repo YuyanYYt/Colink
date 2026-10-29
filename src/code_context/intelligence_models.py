@@ -6,10 +6,11 @@ are evidence, not an assertion that a dynamic runtime target has been proven.
 
 import hashlib
 import sys
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-PARSER_VERSION = f"facts-v3-py{sys.version_info.major}.{sys.version_info.minor}-java023"
+PARSER_VERSION = f"facts-v5-py{sys.version_info.major}.{sys.version_info.minor}-java023-ts023-js025"
 MAX_FILE_SYMBOLS = 5_000
 MAX_FILE_REFERENCES = 20_000
 MAX_FILE_NODES = 250_000
@@ -38,6 +39,25 @@ def symbol_id(path: str, qualname: str, line: int) -> str:
 
 def module_id(path: str) -> str:
     return symbol_id(path, "", 0)
+
+
+def is_traversable_call(relation: Mapping[str, Any]) -> bool:
+    """A bound name inside a deferred body is evidence, not its creator's call.
+
+    Definition expressions retain the owner which actually evaluates them, so
+    nested definitions must not lose genuine calls made by their outer function.
+    Missing context is the compatible ordinary-call default for older facts and
+    the Java/JavaScript/TypeScript frontends. Binding/target checks stay with the
+    graph consumer; conditional calls remain conservative may-call candidates.
+    Type-only references remain visible without proving executable call edges.
+    """
+    context = relation.get("execution_context", "body")
+    return (
+        relation.get("kind") in {"CALL", "INSTANTIATION"}
+        and isinstance(context, str)
+        and context in {"body", "definition", "immediate_lambda"}
+        and relation.get("type_only", False) is False
+    )
 
 
 @dataclass
@@ -102,6 +122,8 @@ class Reference:
     type_only: bool = False
     conditional: bool = False
     arity: int | None = None
+    execution_context: str = "body"
+    execution_scope: str = ""
 
 
 @dataclass
@@ -153,6 +175,15 @@ class Relation:
     evidence: str = "unknown"
     type_only: bool = False
     conditional: bool = False
+    execution_context: str = "body"
+    execution_scope: str = ""
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        value = asdict(self)
+        # Keep ordinary and non-Python relation payloads byte-compatible. Only
+        # additional execution evidence consumes the caller's response budget.
+        if value["execution_context"] == "body":
+            value.pop("execution_context")
+        if not value["execution_scope"]:
+            value.pop("execution_scope")
+        return value

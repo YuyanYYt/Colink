@@ -25,10 +25,11 @@ import zlib
 from collections import OrderedDict
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, TimeoutError
 from dataclasses import asdict, dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from threading import RLock
 from typing import TYPE_CHECKING
 
+from code_context.analysis_response import AnalysisRequestError, AnalysisResponseBudgetExceeded
 from code_context.binding_dependencies import declaration_summary, summary_file
 from code_context.fact_payloads import FactCacheError, decode_fact
 from code_context.intelligence_analysis import AnalysisBudgetExceeded
@@ -55,6 +56,7 @@ from code_context.intelligence_models import PARSER_VERSION, ParsedFile
 from code_context.intelligence_queries import QUERIES, _symbol, bound_result
 from code_context.intelligence_resolver import Resolver
 from code_context.intelligence_roots import PythonSourceRoots, read_root_configuration
+from code_context.language_frontends import STRUCTURE_LANGUAGES, structure_language
 from code_context.live_analysis import AnalysisFacts
 from code_context.models import validate_project
 from code_context.policy import MAX_FILES
@@ -223,8 +225,7 @@ def _binding_cached(payload, path, language, cached):
 
 
 def _language(path: str) -> str:
-    suffix = PurePosixPath(path).suffix.lower()
-    return "python" if suffix in {".py", ".pyi"} else "java" if suffix == ".java" else "unsupported"
+    return structure_language(path)
 
 
 def _signature(metadata: dict) -> str:
@@ -876,6 +877,10 @@ class LiveIndexService:
                 except sqlite3.Error:
                     raise SourceError("INDEX_NOT_READY: fact cache needs rebuilding") from None
             return self._not_ready(project_id, handle, "INDEX_CACHE_INVALID")
+        except AnalysisResponseBudgetExceeded as exc:
+            raise SourceError(str(exc)) from None
+        except AnalysisRequestError as exc:
+            raise SourceError(str(exc)) from None
         except (ValueError, TypeError, AttributeError):
             raise SourceError(
                 "INVALID_STRUCTURE_QUERY: check bounds, path and symbol identifier"
@@ -1492,7 +1497,7 @@ class LiveIndexService:
                     )
         stats = {
             "partial": partial or bool(resolver.python_roots.diagnostic),
-            "supported_languages": ["python", "java"],
+            "supported_languages": sorted(STRUCTURE_LANGUAGES),
             "files_by_language": languages,
             "files_by_status": statuses,
             "index_diagnostics": index_diagnostics,

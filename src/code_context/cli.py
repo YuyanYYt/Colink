@@ -336,6 +336,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "live":
             from code_context.live import LiveQueries
+            from code_context.project_index import ProjectIndexService
             from code_context.server import build_mcp
             from code_context.source_access import SourceAccess
 
@@ -344,7 +345,10 @@ def main(argv: list[str] | None = None) -> int:
             source = SourceAccess(
                 args.root, excluded_roots=(args.data_dir.expanduser().absolute(),)
             )
-            backend = LiveQueries({args.project: source})
+            backend = LiveQueries(
+                {args.project: source},
+                index_factory=lambda: ProjectIndexService(args.data_dir / "indexes"),
+            )
             try:
                 build_mcp(
                     backend,

@@ -7,7 +7,6 @@ ASTs are discarded after extraction and caches follow the two-state source windo
 import json
 import sqlite3
 import time
-from pathlib import PurePosixPath
 
 from code_context.intelligence_coverage import count_index_diagnostics
 from code_context.intelligence_dependencies import (
@@ -19,6 +18,7 @@ from code_context.intelligence_dependencies import (
 from code_context.intelligence_models import PARSER_VERSION, ParsedFile
 from code_context.intelligence_resolver import Resolver
 from code_context.intelligence_roots import MAX_SOURCE_ROOTS, read_root_configuration
+from code_context.language_frontends import parse_source
 
 # Source-root binding changed, but extracted facts did not. Rebuild derived
 # relations on startup while retaining the existing content-addressed parse cache.
@@ -85,16 +85,7 @@ def prune_index(db: sqlite3.Connection) -> None:
 
 
 def parse_file(path: str, content: str) -> ParsedFile:
-    suffix = PurePosixPath(path).suffix.lower()
-    if suffix in {".py", ".pyi"}:
-        from code_context.intelligence_python import parse_python
-
-        return parse_python(path, content)
-    if suffix == ".java":
-        from code_context.intelligence_java import parse_java
-
-        return parse_java(path, content)
-    return ParsedFile(path=path, language="unsupported", status="unsupported")
+    return parse_source(path, content)
 
 
 def _root_configuration(db: sqlite3.Connection, project_id: str, revision: int):
