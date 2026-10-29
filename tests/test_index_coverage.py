@@ -9,7 +9,7 @@ from code_context.live import LiveQueries
 from code_context.live_index import LiveIndexService
 from code_context.models import FileChange, SyncBatch, content_hash
 from code_context.read_code import execute_read_code
-from code_context.source_access import SourceAccess
+from code_context.source_access import SourceAccess, SourceError
 from code_context.storage import MirrorStore
 
 
@@ -83,7 +83,7 @@ def test_requested_file_is_prioritized_over_partial_index_examples(mixed_source,
         backend.close()
 
 
-@pytest.mark.parametrize("budget", [1000, 6000])
+@pytest.mark.parametrize("budget", [1600, 6000])
 def test_selected_extraction_is_separate_from_project_completeness(mixed_source, tmp_path, budget):
     root, _ = mixed_source
     backend, handle = _live(root, tmp_path)
@@ -100,6 +100,23 @@ def test_selected_extraction_is_separate_from_project_completeness(mixed_source,
         assert result["index_coverage"]["status"] == "partial"
         assert result["index_coverage"]["selected_structure"] == "structure_extracted"
         assert len(json.dumps(result, ensure_ascii=False)) <= budget
+    finally:
+        backend.close()
+
+
+def test_selected_extraction_reports_capacity_error_at_minimum_budget(mixed_source, tmp_path):
+    root, _ = mixed_source
+    backend, handle = _live(root, tmp_path)
+    try:
+        with pytest.raises(SourceError, match="^ANALYSIS_RESPONSE_BUDGET_EXCEEDED:"):
+            backend.code_query(
+                "sample",
+                handle,
+                "analyze_code",
+                mode="file_context",
+                selector={"path": "good.py"},
+                max_chars=1000,
+            )
     finally:
         backend.close()
 
