@@ -58,11 +58,23 @@ def parser() -> argparse.ArgumentParser:
     live.add_argument("--root", type=Path, required=True)
     live.add_argument("--project", required=True)
     live.add_argument("--data-dir", type=Path, default=Path(".code-context/live"))
+    live.add_argument(
+        "--capacity",
+        choices=("large", "extreme"),
+        default="large",
+        help="本机索引容量档；extreme 按需允许更高内存与磁盘占用",
+    )
 
     workspace = commands.add_parser("workspace", help="运行已本机授权的多项目直读 MCP")
     workspace.add_argument("--root", type=Path, required=True)
     workspace.add_argument("--project", default="workspace", help="连接标签，不替代项目 ID")
     workspace.add_argument("--data-dir", type=Path, default=Path(".code-context/workspace"))
+    workspace.add_argument(
+        "--capacity",
+        choices=("large", "extreme"),
+        default="large",
+        help="本机索引容量档；extreme 不代表已完成百万文件压测",
+    )
     initialize = commands.add_parser("workspace-init", help="本机登记选定目录并发现待确认子项目")
     initialize.add_argument("--root", type=Path, required=True)
     initialize.add_argument("--name")
@@ -199,7 +211,11 @@ def main(argv: list[str] | None = None) -> int:
 
             os.environ.pop("CONTROL_PLANE_API_KEY", None)
             os.environ.pop("OPENAI_API_KEY", None)
-            with WorkspaceRuntime(args.root, args.data_dir) as runtime:
+            from code_context.live_capacity import CAPACITIES
+
+            with WorkspaceRuntime(
+                args.root, args.data_dir, capacity=CAPACITIES[args.capacity]
+            ) as runtime:
                 build_mcp(
                     runtime.backend,
                     status_provider=runtime.backend.mcp_status,
@@ -336,6 +352,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "live":
             from code_context.live import LiveQueries
+            from code_context.live_capacity import CAPACITIES
             from code_context.project_index import ProjectIndexService
             from code_context.server import build_mcp
             from code_context.source_access import SourceAccess
@@ -343,11 +360,16 @@ def main(argv: list[str] | None = None) -> int:
             os.environ.pop("CONTROL_PLANE_API_KEY", None)
             os.environ.pop("OPENAI_API_KEY", None)
             source = SourceAccess(
-                args.root, excluded_roots=(args.data_dir.expanduser().absolute(),)
+                args.root,
+                excluded_roots=(args.data_dir.expanduser().absolute(),),
+                capacity=CAPACITIES[args.capacity],
             )
             backend = LiveQueries(
                 {args.project: source},
-                index_factory=lambda: ProjectIndexService(args.data_dir / "indexes"),
+                index_factory=lambda: ProjectIndexService(
+                    args.data_dir / "indexes", capacity=CAPACITIES[args.capacity]
+                ),
+                capacity=CAPACITIES[args.capacity],
             )
             try:
                 build_mcp(

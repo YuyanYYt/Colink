@@ -1,4 +1,4 @@
-"""On-demand, producer-owned facts for authorized live Python/Java sources.
+"""On-demand structure facts for authorized live sources.
 
 There are no source blobs or historical revisions here. ``revision=1`` in the
 fact tables is only an adapter for the existing SELECT-only query functions.
@@ -22,7 +22,7 @@ import os
 import sqlite3
 import time
 import zlib
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, TimeoutError
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -50,19 +50,25 @@ from code_context.intelligence_index import (
     INDEX_VERSION,
     MAX_SNAPSHOT_PARSE_BYTES,
     encode,
-    parse_file,
 )
 from code_context.intelligence_models import PARSER_VERSION, ParsedFile
 from code_context.intelligence_queries import QUERIES, _symbol, bound_result
 from code_context.intelligence_resolver import Resolver
 from code_context.intelligence_roots import PythonSourceRoots, read_root_configuration
-from code_context.language_frontends import STRUCTURE_LANGUAGES, structure_language
+from code_context.language_frontends import LIVE_STRUCTURE_LANGUAGES, live_structure_language
+from code_context.language_frontends import parse_live_source as parse_file
 from code_context.live_analysis import AnalysisFacts
+from code_context.live_capacity import (
+    LARGE_CAPACITY,
+    MAX_LIVE_DIRECTORIES,
+    MAX_LIVE_FILES,
+    capacity_usage,
+)
 from code_context.models import validate_project
-from code_context.policy import MAX_FILES
 from code_context.read_context import ContextCapacityError, ContextError
 from code_context.source_access import SourceAccess, SourceError
 from code_context.source_page import source_page
+from code_context.vite_aliases import MAX_VITE_CONFIG_BYTES, is_vite_config, parse_vite_config
 
 if TYPE_CHECKING:
     from code_context.live import LiveQueries
@@ -70,16 +76,16 @@ if TYPE_CHECKING:
 _APPLICATION_ID = 0x434C4958
 _SCHEMA_VERSION = 1
 _PAGE_SIZE = 4096
-_INDEX_VERSION = f"live-facts-v6-coverage-{INDEX_VERSION}"
-_PARSE_CACHE_VERSION = f"live-packed-v1-{PARSER_VERSION}"
+_INDEX_VERSION = f"live-facts-v7-module-imports-guards-{INDEX_VERSION}"
+_PARSE_CACHE_VERSION = f"live-packed-v2-vue-guards-{PARSER_VERSION}"
 _BINDING_CACHE_VERSION = "binding-reads-v1"
 _MAX_BINDING_BYTES = 16 * 1024 * 1024
 _CONFIG_PATHS = frozenset({"pyproject.toml", ".gitignore", ".codecontextignore"})
 # Disk space is allocated on demand; this is not a process memory ceiling.
-MAX_LIVE_DATABASE_BYTES = 500 * 1024 * 1024
+MAX_LIVE_DATABASE_BYTES = LARGE_CAPACITY.database_bytes
 # Compressed payload budgets remain separate from physical pages.
-MAX_LIVE_INDEX_BYTES = 48 * 1024 * 1024
-MAX_LIVE_FACTS = 200_000
+MAX_LIVE_INDEX_BYTES = LARGE_CAPACITY.index_bytes
+MAX_LIVE_FACTS = LARGE_CAPACITY.facts
 _TABLES = ("files", "li_parse_cache", "ci_files", "ci_symbols", "ci_relations", "li_binding_cache")
 _BINDING_SCHEMA = """CREATE TABLE IF NOT EXISTS li_binding_cache (
     project_id TEXT NOT NULL, source_id TEXT NOT NULL, path TEXT NOT NULL,
@@ -225,7 +231,7 @@ def _binding_cached(payload, path, language, cached):
 
 
 def _language(path: str) -> str:
-    return structure_language(path)
+    return live_structure_language(path)
 
 
 def _signature(metadata: dict) -> str:
@@ -284,14 +290,15 @@ class LiveIndexService:
         wait_seconds: float = 10,
         *,
         max_peak_bytes: int | None = None,
-        max_source_bytes: int = MAX_SNAPSHOT_PARSE_BYTES,
-        max_parse_bytes: int = MAX_SNAPSHOT_PARSE_BYTES,
+        max_source_bytes: int = LARGE_CAPACITY.source_bytes,
+        max_parse_bytes: int = LARGE_CAPACITY.parse_bytes,
         max_index_bytes: int = MAX_LIVE_INDEX_BYTES,
         max_facts: int = MAX_LIVE_FACTS,
-        max_files: int = MAX_FILES,
+        max_files: int = LARGE_CAPACITY.files,
+        max_directories: int = LARGE_CAPACITY.directories,
         max_pending_projects: int | None = None,
         max_context_bindings: int = 128,
-        manifest_seconds: float = 5,
+        manifest_seconds: float = LARGE_CAPACITY.manifest_seconds,
         executor: ThreadPoolExecutor | None = None,
     ):
         budgets = (
@@ -302,6 +309,7 @@ class LiveIndexService:
             max_index_bytes,
             max_facts,
             max_files,
+            max_directories,
             max_context_bindings,
         )
         if any(type(value) is not int or value < 1 for value in budgets):
@@ -313,7 +321,12 @@ class LiveIndexService:
                 or not math.isfinite(value)
             ):
                 raise ValueError("index time budgets must be finite numbers")
-        if wait_seconds < 0 or manifest_seconds <= 0 or max_files > MAX_FILES:
+        if (
+            wait_seconds < 0
+            or manifest_seconds <= 0
+            or max_files > MAX_LIVE_FILES
+            or max_directories > MAX_LIVE_DIRECTORIES
+        ):
             raise ValueError("invalid index time or file budget")
         max_peak_bytes = 3 * max_bytes if max_peak_bytes is None else max_peak_bytes
         max_pending_projects = (
@@ -328,6 +341,7 @@ class LiveIndexService:
         self.max_source_bytes, self.max_parse_bytes = max_source_bytes, max_parse_bytes
         self.max_index_bytes, self.max_facts = max_index_bytes, max_facts
         self.max_files, self.manifest_seconds = max_files, manifest_seconds
+        self.max_directories = max_directories
         self.max_pending_projects, self.max_context_bindings = (
             max_pending_projects,
             max_context_bindings,
@@ -337,7 +351,15 @@ class LiveIndexService:
             + "-"
             + hashlib.sha256(
                 repr(
-                    (max_source_bytes, max_parse_bytes, max_index_bytes, max_facts, max_files)
+                    (
+                        max_source_bytes,
+                        max_parse_bytes,
+                        max_index_bytes,
+                        max_facts,
+                        max_files,
+                        max_directories,
+                        manifest_seconds,
+                    )
                 ).encode()
             ).hexdigest()[:16]
         )
@@ -469,7 +491,11 @@ class LiveIndexService:
         return source
 
     def _manifest(self, source):
-        return source.manifest(max_files=self.max_files, max_seconds=self.manifest_seconds)
+        return source.manifest(
+            max_files=self.max_files,
+            max_directories=self.max_directories,
+            max_seconds=self.manifest_seconds,
+        )
 
     def _context(self, backend, source, project_id, handle, *, validate=True):
         try:
@@ -578,6 +604,7 @@ class LiveIndexService:
                 "storage_bytes": storage_bytes,
                 "storage": self._storage_details(project_id),
                 "limits": self._limits(),
+                "capacity_usage": capacity_usage(stats, self._limits(), storage_bytes),
             }
 
     def _storage_details(self, project_id):
@@ -606,6 +633,8 @@ class LiveIndexService:
             "index_bytes_per_project": self.max_index_bytes,
             "facts_per_project": self.max_facts,
             "files_per_project": self.max_files,
+            "directories_per_project": self.max_directories,
+            "manifest_seconds": self.manifest_seconds,
             "retained_states": 1,
             "binding_metadata_bytes_per_project": _MAX_BINDING_BYTES,
         }
@@ -881,7 +910,17 @@ class LiveIndexService:
             raise SourceError(str(exc)) from None
         except AnalysisRequestError as exc:
             raise SourceError(str(exc)) from None
-        except (ValueError, TypeError, AttributeError):
+        except (ValueError, TypeError, AttributeError) as exc:
+            architecture_errors = {
+                "INVALID_ARCHITECTURE_CURSOR": "restart the architecture query",
+                "STALE_ARCHITECTURE_CURSOR": "source or query scope changed; restart the query",
+                "ARCHITECTURE_RESPONSE_BUDGET_EXCEEDED": (
+                    "increase max_chars or narrow path_prefix to fit one complete graph item"
+                ),
+            }
+            code = str(exc).partition(":")[0]
+            if code in architecture_errors:
+                raise SourceError(f"{code}: {architecture_errors[code]}") from None
             raise SourceError(
                 "INVALID_STRUCTURE_QUERY: check bounds, path and symbol identifier"
             ) from None
@@ -1007,8 +1046,8 @@ class LiveIndexService:
                     row["path"]: (row["sha256"], row["data"])
                     for row in self._db.execute(
                         "SELECT path, sha256, data FROM li_parse_cache "
-                        "WHERE project_id=? AND parser_version IN (?, ?)",
-                        (project_id, _PARSE_CACHE_VERSION, PARSER_VERSION),
+                        "WHERE project_id=? AND parser_version=?",
+                        (project_id, _PARSE_CACHE_VERSION),
                     )
                 }
             )
@@ -1068,6 +1107,7 @@ class LiveIndexService:
                 if path not in reusable or source.fingerprint(path) != prior[path][0]:
                     del prior[path]
         source_bytes = parse_bytes = parse_facts = parsed_count = reused_count = file_bytes = 0
+        budget_exceeded = Counter()
         dependency_manifests = []
         dependency_documents = {}
         dependency_hashes = {}
@@ -1106,6 +1146,14 @@ class LiveIndexService:
         )
         repaired_parse_files = 0
         configuration = read_root_configuration(None)
+        # An unreadable nested config still owns its scope: never fall back to a
+        # parent configuration because a source/metadata budget excluded it.
+        vite_configs = {
+            item["path"]: parse_vite_config(item["path"], None)
+            for item in metadata["files"]
+            if is_vite_config(item["path"])
+        }
+        stylesheet_rows = {}
         partial = bool(metadata["partial"] or metadata.get("skipped"))
         for item in metadata["files"]:
             with self._lock:
@@ -1128,6 +1176,7 @@ class LiveIndexService:
                 ).encode("utf-8")
             )
             if file_bytes + file_cost > self.max_index_bytes:
+                budget_exceeded["metadata_bytes"] += 1
                 partial = True
                 if any(
                     entry["path"] == "pyproject.toml" for entry in metadata["files"]
@@ -1138,9 +1187,10 @@ class LiveIndexService:
                 break
             file_bytes += file_cost
             supported = _language(path) != "unsupported"
-            if supported or path in _CONFIG_PATHS:
+            if supported or path in _CONFIG_PATHS or path in vite_configs:
                 source_cost = 0 if path in dependency_hashes else item["size"]
                 if source_bytes + source_cost > self.max_source_bytes:
+                    budget_exceeded["source_bytes"] += 1
                     parsed = _limited(path, "PROJECT_SOURCE_BUDGET_EXCEEDED") if supported else None
                     partial = True
                     if path == "pyproject.toml":
@@ -1177,6 +1227,7 @@ class LiveIndexService:
                         document = (
                             None
                             if unchanged
+                            and (path not in vite_configs or item["size"] > MAX_VITE_CONFIG_BYTES)
                             else dependency_documents.get(path) or source.read(path)
                         )
                     except SourceError as exc:
@@ -1194,11 +1245,13 @@ class LiveIndexService:
                             or document.size != item["size"]
                         ):
                             raise SourceError("LIVE_INDEX_CHANGED: source changed during build")
-                        sha = cached[0] if unchanged else document.sha256
+                        sha = document.sha256 if document is not None else cached[0]
                         source_bytes += source_cost
                         self._observe(backend, source, project_id, handle, path, sha)
                         if path == "pyproject.toml":
                             configuration = read_root_configuration(document.content)
+                        if path in vite_configs and item["size"] <= MAX_VITE_CONFIG_BYTES:
+                            vite_configs[path] = parse_vite_config(path, document.content)
                         if supported:
                             if unchanged:
                                 reused_count += 1
@@ -1211,6 +1264,8 @@ class LiveIndexService:
                                 parsed_count += 1
                                 full_parses[path] = parsed
                         del document
+            if path.endswith(".css"):
+                stylesheet_rows[path] = len(files)
             files.append(
                 (
                     project_id,
@@ -1235,11 +1290,18 @@ class LiveIndexService:
                         for name in ("symbols", "scopes", "bindings", "imports", "references")
                     )
                     full_parses[path] = parsed
-                if (
-                    parse_bytes + cost > self.max_parse_bytes
-                    or parse_facts + facts > self.max_facts
-                ):
+                parse_limits = [
+                    name
+                    for name, used, requested, limit in (
+                        ("parse_bytes", parse_bytes, cost, self.max_parse_bytes),
+                        ("parse_facts", parse_facts, facts, self.max_facts),
+                    )
+                    if used + requested > limit
+                ]
+                if parse_limits:
+                    budget_exceeded.update(parse_limits)
                     parsed = _limited(path, "PROJECT_PARSE_BUDGET_EXCEEDED")
+                    parsed.diagnostics[0]["budgets"] = parse_limits
                     data = encode(parsed.to_dict())
                     cost, facts = len(data.encode("utf-8")), 0
                     partial = True
@@ -1257,9 +1319,8 @@ class LiveIndexService:
                             source.source_id,
                             path,
                             sha,
-                            # Old builds only understand plain JSON with
-                            # PARSER_VERSION. A distinct storage marker lets
-                            # them skip compressed rows and rebuild safely.
+                            # Build 40 and earlier skip this generation and
+                            # regenerate their own facts on rollback.
                             _PARSE_CACHE_VERSION,
                             cached[1] if data is None else _parse_cache_payload(data),
                         )
@@ -1268,7 +1329,57 @@ class LiveIndexService:
                 parsed_files[path] = parsed
                 partial |= parsed.status != "ready"
         del prior
-        resolver = Resolver(parsed_files, configuration, track_dependencies=True)
+        # A stylesheet is a file endpoint, never a symbol source. Check ordinary
+        # read authorization only for literal imports present in the parsed scripts.
+        stylesheets = set()
+        if stylesheet_rows:
+            locator = Resolver(
+                {}, live_modules=True, vite_configs=vite_configs, stylesheet_paths=stylesheet_rows
+            )
+            candidates = {
+                target
+                for parsed in parsed_files.values()
+                for ref in parsed.references
+                if ref.kind in {"MODULE_IMPORT", "MODULE_REEXPORT", "MODULE_DYNAMIC_IMPORT"}
+                and ref.name.endswith(".css")
+                and (target := locator.stylesheet_target(parsed, ref.name))
+            }
+            for path in sorted(candidates):
+                at = stylesheet_rows[path]
+                row = files[at]
+                size = row[5]
+                if size + source_bytes > self.max_source_bytes:
+                    budget_exceeded["source_bytes"] += 1
+                    partial = True
+                    continue
+                try:
+                    document = source.read(path)
+                except SourceError as exc:
+                    if not str(exc).startswith("FILE_EXCLUDED:"):
+                        raise
+                    partial = True
+                    continue
+                if document.size != size or encode(document.version) != row[6]:
+                    raise SourceError("LIVE_INDEX_CHANGED: stylesheet changed during build")
+                self._observe(backend, source, project_id, handle, path, document.sha256)
+                source_bytes += size
+                stylesheets.add(path)
+                files[at] = (*row[:4], document.sha256, *row[5:])
+                del document
+        resolver = Resolver(
+            parsed_files,
+            configuration,
+            track_dependencies=True,
+            live_modules=True,
+            vite_configs=vite_configs,
+            stylesheet_paths=stylesheets,
+        )
+        ambiguous_configs = {
+            config.path
+            for configs in resolver.vite_scopes.values()
+            if len(configs) > 1
+            for config in configs
+        }
         excluded_paths = {
             path
             for path, parsed in parsed_files.items()
@@ -1287,6 +1398,8 @@ class LiveIndexService:
             not metadata["partial"]
             and not metadata.get("skipped")
             and not resolver.python_roots.diagnostic
+            and not ambiguous_configs
+            and not any(config.diagnostics for config in vite_configs.values())
             and all(
                 parsed.status == "ready" or path in excluded_paths
                 for path, parsed in parsed_files.items()
@@ -1388,15 +1501,24 @@ class LiveIndexService:
                             _relation_payload(relation.to_dict()),
                         )
                     )
+            status, diagnostics = parsed.status, parsed.diagnostics
+            config_diagnostics = vite_configs[path].diagnostics if path in vite_configs else ()
+            if path in ambiguous_configs:
+                config_diagnostics = (*config_diagnostics, "VITE_CONFIG_SCOPE_AMBIGUOUS")
+            if config_diagnostics:
+                diagnostics = [*({"code": code} for code in config_diagnostics), *diagnostics]
+                if status == "ready":
+                    status = "partial"
+                partial = True
             indexed_row = (
                 project_id,
                 source.source_id,
                 1,
                 path,
                 parsed.language,
-                parsed.status,
+                status,
                 parsed.module,
-                encode({"items": parsed.diagnostics[:20]}),
+                encode({"items": diagnostics[:20]}),
             )
             cost = (
                 cached_info["index_bytes"]
@@ -1405,15 +1527,21 @@ class LiveIndexService:
                 + sum(_row_budget(row) for row in [*symbol_rows, *relation_rows])
             )
             count = cached_info["index_facts"] if retain else len(symbol_rows) + len(relation_rows)
-            status, diagnostics = parsed.status, parsed.diagnostics
-            accepted = (
-                index_bytes + cost <= self.max_index_bytes and fact_count + count <= self.max_facts
-            )
+            index_limits = [
+                name
+                for name, used, requested, limit in (
+                    ("index_bytes", index_bytes, cost, self.max_index_bytes),
+                    ("index_facts", fact_count, count, self.max_facts),
+                )
+                if used + requested > limit
+            ]
+            accepted = not index_limits
             if not accepted:
+                budget_exceeded.update(index_limits)
                 reuse_safe = False
                 status, diagnostics, partial = (
                     "resource_limited",
-                    [{"code": "PROJECT_INDEX_BUDGET_EXCEEDED"}],
+                    [{"code": "PROJECT_INDEX_BUDGET_EXCEEDED", "budgets": index_limits}],
                     True,
                 )
             else:
@@ -1497,7 +1625,7 @@ class LiveIndexService:
                     )
         stats = {
             "partial": partial or bool(resolver.python_roots.diagnostic),
-            "supported_languages": sorted(STRUCTURE_LANGUAGES),
+            "supported_languages": sorted(LIVE_STRUCTURE_LANGUAGES),
             "files_by_language": languages,
             "files_by_status": statuses,
             "index_diagnostics": index_diagnostics,
@@ -1529,6 +1657,9 @@ class LiveIndexService:
             "parse_fact_count": parse_facts,
             "fact_count": fact_count,
             "file_count": len(files),
+            "directory_count": metadata.get("directories"),
+            "budget_exceeded_files": dict(budget_exceeded),
+            "discovery_limit_reasons": metadata.get("limit_reasons", []),
             "metadata_payload_bytes": file_bytes,
             "discovery_partial": metadata["partial"],
             "dependency_metadata": dependency_metadata,

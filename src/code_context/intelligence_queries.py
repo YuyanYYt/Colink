@@ -1,13 +1,17 @@
 """Bounded SELECT-only queries over a pinned code-intelligence snapshot."""
 
+import base64
+import hashlib
 import json
 import sqlite3
 from collections import defaultdict, deque
 from itertools import islice
 
+from code_context.call_conditions import valid_call_control
 from code_context.fact_payloads import FactCacheError, decode_fact
 from code_context.intelligence_dependencies import DependencyClassifier
 from code_context.intelligence_models import CLASS_KINDS, Relation, is_traversable_call, module_id
+from code_context.language_frontends import LIVE_STRUCTURE_LANGUAGES, STRUCTURE_LANGUAGES
 from code_context.policy import validate_path
 from code_context.source_page import source_page
 
@@ -16,11 +20,21 @@ def decode_relation(payload: str | bytes) -> dict:
     """Decode legacy JSON or bounded, compressed live-index relation facts."""
     value = decode_fact(payload, prefix=b"CL1:", max_bytes=65_536)
     fields = Relation.__dataclass_fields__.keys()
-    optional = {"execution_context", "execution_scope"}
-    if not fields - optional <= value.keys() <= fields:
+    optional = {"execution_context", "execution_scope", "module_syntax", "config_path"}
+    if not fields - optional - {"call_control"} <= value.keys() <= fields:
+        raise FactCacheError("invalid derived relation") from None
+    if "call_control" in value and (
+        value.get("kind") not in ("CALL", "INSTANTIATION")
+        or not valid_call_control(value["call_control"])
+    ):
         raise FactCacheError("invalid derived relation") from None
     if any(key in value and not isinstance(value[key], str) for key in optional):
         raise FactCacheError("invalid derived relation") from None
+    if value["kind"] == "MODULE_IMPORT" and (
+        value.get("module_syntax") not in {"import", "reexport", "dynamic_import"}
+        or value["target_symbol_id"] is not None
+    ):
+        raise FactCacheError("invalid derived module import") from None
     return value
 
 
@@ -29,22 +43,103 @@ def _bounds(offset: int, limit: int, maximum: int = 100) -> None:
         raise ValueError("invalid pagination bounds")
 
 
+def _architecture_cursor(graph_id: str, file_offset: int, edge_offset: int) -> str:
+    payload = json.dumps([1, graph_id, file_offset, edge_offset], separators=(",", ":"))
+    return base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+
+
+def _architecture_offsets(cursor: str | None, graph_id: str, files: int, edges: int):
+    if cursor is None:
+        return 0, 0
+    try:
+        if not isinstance(cursor, str) or not 1 <= len(cursor) <= 256:
+            raise ValueError
+        page = json.loads(
+            base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True)
+        )
+        if (
+            not isinstance(page, list)
+            or len(page) != 4
+            or type(page[0]) is not int
+            or page[0] != 1
+            or not isinstance(page[1], str)
+            or type(page[2]) is not int
+            or type(page[3]) is not int
+            or min(page[2:]) < 0
+        ):
+            raise ValueError
+    except (ValueError, TypeError, UnicodeError):
+        raise ValueError("INVALID_ARCHITECTURE_CURSOR: restart the architecture query") from None
+    if page[1] != graph_id:
+        raise ValueError(
+            "STALE_ARCHITECTURE_CURSOR: source or query scope changed; restart the query"
+        )
+    if page[2] > files or page[3] > edges:
+        raise ValueError("INVALID_ARCHITECTURE_CURSOR: restart the architecture query")
+    return page[2], page[3]
+
+
+def _architecture_continuation(result: dict) -> None:
+    """Recompute continuation after every response-boundary crop, including wrappers."""
+    next_file = result["file_offset"] + len(result["files"])
+    next_edge = result["edge_offset"] + len(result["edges"])
+    result["has_more_files"] = next_file < result["total_files"]
+    result["has_more_edges"] = next_edge < result["total_edges"]
+    result["has_more"] = result["has_more_files"] or result["has_more_edges"]
+    result["next_cursor"] = (
+        _architecture_cursor(result["graph_id"], next_file, next_edge)
+        if result["has_more"]
+        else None
+    )
+    result["truncated"] = result["has_more"] or result["cycle_summaries_truncated"]
+
+
 def bound_result(result: dict, max_chars: int) -> dict:
     if not 1000 <= max_chars <= 50_000:
         raise ValueError("max_chars must be between 1000 and 50000")
     # Keep metadata and remove complete items. Never cut a graph fact in half.
     page = next((key for key in ("symbols", "references", "dependencies") if key in result), None)
     graph = "nodes" in result and "edges" in result
+    architecture = "graph_id" in result and "file_offset" in result
     arrays = [value for key, value in result.items() if isinstance(value, list) and key != "nodes"]
-    while len(json.dumps(result, ensure_ascii=False)) > max_chars:
+    while (size := len(json.dumps(result, ensure_ascii=False))) > max_chars:
         candidates = [values for values in arrays if values]
         if not candidates:
             raise ValueError(
                 "response metadata exceeds budget; narrow the query or increase max_chars"
             )
         else:
-            max(candidates, key=lambda a: len(json.dumps(a, ensure_ascii=False))).pop()
+            selected = (
+                result["cycles"]
+                if architecture and result["cycles"]
+                else max(candidates, key=lambda a: len(json.dumps(a, ensure_ascii=False)))
+            )
+            # Large requested pages should not serialize an almost identical
+            # multi-megabyte response once for each individual discarded item.
+            remove = (
+                min(
+                    len(selected),
+                    max(
+                        1,
+                        len(selected)
+                        * (size - max_chars)
+                        // max(1, len(json.dumps(selected, ensure_ascii=False))),
+                    ),
+                )
+                if architecture
+                else 1
+            )
+            del selected[-remove:]
+            if architecture and selected is result["cycles"]:
+                result["cycle_summaries_truncated"] = True
         result["truncated"] = True
+        if architecture:
+            _architecture_continuation(result)
+            if not result["files"] and not result["edges"] and result["has_more"]:
+                raise ValueError(
+                    "ARCHITECTURE_RESPONSE_BUDGET_EXCEEDED: one complete graph item "
+                    "does not fit; increase max_chars or narrow path_prefix"
+                )
         if graph:
             # Keep a graph internally consistent after dropping edges to meet a byte budget.
             used = {result.get("root", result.get("path"))}
@@ -118,7 +213,7 @@ def symbol_search(
     else:
         where.append("kind<>'module'")
     if language:
-        if language not in {"python", "java", "typescript", "javascript"}:
+        if language not in _structure_languages(db):
             raise ValueError("unsupported structure language filter")
         where.append("json_extract(data, '$.language')=?")
         args.append(language)
@@ -510,6 +605,14 @@ def symbol_graph(
     return result
 
 
+def _structure_languages(db):
+    return (
+        LIVE_STRUCTURE_LANGUAGES
+        if getattr(db, "source_mode", None) == "live"
+        else STRUCTURE_LANGUAGES
+    )
+
+
 def _aggregate_file_edges(rows) -> dict[tuple[str, str], dict]:
     edges = {}
     for row in rows:
@@ -525,32 +628,89 @@ def _aggregate_file_edges(rows) -> dict[tuple[str, str], dict]:
                 "type_only": True,
             }
         edge = edges[key]
-        edge["kinds"].add(relation["kind"])
+        module_import = relation["kind"] == "MODULE_IMPORT"
+        kind = relation["module_syntax"].upper() if module_import else relation["kind"]
+        edge["kinds"].add(kind)
         edge["type_only"] &= relation["type_only"]
         edge["evidence_count"] += 1
-        if len(edge["evidence"]) < 5:
-            edge["evidence"].append(
-                {
-                    "kind": relation["kind"],
-                    "line": relation["line"],
-                    "name": relation["name"],
-                    "basis": relation["evidence"],
-                }
+        evidence = edge["evidence"]
+        if len(evidence) == 5 and not module_import:
+            continue
+        sample = {
+            "kind": kind,
+            "line": relation["line"],
+            "name": relation["name"],
+            "basis": relation["evidence"],
+        }
+        if module_import:
+            sample.update(
+                scope="module", column=relation["column"], type_only=relation["type_only"]
             )
+            if relation.get("config_path"):
+                sample["config_path"] = relation["config_path"]
+            # Member and module bindings on the same line share a display slot.
+            # Distinct direct module sites retain their own original column.
+            replace_at = next(
+                (
+                    i
+                    for i, prior in enumerate(evidence)
+                    if prior["kind"] == "IMPORT"
+                    and "scope" not in prior
+                    and prior["line"] == sample["line"]
+                ),
+                None,
+            )
+            if replace_at is not None:
+                evidence[replace_at] = sample
+                continue
+            if len(evidence) == 5:
+                # A multiline import can emit many member and call sites before
+                # its module string. Keep the direct file evidence in the sample.
+                for index in range(len(evidence) - 1, -1, -1):
+                    if evidence[index].get("scope") != "module":
+                        evidence[index] = sample
+                        break
+                continue
+        elif kind == "IMPORT" and any(
+            prior.get("scope") == "module" and prior["line"] == sample["line"] for prior in evidence
+        ):
+            continue
+        if len(evidence) < 5:
+            evidence.append(sample)
     for edge in edges.values():
         edge["kinds"] = sorted(edge["kinds"])
     return edges
 
 
-def _file_edges(db, project_id: str, revision: int) -> dict[tuple[str, str], dict]:
-    """The full graph is still required by architecture/SCC queries."""
+def _prefix_upper(prefix: str) -> str | None:
+    """Exclusive Unicode prefix bound, including prefixes ending in U+10FFFF."""
+    base = prefix.rstrip(chr(0x10FFFF))
+    return base[:-1] + chr(ord(base[-1]) + 1) if base else None
+
+
+def _file_edges(
+    db, project_id: str, revision: int, path_prefix: str | None = None
+) -> dict[tuple[str, str], dict]:
+    """Read only the induced scope before decoding potentially large fact payloads."""
+    scope, args = "", [project_id, revision]
+    if path_prefix:
+        # Range predicates use the project/source-path index. LIKE would be
+        # case-insensitive on SQLite and treat valid '_'/'%' paths as patterns.
+        upper = _prefix_upper(path_prefix)
+        if upper is not None:
+            scope = " AND source_path>=? AND source_path<? AND target_path>=? AND target_path<?"
+            args.extend([path_prefix, upper] * 2)
+        else:
+            scope = " AND source_path>=? AND target_path>=?"
+            args.extend([path_prefix] * 2)
     return _aggregate_file_edges(
         db.execute(
             "SELECT data FROM ci_relations WHERE project_id=? AND revision=? "
-            "AND target_path IS NOT NULL AND (source_path<>target_path OR kind='IMPORT') "
+            "AND target_path IS NOT NULL "
+            "AND (source_path<>target_path OR kind IN ('IMPORT','MODULE_IMPORT')) "
             "AND resolution='resolved' "
-            "AND kind<>'CONTAINS' ORDER BY source_path, target_path, line",
-            (project_id, revision),
+            f"AND kind<>'CONTAINS'{scope} ORDER BY source_path, target_path, line, rowid",
+            args,
         )
     )
 
@@ -581,7 +741,7 @@ def _file_frontier(db, project_id, revision, frontier, direction):
                 f"FROM ci_relations r{index} "
                 f"WHERE r.{column} IN (SELECT path FROM frontier) "
                 "AND r.project_id=? AND r.revision=? AND r.target_path IS NOT NULL "
-                "AND (r.source_path<>r.target_path OR r.kind='IMPORT') "
+                "AND (r.source_path<>r.target_path OR r.kind IN ('IMPORT','MODULE_IMPORT')) "
                 f"AND r.resolution='resolved' AND r.kind<>'CONTAINS'{duplicate_filter}"
             )
             args.extend([project_id, revision])
@@ -655,7 +815,7 @@ def file_dependencies(
                         chain.append(parents[chain[-1]])
                     chains.append(list(reversed(chain)))
         frontier = next_frontier
-    return {
+    result = {
         "path": path,
         "direction": direction,
         "depth": depth,
@@ -665,6 +825,31 @@ def file_dependencies(
         "truncated": truncated,
         "coverage": "resolved static edges in authorized indexed source only",
     }
+    if getattr(db, "source_mode", None) == "live" and direction in {"both", "outgoing"}:
+        rows = db.execute(
+            "SELECT data FROM ci_relations WHERE project_id=? AND revision=? AND source_path=? "
+            "AND resolution<>'resolved' AND (kind='MODULE_IMPORT' OR "
+            "(kind='IMPORT' AND target_path IS NOT NULL)) "
+            "ORDER BY (target_path IS NULL),line,rowid LIMIT 11",
+            (project_id, revision, path),
+        ).fetchall()
+        if rows:
+            diagnostics = []
+            for row in rows[:10]:
+                relation = decode_relation(row["data"])
+                item = {k: relation[k] for k in ("line", "column", "resolution", "evidence")}
+                if relation["kind"] == "MODULE_IMPORT":
+                    item.update(scope="module", module_syntax=relation["module_syntax"])
+                    if relation.get("config_path"):
+                        item["config_path"] = relation["config_path"]
+                else:
+                    item.update(
+                        scope="member", name=relation["name"], target_path=relation["target_path"]
+                    )
+                diagnostics.append(item)
+            result["diagnostics"] = diagnostics
+            result["diagnostics_have_more"] = len(rows) > 10
+    return result
 
 
 def _components(nodes: set[str], adjacency: dict) -> list[list[str]]:
@@ -714,22 +899,57 @@ def project_architecture(
     max_nodes: int = 100,
     max_edges: int = 200,
     include_type_only: bool = False,
+    cursor: str | None = None,
 ) -> dict:
-    if not 1 <= max_nodes <= 500 or not 1 <= max_edges <= 1000:
+    paginated = getattr(db, "source_mode", None) == "live"
+    if (
+        type(max_nodes) is not int
+        or type(max_edges) is not int
+        or not 1 <= max_nodes <= (5000 if paginated else 500)
+        or not 1 <= max_edges <= (10_000 if paginated else 1000)
+    ):
         raise ValueError("invalid architecture bounds")
+    if cursor is not None and not paginated:
+        raise ValueError("architecture cursors require a live source")
     if path_prefix:
         validate_path(path_prefix.rstrip("/"))
+    languages = sorted(_structure_languages(db))
+    scope, args = "", [project_id, revision, *languages]
+    if path_prefix:
+        upper = _prefix_upper(path_prefix)
+        scope = " AND path>=?"
+        args.append(path_prefix)
+        if upper is not None:
+            scope += " AND path<?"
+            args.append(upper)
     rows = db.execute(
         "SELECT path FROM ci_files WHERE project_id=? AND revision=? "
-        "AND language IN ('python', 'java', 'typescript', 'javascript') ORDER BY path",
-        (project_id, revision),
+        f"AND language IN ({','.join('?' for _ in languages)})"
+        f"{scope} ORDER BY path",
+        args,
     )
-    nodes = {r["path"] for r in rows if not path_prefix or r["path"].startswith(path_prefix)}
-    edges = _file_edges(db, project_id, revision)
+    nodes = {r["path"] for r in rows}
+    scoped_edges = _file_edges(db, project_id, revision, path_prefix)
+    stylesheets = (
+        {
+            target
+            for (source, target), edge in scoped_edges.items()
+            if source in nodes
+            and target.endswith(".css")
+            and (include_type_only or not edge["type_only"])
+        }
+        if paginated
+        else set()
+    )
+    nodes.update(stylesheets)
+    edges = {
+        key: edge
+        for key, edge in scoped_edges.items()
+        if key[0] in nodes and key[1] in nodes and (include_type_only or not edge["type_only"])
+    }
     adjacency = defaultdict(list)
-    for (source, target), edge in edges.items():
-        if source in nodes and target in nodes and (include_type_only or not edge["type_only"]):
-            adjacency[source].append(target)
+    for source, target in edges:
+        adjacency[source].append(target)
     components = _components(nodes, adjacency)
     cycle_groups = [
         group for group in components if len(group) > 1 or group[0] in adjacency.get(group[0], [])
@@ -753,34 +973,126 @@ def project_architecture(
             counts[parent] -= 1
             if not counts[parent]:
                 queue.append(parent)
-    selected = set(sorted(nodes)[:max_nodes])
-    layers = [
-        {
-            "path": node,
-            "layer": levels[membership[node]],
-            "cycle_group": sorted(components[membership[node]])
-            if membership[node] in cyclic_memberships
-            else [],
+    if not paginated:
+        # Preserve the historical Mirror graph selection, bounds and schema.
+        selected = set(sorted(nodes)[:max_nodes])
+        layers = [
+            {
+                "path": node,
+                "layer": levels[membership[node]],
+                "cycle_group": components[membership[node]]
+                if membership[node] in cyclic_memberships
+                else [],
+            }
+            for node in sorted(selected, key=lambda n: (levels[membership[n]], n))
+        ]
+        visible_edges = [
+            edge
+            for (source, target), edge in edges.items()
+            if source in selected and target in selected
+        ]
+        return {
+            "files": layers,
+            "edges": visible_edges[:max_edges],
+            "cycles": [group for group in cycle_groups if set(group) & selected],
+            "total_files": len(nodes),
+            "total_cycles": len(cycle_groups),
+            "truncated": len(nodes) > max_nodes or len(visible_edges) > max_edges,
+            "layer_order": "dependency_first; layer 0 = no resolved local dependencies "
+            "outside its cycle group",
+            "coverage": "condensed static dependency graph; layers are not business semantics",
         }
-        for node in sorted(selected, key=lambda n: (levels[membership[n]], n))
-    ]
-    visible_edges = [
-        edge
-        for (s, t), edge in edges.items()
-        if s in selected and t in selected and (include_type_only or not edge["type_only"])
-    ]
-    cycles = [group for group in cycle_groups if set(group) & selected]
-    return {
+    # Bind continuation to the publication, even if an edit leaves the graph
+    # topology unchanged. Mirror revisions are immutable; Live provides its
+    # validated source identity/manifest and current derived index version.
+    fingerprint = hashlib.sha256()
+    fingerprint.update(
+        json.dumps(
+            [
+                project_id,
+                revision,
+                path_prefix,
+                include_type_only,
+                getattr(db, "source_id", None),
+                getattr(db, "manifest", None),
+                getattr(getattr(db, "service", None), "_index_version", None),
+            ],
+            ensure_ascii=False,
+        ).encode()
+    )
+    for node in sorted(nodes):
+        fingerprint.update(json.dumps(node, ensure_ascii=False).encode())
+    ordered_edges = [edges[key] for key in sorted(edges)]
+    for edge in ordered_edges:
+        fingerprint.update(json.dumps(edge, ensure_ascii=False, sort_keys=True).encode())
+    graph_id = "architecture_" + fingerprint.hexdigest()[:32]
+    file_offset, edge_offset = _architecture_offsets(
+        cursor, graph_id, len(nodes), len(ordered_edges)
+    )
+    ordered_nodes = sorted(nodes, key=lambda n: (levels[membership[n]], n))
+    selected = ordered_nodes[file_offset : file_offset + max_nodes]
+    # Large SCCs must not duplicate O(component size) paths for every file.
+    # Every member has the same stable ID, so a client can reconstruct complete
+    # memberships by walking all file pages. Small-graph fields stay compatible.
+    cycle_info = {}
+    for i in cyclic_memberships:
+        group = components[i]
+        sample, sample_chars = [], 2
+        for member in group[:32]:
+            cost = len(json.dumps(member, ensure_ascii=False)) + 2
+            if sample_chars + cost > 2048:
+                break
+            sample.append(member)
+            sample_chars += cost
+        cycle_info[i] = (
+            "cycle_" + hashlib.sha256("\0".join(group).encode()).hexdigest()[:24],
+            sample,
+            len(group),
+        )
+    layers = []
+    for node in selected:
+        group_index = membership[node]
+        item = {"path": node, "layer": levels[group_index], "cycle_group": []}
+        if node in stylesheets:
+            item["role"] = "stylesheet_dependency"
+        if group_index in cycle_info:
+            group_id, sample, size = cycle_info[group_index]
+            item.update(
+                cycle_group=sample,
+                cycle_group_id=group_id,
+                cycle_group_size=size,
+                cycle_group_sampled=size > len(sample),
+            )
+        layers.append(item)
+    visible_groups = {membership[node] for node in selected} & cyclic_memberships
+    cycles = [cycle_info[i][1] for i in sorted(visible_groups)]
+    result = {
         "files": layers,
-        "edges": visible_edges[:max_edges],
+        # Edge pages cover the entire scoped graph, independently of file pages.
+        # Their endpoints may occur in other pages and merge by stable file path.
+        "edges": ordered_edges[edge_offset : edge_offset + max_edges],
         "cycles": cycles,
         "total_files": len(nodes),
+        "total_edges": len(ordered_edges),
+        "file_count_scope": "indexed structure files and their authorized CSS imports in scope",
+        "structure_file_count": len(nodes) - len(stylesheets),
+        "stylesheet_dependency_count": len(stylesheets),
         "total_cycles": len(cycle_groups),
-        "truncated": len(nodes) > max_nodes or len(visible_edges) > max_edges,
+        "graph_id": graph_id,
+        "file_offset": file_offset,
+        "edge_offset": edge_offset,
+        "cycle_summaries_truncated": any(
+            len(cycle_info[i][1]) < len(components[i]) for i in visible_groups
+        ),
+        "pagination": "independent file and edge pages; merge by path/source/target; "
+        "repeat the same scope and snapshot with next_cursor. Reconstruct large cycles "
+        "from files sharing cycle_group_id; cycle_group/cycles samples contain at most 32 paths",
         "layer_order": "dependency_first; layer 0 = no resolved local dependencies "
         "outside its cycle group",
         "coverage": "condensed static dependency graph; layers are not business semantics",
     }
+    _architecture_continuation(result)
+    return result
 
 
 def external_dependencies(

@@ -63,7 +63,7 @@ def test_each_project_owns_current_database_and_unrequested_sources_remain_lazy(
             assert db.execute("SELECT DISTINCT revision FROM files").fetchall() == [(1,)]
             assert db.execute("PRAGMA integrity_check").fetchone() == ("ok",)
         limits = pool.status(project)["limits"]
-        assert limits["database_page_ceiling_bytes"] == 500 * 1024**2
+        assert limits["database_page_ceiling_bytes"] == 2 * 1024**3
         assert limits["open_project_limit"] == 4 and limits["cached_projects"] == 1
         assert limits["storage_layout"] == "one_database_per_project"
     (backend.sources["a"].root / "main.py").write_text("def value(): return 2\n")

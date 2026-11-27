@@ -172,8 +172,26 @@ def test_partial_index_marks_flow_partial(parts):
     assert query(parts)["analysis_status"] == "partial"
 
 
-def test_combined_output_budget_counts_values_symbols_and_files(parts):
-    result = query(parts, mode="combined", max_nodes=8, max_edges=7, max_chars=4500)
+@pytest.mark.parametrize("public", [False, True])
+def test_combined_output_budget_counts_values_symbols_and_files(parts, public):
+    options = {"max_nodes": 8, "max_edges": 7, "max_chars": 4500}
+    if public:
+        _, backend, _, snapshot = parts
+        reply = asyncio.run(
+            build_mcp(backend).call_tool(
+                "analyze_code",
+                {
+                    "project_id": "sample",
+                    "snapshot": snapshot,
+                    "selector": selector(),
+                    **options,
+                },
+            )
+        )
+        assert not reply.is_error
+        result = reply.structured_content
+    else:
+        result = query(parts, mode="combined", **options)
     identities, edges = set(), set()
 
     def collect(value):
@@ -191,6 +209,10 @@ def test_combined_output_budget_counts_values_symbols_and_files(parts):
     assert len(identities) <= 8 and len(edges) <= 7
     assert len(json.dumps(result, ensure_ascii=False)) <= 4500
     assert result["analysis_status"] == "partial" and result["truncated"]
+    coverage = result["index_coverage"]
+    assert coverage["details_omitted"] and coverage["files"]["known"] == 1
+    assert coverage["inventory_complete"] and coverage["relations_require_global_coverage"]
+    assert result["dataflow"]["conclusion"]["absence_proven"] is False
 
 
 @pytest.mark.parametrize(

@@ -15,7 +15,14 @@ from code_context.intelligence_models import (
     module_id,
 )
 from code_context.intelligence_roots import PythonSourceRoots, python_modules, select_source_roots
-from code_context.language_frontends import SCRIPT_LANGUAGES
+from code_context.language_frontends import LIVE_SCRIPT_LANGUAGES, SCRIPT_LANGUAGES
+from code_context.vite_aliases import ViteConfig, internal_path
+
+_MODULE_SYNTAX = {
+    "MODULE_IMPORT": "import",
+    "MODULE_REEXPORT": "reexport",
+    "MODULE_DYNAMIC_IMPORT": "dynamic_import",
+}
 
 
 class Resolver:
@@ -25,9 +32,27 @@ class Resolver:
         roots: PythonSourceRoots | None = None,
         *,
         track_dependencies: bool = False,
+        live_modules: bool = False,
+        vite_configs: dict[str, ViteConfig] | None = None,
+        stylesheet_paths=(),
     ):
         self.files = files
+        self.live_modules = live_modules
+        self.script_languages = LIVE_SCRIPT_LANGUAGES if live_modules else SCRIPT_LANGUAGES
+        self.vite_scopes = defaultdict(list)
+        for path, config in sorted((vite_configs or {}).items()):
+            if live_modules and path == config.path:
+                self.vite_scopes[posixpath.dirname(path)].append(config)
         self.languages = {path: parsed.language for path, parsed in files.items()}
+        self.stylesheet_paths = tuple(sorted(stylesheet_paths)) if live_modules else ()
+        self.languages.update((path, "css") for path in self.stylesheet_paths)
+        # A file-level import reads availability, not the target file's symbols or body.
+        self.module_languages = {
+            path: parsed.language
+            for path, parsed in files.items()
+            if parsed.status != "resource_limited"
+        }
+        self.module_languages.update((path, "css") for path in self.stylesheet_paths)
         self.python_roots = select_source_roots(files, roots or PythonSourceRoots())
         self.python_source_roots = self.python_roots.roots or ()
         self.modules: dict[tuple[str, str], list[str]] = defaultdict(list)
@@ -68,8 +93,16 @@ class Resolver:
 
     def topology(self) -> tuple:
         """An export/import change invalidates bindings, not unchanged parse trees."""
-        return self.python_source_roots, tuple(
-            binding_shape(parsed) for _, parsed in sorted(self.files.items())
+        base = (
+            self.python_source_roots,
+            tuple(binding_shape(parsed) for _, parsed in sorted(self.files.items())),
+        )
+        if not self.live_modules:
+            return base
+        return (
+            *base,
+            tuple((k, tuple(v)) for k, v in sorted(self.vite_scopes.items())),
+            self.stylesheet_paths,
         )
 
     def _module_paths(self, language: str, name: str) -> list[str]:
@@ -99,6 +132,16 @@ class Resolver:
     def _module_target(self, language: str, name: str) -> dict:
         paths = self._module_paths(language, name)
         if len(paths) == 1:
+            if (
+                self.live_modules
+                and language == "python"
+                and not self.module_languages.get(paths[0])
+            ):
+                return {
+                    "target_module": name,
+                    "resolution": "unavailable",
+                    "evidence": "module_source_unavailable",
+                }
             return {
                 "target_path": paths[0],
                 "target_symbol_id": module_id(paths[0]),
@@ -128,7 +171,8 @@ class Resolver:
         names = python_modules(parsed.path, self.python_source_roots)
         name = names[-1] if names else ""
         package = name.split(".")
-        if not parsed.path.endswith("/__init__.py") and parsed.path != "__init__.py":
+        package_files = {"__init__.py", "__init__.pyi"} if self.live_modules else {"__init__.py"}
+        if posixpath.basename(parsed.path) not in package_files:
             package = package[:-1]
         if imp.level > len(package):
             return ""
@@ -143,7 +187,7 @@ class Resolver:
         arity: int | None,
         trail: frozenset = frozenset(),
     ) -> dict:
-        if parsed.language in SCRIPT_LANGUAGES:
+        if parsed.language in self.script_languages:
             return self._script_import_target(parsed, imp, suffix, arity, trail)
         name = self._import_module(parsed, imp)
         if not name:
@@ -172,9 +216,14 @@ class Resolver:
                 class_name = qualified.removeprefix(self.files[full_class[0]].module + ".")
                 return self._export(full_class[0], [class_name, *wanted[1:]], arity, trail)
         paths = self._module_paths(parsed.language, name)
+        if self.live_modules and parsed.language == "python" and paths:
+            if len(paths) > 1 or not self.module_languages.get(paths[0]):
+                return self._module_target("python", name)
         if wanted:
             submodule = ".".join([name, *wanted])
             subpaths = self._module_paths(parsed.language, submodule)
+            if self.live_modules and parsed.language == "python" and len(subpaths) > 1:
+                return self._module_target("python", submodule)
             if len(subpaths) == 1 and parsed.language == "python":
                 return self._module_target(parsed.language, submodule)
         if len(paths) == 1:
@@ -192,7 +241,7 @@ class Resolver:
     def _export(
         self, path: str, names: list[str], arity: int | None, trail: frozenset = frozenset()
     ) -> dict:
-        if self.languages[path] in SCRIPT_LANGUAGES:
+        if self.languages[path] in self.script_languages:
             return self._script_export(path, names, arity, trail)
         key = (path, ".".join(names))
         if key in trail or len(trail) >= 8:
@@ -234,7 +283,7 @@ class Resolver:
     def _binding_target(self, parsed: ParsedFile, ref: Reference, depth: int = 0) -> dict:
         if depth >= 5:
             return self._unknown(ref.name, "dynamic_or_deep_binding")
-        if parsed.language in SCRIPT_LANGUAGES:
+        if parsed.language in self.script_languages:
             return self._script_binding_target(parsed, ref)
         if parsed.language == "java" and "::" in ref.name:
             receiver, separator, method = ref.name.partition("::")
@@ -367,63 +416,156 @@ class Resolver:
                 return self._unknown(ref.name, "wildcard_import_or_ambiguous_target")
         return self._unknown(ref.name, "dynamic_receiver" if suffix else "no_static_binding")
 
-    def _script_module_paths(self, parsed, specifier):
-        """Resolve only an unambiguous relative path inside the supplied inventory."""
-        if not specifier.startswith(("./", "../")) or "\\" in specifier or "\0" in specifier:
-            return []
-        base = posixpath.normpath(posixpath.join(posixpath.dirname(parsed.path), specifier))
-        if base == ".." or base.startswith("../") or base.startswith("/"):
-            return []
+    def _script_candidates(self, base, *, file_only):
         suffix = posixpath.splitext(base)[1]
+        if self.live_modules and file_only and suffix == ".css":
+            return [base] if self.module_languages.get(base) == "css" else []
         extensions = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+        if self.live_modules:
+            extensions += (".mts", ".cts")
         if suffix:
             candidates = [base]
             # TS commonly uses emitted .js specifiers, but no compiler-mode
             # precedence is assumed when multiple source targets are visible.
             if suffix in {".js", ".jsx", ".mjs", ".cjs"}:
                 candidates += [base[: -len(suffix)] + ext for ext in (".ts", ".tsx")]
+            if self.live_modules and suffix in {".mjs", ".cjs"}:
+                candidates.append(base[:-4] + (".mts" if suffix == ".mjs" else ".cts"))
         else:
             candidates = [base + ext for ext in extensions]
             candidates += [posixpath.join(base, "index" + ext) for ext in extensions]
         return sorted(
-            {
-                path
-                for path in candidates
-                if self.files.get(path) is not None
-                and self.files[path].language in SCRIPT_LANGUAGES
-            }
+            {path for path in candidates if self.languages.get(path) in self.script_languages}
         )
 
-    def _script_module_target(self, parsed, specifier):
-        paths = self._script_module_paths(parsed, specifier)
-        if len(paths) == 1:
-            return {
-                "target_path": paths[0],
-                "target_symbol_id": module_id(paths[0]),
-                "target_qualname": "",
-                "target_module": paths[0],
-                "resolution": "resolved",
-                "evidence": "script_relative_module",
-            }
-        if paths:
-            return {"resolution": "ambiguous", "evidence": "script_multiple_module_candidates"}
-        return {
+    def _vite_config(self, path):
+        directory = posixpath.dirname(path)
+        while True:
+            configs = self.vite_scopes.get(directory, ())
+            if configs or not directory:
+                return configs
+            directory = posixpath.dirname(directory)
+
+    def stylesheet_target(self, parsed, specifier):
+        """Locate an exact stylesheet candidate for the Live source authorization check."""
+        if not self.live_modules or not specifier.endswith(".css"):
+            return None
+        return self._script_module_target(parsed, specifier, file_only=True).get("target_path")
+
+    def _script_module_target(self, parsed, specifier, *, file_only=False):
+        unresolved = {
             "target_module": specifier,
             "resolution": "unavailable" if specifier.startswith(".") else "external_or_unavailable",
             "evidence": "script_module_not_in_authorized_inventory",
         }
+        config_path = ""
+        source = "script_relative_module"
+        if specifier.startswith(("./", "../")):
+            if self.live_modules:
+                base = internal_path(posixpath.dirname(parsed.path), specifier)
+                if base is None:
+                    return {**unresolved, "evidence": "script_module_outside_inventory"}
+            else:
+                base = posixpath.normpath(posixpath.join(posixpath.dirname(parsed.path), specifier))
+                if (
+                    "\\" in specifier
+                    or "\0" in specifier
+                    or base == ".."
+                    or base.startswith(("../", "/"))
+                ):
+                    return unresolved
+        elif self.live_modules and not specifier.startswith("/"):
+            configs = self._vite_config(parsed.path)
+            if len(configs) > 1:
+                return {
+                    **unresolved,
+                    "resolution": "ambiguous",
+                    "evidence": "vite_config_scope_ambiguous",
+                }
+            if not configs:
+                return unresolved
+            config = configs[0]
+            config_path = config.path
+            if file_only:
+                unresolved["config_path"] = config_path
+            if config.blocked:
+                return {
+                    **unresolved,
+                    "resolution": "unresolved",
+                    "evidence": config.blocked.lower(),
+                }
+            matches = [
+                alias
+                for alias in config.aliases
+                if specifier == alias.key or specifier.startswith(alias.key + "/")
+            ]
+            if not matches:
+                unresolved.pop("config_path", None)
+                return unresolved
+            if len(matches) > 1:
+                return {**unresolved, "resolution": "ambiguous", "evidence": "vite_alias_ambiguous"}
+            alias = matches[0]
+            if alias.diagnostic:
+                return {
+                    **unresolved,
+                    "resolution": "ambiguous"
+                    if alias.diagnostic == "VITE_ALIAS_AMBIGUOUS"
+                    else "unresolved",
+                    "evidence": alias.diagnostic.lower(),
+                }
+            tail = specifier[len(alias.key) :]
+            base = internal_path(alias.path, tail[1:] if tail else ".")
+            if base is None:
+                return {
+                    **unresolved,
+                    "resolution": "unavailable",
+                    "evidence": "vite_alias_outside_inventory",
+                }
+            unresolved["resolution"] = "unavailable"
+            source = "script_vite_alias"
+        else:
+            if self.live_modules and specifier.startswith("/"):
+                unresolved.update(
+                    resolution="unavailable", evidence="script_module_outside_inventory"
+                )
+            return unresolved
+        paths = self._script_candidates(base, file_only=file_only)
+        if len(paths) == 1:
+            if self.live_modules and not self.module_languages.get(paths[0]):
+                return {
+                    **unresolved,
+                    "resolution": "unavailable",
+                    "evidence": "script_module_source_unavailable",
+                }
+            target = {
+                "target_path": paths[0],
+                "target_module": paths[0],
+                "resolution": "resolved",
+                "evidence": source,
+            }
+            if not file_only:
+                target.update(target_symbol_id=module_id(paths[0]), target_qualname="")
+            elif config_path:
+                target["config_path"] = config_path
+            return target
+        if paths:
+            target = {"resolution": "ambiguous", "evidence": "script_multiple_module_candidates"}
+            if file_only and config_path:
+                target["config_path"] = config_path
+            return target
+        return unresolved
 
     def _script_import_target(self, parsed, imp, suffix, arity, trail=frozenset()):
-        paths = self._script_module_paths(parsed, imp.module)
-        if len(paths) != 1:
-            return self._script_module_target(parsed, imp.module)
+        target = self._script_module_target(parsed, imp.module)
+        if target["resolution"] != "resolved":
+            return target
         if not imp.imported_name or imp.imported_name == "*":
             if not suffix:
-                return self._script_module_target(parsed, imp.module)
+                return target
             names = suffix
         else:
             names = [imp.imported_name, *suffix]
-        return self._script_export(paths[0], names, arity, trail)
+        return self._script_export(target["target_path"], names, arity, trail)
 
     def _script_export(self, path, names, arity, trail=frozenset()):
         from code_context.intelligence_typescript import EXPORT_SCOPE
@@ -520,6 +662,40 @@ class Resolver:
         finally:
             reads.active = None
 
+    def _python_file_import(self, parsed, ref, imp, owner):
+        """Bind the directly named module, independent of the exported member's fate."""
+        name = self._import_module(parsed, imp)
+        spelling = "." * imp.level + imp.module
+        target = (
+            self._module_target("python", name)
+            if name
+            else self._unknown(spelling, "invalid_relative_import")
+        )
+        if name and target["resolution"] != "ambiguous" and imp.imported_name not in {"", "*"}:
+            submodule = name + "." + imp.imported_name
+            if self._module_paths("python", submodule):
+                target = self._module_target("python", submodule)
+                spelling = ref.name
+        target.pop("target_symbol_id", None)
+        target.pop("target_qualname", None)
+        if target["resolution"] == "resolved":
+            target["evidence"] = "python_module_import"
+        return Relation(
+            parsed.path,
+            "MODULE_IMPORT",
+            spelling,
+            ref.line,
+            source_symbol_id=owner,
+            source_qualname=ref.source_qualname,
+            column=ref.column,
+            type_only=ref.type_only,
+            conditional=ref.conditional,
+            execution_context=ref.execution_context,
+            execution_scope=ref.execution_scope,
+            module_syntax="import",
+            **target,
+        )
+
     def _resolve_file(self, path: str) -> list[Relation]:
         parsed = self.files[path]
         result: list[Relation] = []
@@ -542,12 +718,23 @@ class Resolver:
                     evidence="syntax_definition",
                 )
             )
+        by_line = defaultdict(list)
+        for imp in parsed.imports:
+            by_line[imp.line].append(imp)
+        python_sites = set()
         for ref in parsed.references:
+            owner = self.symbols.get((path, ref.source_qualname), [])
+            owner_id = owner[0].id if len(owner) == 1 else module_id(path)
+            kind = ref.kind
+            module_syntax = ""
             if ref.kind == "IMPORT":
-                imports = [i for i in parsed.imports if i.line == ref.line]
+                imports = by_line[ref.line]
                 import_name = (
-                    ref.name if parsed.language in SCRIPT_LANGUAGES else ref.name.lstrip(".")
+                    ref.name if parsed.language in self.script_languages else ref.name.lstrip(".")
                 )
+                if self.live_modules and parsed.language == "python":
+                    level = len(ref.name) - len(import_name)
+                    imports = [i for i in imports if i.level == level]
                 matches = [
                     i
                     for i in imports
@@ -557,6 +744,20 @@ class Resolver:
                     matches = [i for i in imports if import_name == i.local_name]
                 if not matches:
                     matches = [i for i in imports if import_name == i.module]
+                if (
+                    self.live_modules
+                    and parsed.language == "python"
+                    and matches
+                    and all(
+                        (i.module, i.imported_name) == (matches[0].module, matches[0].imported_name)
+                        for i in matches
+                    )
+                ):
+                    relation = self._python_file_import(parsed, ref, matches[0], owner_id)
+                    site = (ref.line, owner_id, relation.name, ref.type_only, ref.conditional)
+                    if site not in python_sites:
+                        python_sites.add(site)
+                        result.append(relation)
                 if len(matches) == 1:
                     imp = matches[0]
                     target = self._import_target(parsed, imp, [], None)
@@ -564,7 +765,7 @@ class Resolver:
                     if imp.imported_name == "*":
                         target = (
                             self._script_module_target(parsed, imp.module)
-                            if parsed.language in SCRIPT_LANGUAGES
+                            if parsed.language in self.script_languages
                             else self._module_target(
                                 parsed.language, self._import_module(parsed, imp)
                             )
@@ -572,10 +773,16 @@ class Resolver:
                         target["evidence"] = "wildcard_module_import"
                 else:
                     target = self._unknown(ref.name, "import_binding_not_unique")
+            elif (
+                self.live_modules
+                and parsed.language in self.script_languages
+                and kind in _MODULE_SYNTAX
+            ):
+                target = self._script_module_target(parsed, ref.name, file_only=True)
+                module_syntax = _MODULE_SYNTAX[kind]
+                kind = "MODULE_IMPORT"
             else:
                 target = self._binding_target(parsed, ref)
-            owner = self.symbols.get((path, ref.source_qualname), [])
-            kind = ref.kind
             if kind == "CALL" and target.get("target_symbol_id"):
                 matched = self.by_id.get(target["target_symbol_id"])
                 if matched and matched.kind in CLASS_KINDS:
@@ -588,13 +795,15 @@ class Resolver:
                     kind,
                     ref.name,
                     ref.line,
-                    source_symbol_id=owner[0].id if len(owner) == 1 else module_id(path),
+                    source_symbol_id=owner_id,
                     source_qualname=ref.source_qualname,
                     column=ref.column,
                     type_only=ref.type_only,
                     conditional=ref.conditional,
                     execution_context=ref.execution_context,
                     execution_scope=ref.execution_scope,
+                    call_control=ref.call_control,
+                    module_syntax=module_syntax,
                     **target,
                 )
             )

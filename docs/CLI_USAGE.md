@@ -34,6 +34,19 @@ uv run colink live --root examples/sample_project --project sample \
 将示例绝对路径换成真实安装位置。只有你选定的目录可读；不需要 HTTP 令牌，也不
 自动修改客户端配置或创建 ChatGPT 连接。修改用户项目时必须另有明确授权。
 
+自 0.5.0 起，`live` / `workspace` 默认使用 `--capacity large`：25 万文件、
+512 MiB 项目源码、256 MiB 解析、256 MiB 索引载荷、200 万事实、2 GiB 数据库。
+本机启动时追加 `--capacity extreme` 可选 100 万文件、2 GiB 源码、1 GiB 解析、
+1 GiB 索引载荷、1000 万事实、8 GiB 数据库。数据库按需分配，保留日志的临时磁盘
+峰值预算按数据库上限三倍计；这不是进程内存上限或同规模通过验收的保证。
+容量选择不作为网页 MCP 参数提供，重建只涉及派生结构索引。
+
+单文件仍为 4 MiB，单次源码/图响应仍最多 50,000 字符。Live 架构图增加可选
+`cursor`：先正常查询，再使用返回的 `snapshot` 和 `next_cursor`、相同筛选条件
+继续查询。文件和边独立推进，边端点可在其他页，按路径合并；源码或筛选范围变化
+会明确拒绝旧游标。容量状态、实际压测规模与大环成员恢复见
+[大项目容量说明](LARGE_PROJECT_CAPACITY_20261029.md)。
+
 ### 多项目工作区
 
 `workspace-init` 在本机登记选定目录并发现候选项目；`workspace` 只运行已确认

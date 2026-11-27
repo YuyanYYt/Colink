@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import json
 import time
-from collections import deque
+from collections import defaultdict, deque
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from code_context.analysis_context import attach_context, structure_evidence
 from code_context.analysis_response import AnalysisRequestError, AnalysisResponseBudgetExceeded
+from code_context.call_conditions import contradictory_call_guards
+from code_context.intelligence_coverage import bound_index_coverage
 from code_context.intelligence_models import CLASS_KINDS, is_traversable_call
 from code_context.intelligence_queries import (
     decode_relation,
@@ -434,7 +436,7 @@ def _call_path(db, project_id, revision, root, target, max_depth, max_nodes, max
     # Target is included only if the requested node budget can hold both endpoints.
     if target_id not in nodes and len(nodes) < max_nodes:
         nodes[target_id] = target
-    return {
+    result = {
         "root": root_id,
         "target": target_id,
         "direction": "outgoing",
@@ -451,6 +453,25 @@ def _call_path(db, project_id, revision, root, target, max_depth, max_nodes, max
         "no_path_is_not_runtime_proof": True,
         "continuation": {"frontier_symbol_ids": list(nodes)[-20:]},
     }
+    if getattr(db, "source_mode", None) == "live":
+        by_pair = defaultdict(list)
+        for edge in path_edges:
+            by_pair[edge["source_symbol_id"], edge["target_symbol_id"]].append(edge)
+        conflicts = 0
+        if not truncated:
+            conflicts = sum(contradictory_call_guards(path, by_pair) for path in paths)
+        result["path_semantics"] = {
+            "kind": "static_may_call",
+            "runtime_reachability": "unknown",
+            "guard_consistency": (
+                "conflict_in_all_returned_chains"
+                if conflicts and conflicts == len(paths)
+                else "conflict_in_some_returned_chains"
+                if conflicts
+                else "unverified"
+            ),
+        }
+    return result
 
 
 def _graphs(result):
@@ -484,6 +505,9 @@ def _mark_sections(result, sections, reason):
 
 def _clipped_field(result, parents, section, field, before, reason="max_chars"):
     _mark_sections(result, (*parents, section), reason)
+    if field in {"edges", "paths"} and "path_semantics" in section:
+        # Guard consistency applies only to complete witnesses in this response.
+        section["path_semantics"]["guard_consistency"] = "unverified"
     fields = section.setdefault("clipped_fields", [])
     previous = next((entry for entry in fields if entry["field"] == field), None)
     if previous is None:
@@ -767,6 +791,15 @@ def bound_analysis_result(result: dict, max_chars: int) -> dict:
         return sizes[identity]
 
     while (encoded_size := len(json.dumps(result, ensure_ascii=False))) > max_chars:
+        if result.get("mode") == "combined" and "index_coverage" in result:
+            coverage = result["index_coverage"]
+            if "details" in coverage:
+                # Preserve graph witnesses before repeating optional file examples
+                # from the enclosing index. Status, limitations and counts survive.
+                result["index_coverage"] = bound_index_coverage(
+                    coverage, max_chars, summary_only=True
+                )
+                continue
         candidates = []
         for section, parents, name in _analysis_sections(result):
             for key, minimum in minimums.items():

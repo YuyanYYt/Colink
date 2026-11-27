@@ -1,5 +1,17 @@
 # 统一源码读取与分析入口
 
+自 0.5.0 起，Live可以分别回答“导入了哪个文件”和“引用了哪个成员”。文件依赖的
+`evidence` 中，`scope=module` 表示模块已唯一定位，`line`、`column` 指向原文件。
+对所选文件查询 `include=["dependencies"]` 和 `direction="outgoing"` 可查看未解析的模块或成员诊断。
+Vue 普通脚本和 `script setup` 支持 JS/TS。相对路径、授权清单内的静态 Vite 别名、
+字面量懒加载和显式 CSS 导入可提供文件边；模板求值和计算型路径会保留覆盖限制。
+
+`repo_overview.file_count` 统计授权目录中通过路径筛选的清单条目，正文另行检查。
+`get_project_architecture` 分别返回结构文件数 `structure_file_count` 和显式引入的样式文件数
+`stylesheet_dependency_count`，两者之和为 `total_files`。正文受限的结构文件可以有文件节点，
+其覆盖信息会记录原因。调用链的 `path_semantics` 说明它是静态候选，并给出可核实的分支矛盾。
+`call_control.guards` 可用于跳回条件或提前退出所在的源码位置。
+
 2026-10-29 build 36 修复网页实测的 include 组合、调用阶段和裁剪问题；继续隐藏 mode，
 单值方向复用 incoming/outgoing/both，路径与值流可附带 context 结构证据。
 具体契约与验收边界见 [修复说明](CODE_INTELLIGENCE_REPAIR_20261029.md)。

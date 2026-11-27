@@ -274,6 +274,12 @@ def create_build_manifest(
     structure = _constant(
         bodies, "language_frontends.py", "STRUCTURE_LANGUAGES", {"SCRIPT_LANGUAGES": scripts}
     )
+    live_structure = _constant(
+        bodies,
+        "language_frontends.py",
+        "LIVE_STRUCTURE_LANGUAGES",
+        {"STRUCTURE_LANGUAGES": structure},
+    )
     flow = _constant(bodies, "language_frontends.py", "VALUE_FLOW_LANGUAGES")
     return {
         "schema_version": 1,
@@ -296,7 +302,7 @@ def create_build_manifest(
             "live_index": live or "unknown",
         },
         "capabilities": {
-            "structure_languages": sorted(structure or []),
+            "structure_languages": sorted(live_structure or structure or []),
             "value_flow_languages": sorted(flow or []),
             "production_backend": "python",
             "rust_enabled": False,

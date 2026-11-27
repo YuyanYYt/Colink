@@ -12,6 +12,7 @@ from code_context.execution_gate import native_gate
 from code_context.execution_git import GitCoordinator
 from code_context.execution_ports import PortsCoordinator
 from code_context.live import LiveQueries
+from code_context.live_capacity import LARGE_CAPACITY
 from code_context.live_watch import WatchCoordinator
 from code_context.local_control import LocalControl, control_request, private_directory
 from code_context.project_index import ProjectIndexService
@@ -39,6 +40,7 @@ class WorkspaceRuntime:
         socket_dir: Path | None = None,
         *,
         recovery_dir: Path | None = None,
+        capacity=LARGE_CAPACITY,
     ):
         self.state = private_directory(data_dir)
         self.data_dir = self.state.root
@@ -84,9 +86,11 @@ class WorkspaceRuntime:
                 raise SourceError(
                     "WORKSPACE_NOT_CONFIGURED: select and enable a project locally first"
                 )
-            self.backend = LiveQueries(registry=self.registry)
+            self.backend = LiveQueries(registry=self.registry, capacity=capacity)
             index_directory = private_directory(self.data_dir / "index")
-            self.backend.index_service = ProjectIndexService(index_directory.root)
+            self.backend.index_service = ProjectIndexService(
+                index_directory.root, capacity=capacity
+            )
             self.watcher = WatchCoordinator(
                 self.backend.sources, self.backend.index_service.invalidate
             )

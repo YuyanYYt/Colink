@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
+from code_context.call_conditions import add_guard
 from code_context.intelligence_models import (
     MAX_FILE_NODES,
     MAX_FILE_REFERENCES,
@@ -124,8 +125,13 @@ def _count_nodes(tree: ast.AST, remaining: int) -> int:
 
 
 class _Extractor(ast.NodeVisitor):
-    def __init__(self, parsed: ParsedFile, text: str, tree: ast.Module, nodes: int):
+    def __init__(
+        self, parsed: ParsedFile, text: str, tree: ast.Module, nodes: int, flow_guards=False
+    ):
         self.parsed = parsed
+        self.flow_guards = flow_guards
+        self.guards = ()
+        self.exit_summaries = {}
         # Python's physical lines use CR/LF, not Unicode separators inside literals.
         self.lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
         self.columns: dict[int, list[int]] = {}
@@ -208,10 +214,13 @@ class _Extractor(ast.NodeVisitor):
                 owner,
                 column,
                 self.type_only if type_only is None else type_only,
-                self.conditional,
+                self.conditional or (kind == "CALL" and bool(self.guards)),
                 arity,
                 execution_context,
                 execution_scope,
+                call_control={"guards": list(self.guards)}
+                if kind == "CALL" and self.guards
+                else None,
             )
         )
 
@@ -311,10 +320,14 @@ class _Extractor(ast.NodeVisitor):
             receiver_class=receiver_class,
         )
         self.frames.append(frame)
+        saved = self.guards, self.conditional
+        if self.flow_guards and kind in {"function", "method"}:
+            self.guards, self.conditional = (), False
         try:
             yield
         finally:
             self.frames.pop()
+            self.guards, self.conditional = saved
 
     @contextmanager
     def _owner(self, qualname: str):
@@ -338,13 +351,64 @@ class _Extractor(ast.NodeVisitor):
             self.execution_context = previous
 
     @contextmanager
-    def _condition(self, *, type_only: bool = False):
-        previous = self.type_only, self.conditional
+    def _condition(self, *, type_only: bool = False, test=None, outcome=True):
+        previous = self.type_only, self.conditional, self.guards
         self.type_only, self.conditional = self.type_only or type_only, True
+        if self.flow_guards and test is not None:
+            self.guards = add_guard(self.guards, self._guard(test, "branch", outcome))
         try:
             yield
         finally:
-            self.type_only, self.conditional = previous
+            self.type_only, self.conditional, self.guards = previous
+
+    def _guard(self, test, kind, outcome=None):
+        line, column = self._position(test)
+        guard = {"kind": kind, "line": line, "column": column}
+        if outcome is not None:
+            guard["outcome"] = outcome
+        return guard
+
+    def _exits(self, statements):
+        """Only return/raise and nested if suites prove loss of fallthrough."""
+        status = 0  # none, possible, certain
+        for statement in statements:
+            if isinstance(statement, (ast.Return, ast.Raise)):
+                return 2
+            if isinstance(statement, ast.If):
+                body, alternative = self._if_exits(statement)
+                if body == alternative == 2:
+                    return 2
+                status = max(status, int(bool(body or alternative)))
+        return status
+
+    def _if_exits(self, statement):
+        if statement not in self.exit_summaries:
+            self.exit_summaries[statement] = (
+                self._exits(statement.body),
+                self._exits(statement.orelse),
+            )
+        return self.exit_summaries[statement]
+
+    def _suite(self, statements):
+        previous = self.guards
+        try:
+            for statement in statements:
+                self.visit(statement)
+                if self.flow_guards and isinstance(statement, ast.If):
+                    body, alternative = self._if_exits(statement)
+                    if body or alternative:
+                        # If both arms always exit, subsequent syntactic calls
+                        # still remain may-call facts, without a guessed outcome.
+                        outcome = (alternative == 2) if (body == 2) != (alternative == 2) else None
+                        kind = "prior_exit" if outcome is None else "fallthrough"
+                        self.guards = add_guard(
+                            self.guards, self._guard(statement.test, kind, outcome)
+                        )
+        finally:
+            self.guards = previous
+
+    def visit_Module(self, node):
+        self._suite(node.body)
 
     def _lookup_import(self, name: str) -> ImportBinding | None:
         current = self.frame
@@ -673,8 +737,7 @@ class _Extractor(ast.NodeVisitor):
         ):
             self._type_parameters(node)
             self._parameters(node.args, annotations)
-            for statement in node.body:
-                self.visit(statement)
+            self._suite(node.body)
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
@@ -695,8 +758,7 @@ class _Extractor(ast.NodeVisitor):
         self._bind(node.name, "symbol", node, value=qualname)
         with self._scope(qualname, "class", node.body, owner=qualname):
             self._type_parameters(node)
-            for statement in node.body:
-                self.visit(statement)
+            self._suite(node.body)
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
         with self._call_context("definition"):
@@ -825,35 +887,33 @@ class _Extractor(ast.NodeVisitor):
     def visit_If(self, node: ast.If) -> None:
         self.visit(node.test)
         runtime, marker = self._runtime_guard(node.test)
-        with self._condition(type_only=marker and runtime is False):
-            for statement in node.body:
-                self.visit(statement)
-        with self._condition(type_only=marker and runtime is True):
-            for statement in node.orelse:
-                self.visit(statement)
+        with self._condition(type_only=marker and runtime is False, test=node.test):
+            self._suite(node.body)
+        with self._condition(type_only=marker and runtime is True, test=node.test, outcome=False):
+            self._suite(node.orelse)
 
     def visit_IfExp(self, node: ast.IfExp) -> None:
         self.visit(node.test)
         runtime, marker = self._runtime_guard(node.test)
-        with self._condition(type_only=marker and runtime is False):
+        with self._condition(type_only=marker and runtime is False, test=node.test):
             self.visit(node.body)
-        with self._condition(type_only=marker and runtime is True):
+        with self._condition(type_only=marker and runtime is True, test=node.test, outcome=False):
             self.visit(node.orelse)
 
     def visit_For(self, node: ast.For | ast.AsyncFor) -> None:
         self.visit(node.iter)
         self._target(node.target)
         with self._condition():
-            for statement in [*node.body, *node.orelse]:
-                self.visit(statement)
+            self._suite(node.body)
+            self._suite(node.orelse)
 
     visit_AsyncFor = visit_For
 
     def visit_While(self, node: ast.While) -> None:
         self.visit(node.test)
         with self._condition():
-            for statement in [*node.body, *node.orelse]:
-                self.visit(statement)
+            self._suite(node.body)
+            self._suite(node.orelse)
 
     def visit_With(self, node: ast.With | ast.AsyncWith) -> None:
         for item in node.items:
@@ -861,15 +921,17 @@ class _Extractor(ast.NodeVisitor):
             if item.optional_vars is not None:
                 self._target(item.optional_vars)
         with self._condition():
-            for statement in node.body:
-                self.visit(statement)
+            self._suite(node.body)
 
     visit_AsyncWith = visit_With
 
     def visit_Try(self, node: ast.Try) -> None:
         with self._condition():
-            for statement in [*node.body, *node.handlers, *node.orelse, *node.finalbody]:
-                self.visit(statement)
+            self._suite(node.body)
+            for handler in node.handlers:
+                self.visit(handler)
+            self._suite(node.orelse)
+            self._suite(node.finalbody)
 
     visit_TryStar = visit_Try
 
@@ -878,8 +940,7 @@ class _Extractor(ast.NodeVisitor):
             self.visit(node.type)
         if node.name:
             self._bind(node.name, "variable", node)
-        for statement in node.body:
-            self.visit(statement)
+        self._suite(node.body)
 
     def visit_Match(self, node: ast.Match) -> None:
         self.visit(node.subject)
@@ -888,8 +949,7 @@ class _Extractor(ast.NodeVisitor):
                 self.visit(case.pattern)
                 if case.guard is not None:
                     self.visit(case.guard)
-                for statement in case.body:
-                    self.visit(statement)
+                self._suite(case.body)
 
     def visit_MatchAs(self, node: ast.MatchAs) -> None:
         if node.pattern is not None:
@@ -913,7 +973,7 @@ class _Extractor(ast.NodeVisitor):
         self._annotation(node.value)
 
 
-def parse_python(path: str, content: str) -> ParsedFile:
+def parse_python(path: str, content: str, *, flow_guards: bool = False) -> ParsedFile:
     """Extract bounded, unresolved facts from text; never access ``path`` on disk."""
     file_path = PurePosixPath(path)
     parts = list(file_path.with_suffix("").parts)
@@ -935,7 +995,7 @@ def parse_python(path: str, content: str) -> ParsedFile:
         # that ast.parse alone accepts. symtable compiles no executable code and
         # never imports or evaluates the supplied project.
         symtable.symtable(content, "<CoLink Python source>", "exec")
-        extractor = _Extractor(parsed, content, tree, nodes)
+        extractor = _Extractor(parsed, content, tree, nodes, flow_guards=flow_guards)
         extractor.visit(tree)
     except _LimitReached as error:
         parsed.status = (

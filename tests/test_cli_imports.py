@@ -173,7 +173,7 @@ def test_stdio_service_commands_still_dispatch_and_close(tmp_path, monkeypatch, 
         import code_context.workspace as workspace
 
         runtime = SimpleNamespace(backend=backend)
-        monkeypatch.setattr(workspace, "WorkspaceRuntime", lambda *_: nullcontext(runtime))
+        monkeypatch.setattr(workspace, "WorkspaceRuntime", lambda *_, **_opts: nullcontext(runtime))
     elif command == "live":
         import code_context.live as live
 

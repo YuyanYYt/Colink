@@ -60,24 +60,27 @@ def _same(first, second):
     )
 
 
-def _check_nodes(root):
+def _check_nodes(root, node_budget):
     cursor, count = root.walk(), 0
     while True:
         count += 1
-        if count > MAX_FILE_NODES:
+        if count > node_budget:
             raise _Limit
         if cursor.goto_first_child():
             continue
         while not cursor.goto_next_sibling():
             if not cursor.goto_parent():
-                return
+                return count
 
 
 class _ScriptFacts:
-    def __init__(self, result, source):
+    def __init__(self, result, source, *, file_imports=False, line_offset=0, column_offset=0):
         self.result, self.source = result, source
+        self.file_imports = file_imports
+        self.line_offset, self.column_offset = line_offset, column_offset
+        self.ascii_source = source.isascii()
         self.reference_keys = set()
-        self.scope_map = {"": Scope("", "module")}
+        self.scope_map = {scope.qualname: scope for scope in result.scopes}
 
     def text(self, node):
         if node is None:
@@ -90,8 +93,15 @@ class _ScriptFacts:
         return value
 
     def column(self, node):
-        start = self.source.rfind(b"\n", 0, node.start_byte) + 1
-        return len(self.source[start : node.start_byte].decode("utf-8")) + 1
+        row, byte_column = node.start_point
+        column = byte_column
+        if not self.ascii_source:
+            start = node.start_byte - byte_column
+            column = len(self.source[start : node.start_byte].decode("utf-8"))
+        return column + 1 + (self.column_offset if row == 0 else 0)
+
+    def line(self, node):
+        return self.line_offset + node.start_point[0] + 1
 
     def name(self, node):
         if node is None:
@@ -109,7 +119,7 @@ class _ScriptFacts:
     def partial(self, code, node):
         self.result.status = "partial"
         if len(self.result.diagnostics) < 20:
-            item = {"code": code, "line": node.start_point[0] + 1, "column": self.column(node)}
+            item = {"code": code, "line": self.line(node), "column": self.column(node)}
             if item not in self.result.diagnostics:
                 self.result.diagnostics.append(item)
 
@@ -118,9 +128,7 @@ class _ScriptFacts:
             return
         if len(self.result.bindings) >= MAX_FILE_REFERENCES:
             raise _Limit
-        self.result.bindings.append(
-            Binding(name, ctx.scope, kind, node.start_point[0] + 1, value=value)
-        )
+        self.result.bindings.append(Binding(name, ctx.scope, kind, self.line(node), value=value))
 
     def reference(self, name, kind, node, ctx, *, arity=None, type_only=None):
         if not name:
@@ -137,7 +145,7 @@ class _ScriptFacts:
             Reference(
                 name,
                 kind,
-                node.start_point[0] + 1,
+                self.line(node),
                 ctx.scope,
                 ctx.owner,
                 self.column(node),
@@ -156,8 +164,8 @@ class _ScriptFacts:
             name,
             qualname,
             kind,
-            node.start_point[0] + 1,
-            node.end_point[0] + 1,
+            self.line(node),
+            self.line_offset + node.end_point[0] + 1,
             ctx.scope,
             self.column(node),
             f"{name}({', '.join(params)})" if kind in {"function", "method"} else name,
@@ -199,7 +207,7 @@ class _ScriptFacts:
         if node.parent is None or node.parent.type != "variable_declaration":
             return ctx
         scope = ctx.scope
-        while scope and self.scope_map[scope].kind not in {"function", "method"}:
+        while scope and self.scope_map[scope].kind not in {"function", "method", "script_setup"}:
             scope = self.scope_map[scope].parent
         return replace(ctx, scope=scope)
 
@@ -208,7 +216,7 @@ class _ScriptFacts:
         name = name or self.name(name_node)
         if not name:
             self.partial("SCRIPT_ANONYMOUS_CALLABLE_PARTIAL", node)
-            name = f"<anonymous:{node.start_point[0] + 1}:{self.column(node)}>"
+            name = f"<anonymous:{self.line(node)}:{self.column(node)}>"
         parameters = self.parameters(node.child_by_field_name("parameters"))
         if node.type == "arrow_function" and node.child_by_field_name("parameter") is not None:
             param = node.child_by_field_name("parameter")
@@ -254,7 +262,7 @@ class _ScriptFacts:
                 module,
                 imported,
                 local,
-                node.start_point[0] + 1,
+                self.line(node),
                 EXPORT_SCOPE if export else ctx.scope,
                 type_only=type_only,
                 conditional=ctx.conditional,
@@ -303,6 +311,9 @@ class _ScriptFacts:
     def exports(self, node, ctx):
         if ctx.scope:
             self.partial("SCRIPT_EXPORT_SCOPE_PARTIAL", node)
+            if self.file_imports and self.scope_map[ctx.scope].kind == "script_setup":
+                # Setup bindings are component locals, never module exports.
+                return [(child, ctx) for child in _children(node)]
         module = self.source_specifier(node)
         clause = next((c for c in _children(node) if c.type == "export_clause"), None)
         default = any(c.type == "default" for c in node.children)
@@ -381,6 +392,8 @@ class _ScriptFacts:
         if module:
             self.import_binding(module, "*", "*", node, ctx, export=True, type_only=all_type)
         self.partial("SCRIPT_EXPORT_PARTIAL", node)
+        if self.file_imports and default and value is not None:
+            return [(value, ctx)]
         return []
 
     def visit(self, node, ctx):
@@ -421,7 +434,7 @@ class _ScriptFacts:
         if kind == "internal_module":
             self.partial("SCRIPT_NAMESPACE_PARTIAL", node)
             name_node = node.child_by_field_name("name")
-            name = self.name(name_node) or f"<namespace:{node.start_point[0] + 1}>"
+            name = self.name(name_node) or f"<namespace:{self.line(node)}>"
             symbol = self.declare(name, "namespace", node, ctx)
             inner = replace(ctx, scope=symbol.qualname, owner=symbol.qualname, class_name="")
             return [(c, inner) for c in _children(node) if not _same(c, name_node)]
@@ -460,14 +473,14 @@ class _ScriptFacts:
             return self.callable(node, ctx)
         if kind in {"statement_block", "object"}:
             scope = ".".join(
-                filter(None, [ctx.scope, f"<block:{node.start_point[0] + 1}:{self.column(node)}>"])
+                filter(None, [ctx.scope, f"<block:{self.line(node)}:{self.column(node)}>"])
             )
             self.result.scopes.append(Scope(scope, "block", ctx.scope))
             self.scope_map[scope] = self.result.scopes[-1]
             return [(c, replace(ctx, scope=scope)) for c in _children(node)]
         if kind in {"for_statement", "for_in_statement", "catch_clause"}:
             scope = ".".join(
-                filter(None, [ctx.scope, f"<scope:{node.start_point[0] + 1}:{self.column(node)}>"])
+                filter(None, [ctx.scope, f"<scope:{self.line(node)}:{self.column(node)}>"])
             )
             self.result.scopes.append(Scope(scope, "block", ctx.scope))
             self.scope_map[scope] = self.result.scopes[-1]
@@ -485,6 +498,10 @@ class _ScriptFacts:
             )
             name = self.name(function)
             arguments = node.child_by_field_name("arguments")
+            if self.file_imports and function is not None and function.type == "import":
+                # File imports have separate provenance. A module specifier does
+                # not establish a call to any symbol exported by that module.
+                return [(c, ctx) for c in _children(node) if not _same(c, function)]
             arity = (
                 len([c for c in _children(arguments) if c.type != "comment"])
                 if arguments is not None
@@ -557,17 +574,100 @@ class _ScriptFacts:
         )
         return [(c, inner) for c in _children(node)]
 
-    def extract(self, root):
-        stack = [(root, _Context())]
+    def module_occurrence(self, node, ctx):
+        """A direct file dependency is independent of any exported member or call."""
+        if node.type in {"import_statement", "export_statement"}:
+            source = node.child_by_field_name("source")
+            if source is None:
+                return
+            kind = "MODULE_IMPORT" if node.type == "import_statement" else "MODULE_REEXPORT"
+            type_only = any(child.type == "type" for child in node.children)
+            for clause in _children(node):
+                if clause.type == "import_clause":
+                    items = [item for item in _children(clause) if item.type != "comment"]
+                    if len(items) == 1 and items[0].type == "named_imports":
+                        clause = items[0]
+                if clause.type in {"named_imports", "export_clause"}:
+                    specs = [s for s in _children(clause) if s.type.endswith("_specifier")]
+                    type_only |= bool(specs) and all(
+                        any(c.type == "type" for c in spec.children) for spec in specs
+                    )
+        elif node.type == "call_expression":
+            callee = node.child_by_field_name("function")
+            if callee is None:
+                return
+            if callee.type == "member_expression":
+                obj = callee.child_by_field_name("object")
+                key = callee.child_by_field_name("property")
+                if (
+                    obj is not None
+                    and obj.type == "meta_property"
+                    and key is not None
+                    and self.text(obj) == "import.meta"
+                    and self.text(key) in {"glob", "globEager"}
+                ):
+                    self.partial("SCRIPT_PLUGIN_IMPORT_PARTIAL", node)
+                return
+            if callee.type != "import":
+                return
+            arguments = node.child_by_field_name("arguments")
+            if arguments is None:
+                return
+            source = next((c for c in _children(arguments) if c.type != "comment"), None)
+            if source is None or source.type not in {"string", "template_string"}:
+                self.partial("SCRIPT_DYNAMIC_IMPORT_PARTIAL", node)
+                return
+            kind, type_only = "MODULE_DYNAMIC_IMPORT", ctx.type_only
+        else:
+            return
+
+        fragments = _children(source)
+        if node.has_error or len(fragments) != 1 or fragments[0].type != "string_fragment":
+            self.partial(
+                "SCRIPT_DYNAMIC_IMPORT_PARTIAL"
+                if kind == "MODULE_DYNAMIC_IMPORT"
+                else "SCRIPT_MODULE_SPECIFIER_PARTIAL",
+                source,
+            )
+            return
+        self.reference(self.text(fragments[0]), kind, source, ctx, type_only=type_only)
+
+    def extract(self, root, initial):
+        # Remember only lexical transitions. File occurrences must visit expressions
+        # which the symbol binder deliberately skips, e.g. import('./x').then(f).
+        scope_changes = {}
+        stack = [(root, initial)]
         while stack:
             node, ctx = stack.pop()
-            stack.extend(reversed(self.visit(node, ctx)))
+            children = self.visit(node, ctx)
+            if self.file_imports:
+                scope_changes.update(
+                    (child.id, child_ctx) for child, child_ctx in children if child_ctx != ctx
+                )
+            stack.extend(reversed(children))
+        if self.file_imports:
+            stack = [(root, initial)]
+            while stack:
+                node, parent = stack.pop()
+                ctx = scope_changes.get(node.id, parent)
+                if parent.conditional and not ctx.conditional:
+                    ctx = replace(ctx, conditional=True)
+                self.module_occurrence(node, ctx)
+                if not ctx.conditional and node.type in {
+                    "if_statement",
+                    "ternary_expression",
+                    "switch_statement",
+                    "for_statement",
+                    "for_in_statement",
+                    "while_statement",
+                    "do_statement",
+                    "catch_clause",
+                }:
+                    ctx = replace(ctx, conditional=True)
+                stack.extend((child, ctx) for child in reversed(_children(node)))
 
 
-def parse_script(path: str, content: str, *, language: str) -> ParsedFile:
-    """Extract bounded source-free facts without filesystem or runtime resolution."""
-    if language not in {"typescript", "javascript"}:
-        raise ValueError("unsupported script language")
+def _script_result(path, content, language):
     result = ParsedFile(path=path, language=language, module=path)
     result.symbols.append(
         Symbol(
@@ -580,34 +680,48 @@ def parse_script(path: str, content: str, *, language: str) -> ParsedFile:
         )
     )
     result.scopes.append(Scope("", "module"))
+    return result
+
+
+def _extract_script(
+    result, content, language, node_budget, *, file_imports, line=1, column=1, scope=""
+):
+    source = content.encode("utf-8")
+    if len(source) > MAX_PARSE_BYTES:
+        raise _Limit
+    if language == "typescript":
+        import tree_sitter_typescript
+
+        grammar = (
+            tree_sitter_typescript.language_tsx()
+            if result.path.lower().endswith(".tsx")
+            else tree_sitter_typescript.language_typescript()
+        )
+    else:
+        import tree_sitter_javascript
+
+        grammar = tree_sitter_javascript.language()
+    tree = Parser(Language(grammar)).parse(source)
+    consumed = _check_nodes(tree.root_node, node_budget)
+    facts = _ScriptFacts(
+        result, source, file_imports=file_imports, line_offset=line - 1, column_offset=column - 1
+    )
+    if tree.root_node.has_error:
+        facts.partial("SCRIPT_PARSE_ERROR", tree.root_node)
+    facts.extract(tree.root_node, _Context(scope=scope))
+    return consumed
+
+
+def parse_script(path: str, content: str, *, language: str, file_imports=False) -> ParsedFile:
+    """Extract bounded source-free facts without filesystem or runtime resolution."""
+    if language not in {"typescript", "javascript"}:
+        raise ValueError("unsupported script language")
+    result = _script_result(path, content, language)
     try:
         if len(content) > MAX_PARSE_BYTES:
             raise _Limit
-        source = content.encode("utf-8")
-        if len(source) > MAX_PARSE_BYTES:
-            raise _Limit
-        if language == "typescript":
-            import tree_sitter_typescript
-
-            grammar = (
-                tree_sitter_typescript.language_tsx()
-                if path.lower().endswith(".tsx")
-                else tree_sitter_typescript.language_typescript()
-            )
-        else:
-            import tree_sitter_javascript
-
-            grammar = tree_sitter_javascript.language()
-        tree = Parser(Language(grammar)).parse(source)
-        _check_nodes(tree.root_node)
-        facts = _ScriptFacts(result, source)
-        if tree.root_node.has_error:
-            facts.partial("SCRIPT_PARSE_ERROR", tree.root_node)
-        facts.extract(tree.root_node)
-    except _Limit:
-        result.status = "resource_limited"
-        result.diagnostics = [{"code": "SCRIPT_RESOURCE_LIMIT"}]
-    except MemoryError:
+        _extract_script(result, content, language, MAX_FILE_NODES, file_imports=file_imports)
+    except (_Limit, MemoryError):
         result.status = "resource_limited"
         result.diagnostics = [{"code": "SCRIPT_RESOURCE_LIMIT"}]
     except Exception:

@@ -20,18 +20,14 @@ from threading import Condition
 
 from code_context.dataflow_ast_cache import DataflowAstCache
 from code_context.intelligence_coverage import public_index_stats
-from code_context.intelligence_index import MAX_SNAPSHOT_PARSE_BYTES
+from code_context.live_capacity import LARGE_CAPACITY, capacity_usage
 from code_context.live_index import (
     _APPLICATION_ID,
     _SCHEMA_VERSION,
-    MAX_LIVE_DATABASE_BYTES,
-    MAX_LIVE_FACTS,
-    MAX_LIVE_INDEX_BYTES,
     LiveIndexService,
 )
 from code_context.local_control import private_directory
 from code_context.models import validate_project
-from code_context.policy import MAX_FILES
 from code_context.source_access import SourceError
 
 
@@ -41,10 +37,13 @@ class ProjectIndexService:
         data_dir: Path,
         *,
         max_open_projects=4,
-        max_bytes=MAX_LIVE_DATABASE_BYTES,
+        max_bytes=None,
         max_peak_bytes=None,
         wait_seconds=10,
+        capacity=LARGE_CAPACITY,
     ):
+        self.capacity = capacity
+        max_bytes = capacity.database_bytes if max_bytes is None else max_bytes
         if type(max_open_projects) is not int or not 1 <= max_open_projects <= 64:
             raise ValueError("invalid open project limit")
         if type(max_bytes) is not int or max_bytes < 1:
@@ -62,7 +61,18 @@ class ProjectIndexService:
         self.root = private_directory(Path(data_dir)).root
         self.max_open_projects = max_open_projects
         self.wait_seconds = wait_seconds
-        self._options = dict(max_bytes=max_bytes, max_peak_bytes=peak, wait_seconds=wait_seconds)
+        self._options = dict(
+            max_bytes=max_bytes,
+            max_peak_bytes=peak,
+            wait_seconds=wait_seconds,
+            max_source_bytes=capacity.source_bytes,
+            max_parse_bytes=capacity.parse_bytes,
+            max_index_bytes=capacity.index_bytes,
+            max_facts=capacity.facts,
+            max_files=capacity.files,
+            max_directories=capacity.directories,
+            manifest_seconds=capacity.manifest_seconds,
+        )
         self._condition = Condition()
         self._entries = OrderedDict()
         self._closed = False
@@ -217,11 +227,14 @@ class ProjectIndexService:
             storage_layout="one_database_per_project",
             retained_states=1,
             peak_strategy="DELETE journal; reserve 3x page ceiling; memory temp; no WAL",
-            source_bytes_per_project=MAX_SNAPSHOT_PARSE_BYTES,
-            parse_bytes_per_project=MAX_SNAPSHOT_PARSE_BYTES,
-            index_bytes_per_project=MAX_LIVE_INDEX_BYTES,
-            facts_per_project=MAX_LIVE_FACTS,
-            files_per_project=MAX_FILES,
+            capacity_profile=self.capacity.name,
+            source_bytes_per_project=self.capacity.source_bytes,
+            parse_bytes_per_project=self.capacity.parse_bytes,
+            index_bytes_per_project=self.capacity.index_bytes,
+            facts_per_project=self.capacity.facts,
+            files_per_project=self.capacity.files,
+            directories_per_project=self.capacity.directories,
+            manifest_seconds=self.capacity.manifest_seconds,
         )
 
     def status(self, project_id):
@@ -243,6 +256,7 @@ class ProjectIndexService:
             storage_bytes=0,
             limits=self._limits(),
         )
+        result["capacity_usage"] = capacity_usage({}, self._limits(), 0)
         # Metadata only; never allocate a database or follow a database symlink.
         if not path.exists():
             return result
@@ -266,6 +280,9 @@ class ProjectIndexService:
                         index_partial=stats.get("partial", True),
                     )
                 result["storage_bytes"] = path.stat().st_size
+                result["capacity_usage"] = capacity_usage(
+                    result["stats"], self._limits(), result["storage_bytes"]
+                )
         except (OSError, sqlite3.Error, ValueError, TypeError, AttributeError):
             raise SourceError(
                 "INDEX_STORAGE_UNAVAILABLE: cannot inspect project fact cache"

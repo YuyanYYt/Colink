@@ -130,7 +130,7 @@ SDK 模块缓存。该目录只在开发构建时使用，已安装应用运行�
 ```sh
 uv sync --locked
 npm ci --prefix macos
-uv run python macos/package.py --source-mode live --output-dir .artifacts/releases/colink-0.5.0b8-build39
+uv run python macos/package.py --source-mode live --output-dir .artifacts/releases/colink-0.5.0-build43
 ```
 
 打包会生成 DMG、ZIP、SHA256SUMS 和报告。校验搬移后的解释器、CLI/MCP 导入与

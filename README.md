@@ -10,18 +10,17 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b8">最新版：0.5.0 Beta 8</a> ·
-  <a href="https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b8">下载 macOS 安装包</a> ·
+  <a href="https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0">最新版 · CoLink 0.5.0</a> ·
+  <a href="https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0">下载 macOS 安装包</a> ·
   <a href="docs/INSTALL.md">安装与使用</a> ·
   <a href="docs/AGENT_INSTALL.md">让 Agent 帮你安装</a> ·
   <a href="https://github.com/YuyanYYt/Colink/releases">历史版本</a>
 </p>
 
-**macOS 安装包：0.5.0 Beta 8（`0.5.0b8`，build 39）** · macOS 14+ · Apple Silicon · [MIT](LICENSE)
+**macOS 安装包 · 0.5.0（build 43）** · macOS 14+ · Apple Silicon · [MIT](LICENSE)
 
-**当前源码与公开安装包均对应 `v0.5.0b8`**，包含统一源码读取与分析、Python / Java
-值传播、TypeScript / JavaScript 结构关系、读取预算与符号定位修复，以及本机工作区管理。
-发行细节和验证边界见[发行说明](docs/RELEASE_0.5.0b8.md)。
+**CoLink `v0.5.0`** 支持统一源码读取与分析、Python / Java 值传播、Vue 和 JS/TS 静态依赖，
+以及大型 Live 工作区的索引和分页查询。详见[发行说明](docs/RELEASE_0.5.0.md)。
 
 Live 主要使用两个入口：`read_code` 定向读取文件、符号、搜索和少量显式文件，
 `analyze_code` 查询关系、数据传播及任务 Diff，需要正文时可在同一次分析中附带。
@@ -38,7 +37,7 @@ Live 主要使用两个入口：`read_code` 定向读取文件、符号、搜索
 
 本版保留本机开发终端、固定数据库只读工具和局部代码索引更新，并更新源码分析与读取能力。
 原生终端按当前 macOS 用户权限运行；可选隔离执行器目前只在已验证的 Darwin 27 上开放。
-安装包声明最低 macOS 14；更新内容和验证边界见 [Beta 8 发行说明](docs/RELEASE_0.5.0b8.md)。
+安装包声明最低 macOS 14，详见 [0.5.0 发行说明](docs/RELEASE_0.5.0.md)。
 
 CoLink 把你选定的本机项目接入 MCP。你可以在 ChatGPT 网页端询问项目结构、查找
 函数、理解跨文件依赖；需要改代码时，在本机打开写入开关，让 AI 精准编辑、创建
@@ -64,26 +63,26 @@ CoLink 把你选定的本机项目接入 MCP。你可以在 ChatGPT 网页端询
 | 菜单栏控制 | 启动、关闭、选择文件夹和管理项目；跟随系统深浅主题，不占 Dock 位置 |
 | 可选自动匹配 Skill | 本机代码缺少上下文时优先读取；已经贴出足够代码时直接回答，无需每次手选技能 |
 
-普通文本源码读取不限于 Python / Java；结构化关系分析目前重点支持这两种语言。
+Live 结构分析支持 Python、Java、JavaScript、TypeScript 和 Vue 脚本。普通文本读取按授权目录提供。
 关系来自静态分析，动态调用、外部库内部实现等可能无法确定，工具会标明不确定项。
 Skill 是否自动匹配由客户端决定，不保证每轮触发。
 
-本版的结构索引按项目使用独立 SQLite，只保留当前一版；每项目磁盘上限
-500 MiB，按需分配。最多同时打开 4 个项目索引，关闭连接后缓存保留在磁盘；
-详细容量、关系复用与性能复测见 [安装版索引修复](docs/LIVE_INDEX_RUNTIME_FIX_20261008.md)。
+Live 索引按项目保存当前一版事实，默认最多 25 万文件、200 万结构事实和 2 GiB 数据库。
+命令行的 `--capacity extreme` 可提高上限。架构图的文件和边分别分页，以 `next_cursor` 续查。
+数据库按需分配，验证规模与配置限制见 [大项目容量说明](docs/LARGE_PROJECT_CAPACITY_20261029.md)。
 
 ## 开始使用
 
 ### 1. 安装应用
 
-打开 [0.5.0 Beta 8 下载页](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b8)，
+打开 [0.5.0 下载页](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0)，
 下载 `Colink-macos-arm64.dmg`，将 `Colink.app` 拖入“应用程序”，然后打开 **CoLink**。
 也可以下载 ZIP 安装。
 
 安装包已包含 Python、MCP 运行依赖和隧道客户端，**不需要先安装开发环境**。
 目前支持 Apple Silicon Mac（M 系列芯片），macOS 14 或更新版本。
-Beta 包尚未完成 Apple Developer ID 签名和公证，首次打开可能出现系统安全提示；
-详情与文件校验方法见 [安装指南](docs/INSTALL.md)。
+安装包使用 ad-hoc 签名，首次打开可能出现系统安全提示。
+签名范围和文件校验方法见 [安装指南](docs/INSTALL.md)。
 
 ### 2. 配置自己的连接
 
@@ -155,7 +154,8 @@ uv run colink live --root examples/sample_project --project sample \
 
 | 版本 | 主要变化 |
 | --- | --- |
-| [**0.5.0 Beta 8 · 最新 macOS 安装包**](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b8) | 当前主分支源码、自包含 Live 模式 macOS 应用（build 39）、Skill 备用包及校验清单；见[发行说明](docs/RELEASE_0.5.0b8.md) |
+| [**0.5.0 · 正式版**](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0) | Live 依赖图分页、Vue / Vite 静态导入、调用条件与大项目容量。包含自包含 macOS 应用（build 43）、Skill 和校验清单。见[发行说明](docs/RELEASE_0.5.0.md)。 |
+| [0.5.0 Beta 8](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b8) | 上一期自包含 Live macOS 安装包（build 39）。见[发行说明](docs/RELEASE_0.5.0b8.md)。 |
 | [**0.5.0 Beta 7 · 源码发行**](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b7) | Python / Java 有界数据流、结构分析覆盖与限制诊断、可恢复批量写入与工作区管理；见[发行说明](docs/RELEASE_0.5.0b7.md)。本期仅提供源码 |
 | [**0.5.0 Beta 5 · 公开预发行**](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b5) | 只读 / 写入 / 开发三档、原生终端、固定数据库只读、局部索引和自定义运行数据目录；见 [发行说明](docs/RELEASE_0.5.0b5.md) |
 | **0.5.0 Beta 4 · 维护源码** | 网页独立开发作业、原生隔离与有界存储、环境/端口/数据库引导、受控移动与本地 Git；公开发行状态和实际验收另行记录 |

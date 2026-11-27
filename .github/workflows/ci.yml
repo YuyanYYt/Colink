@@ -37,7 +37,10 @@ jobs:
             tests/test_read_search.py tests/test_read_code.py \
             tests/test_analysis_surface.py tests/test_analysis_source.py \
             tests/test_analysis_routing.py tests/test_index_coverage.py \
-            tests/test_intelligence_query_optimization.py tests/test_build_manifest.py
+            tests/test_intelligence_query_optimization.py tests/test_build_manifest.py \
+            tests/test_architecture_paging.py tests/test_live_capacity.py \
+            tests/test_live_call_conditions.py tests/test_live_vue_imports.py \
+            tests/test_module_imports.py tests/test_vite_aliases.py
           uv run pytest -q --basetemp "${colink_analysis_dir}-stdio" \
             tests/test_live_stdio.py tests/test_live.py tests/test_cli_imports.py
       # The native process and isolated-runner suite is validated on Darwin 27.
