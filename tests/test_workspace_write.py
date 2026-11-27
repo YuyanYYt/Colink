@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 import code_context.write_operations as operations
+from code_context.live_capacity import LARGE_CAPACITY
 from code_context.local_control import _receive, _send, control_request, read_state, write_state
 from code_context.read_context import ContextError
 from code_context.source_access import SourceError
@@ -107,10 +108,10 @@ def test_default_off_real_socket_authorized_source_and_no_mirror_takeover(runtim
     assert r.recovery_store.max_bytes == 64 * 1024 * 1024
     assert r.recovery_store.max_peak_bytes == 128 * 1024 * 1024
     index_limits = r.backend.index_service.status(pid)["limits"]
-    assert index_limits["database_page_ceiling_bytes"] == 500 * 1024 * 1024
-    assert index_limits["temporary_peak_bytes"] == 1500 * 1024 * 1024
-    assert index_limits["index_bytes_per_project"] == 48 * 1024 * 1024
-    assert index_limits["facts_per_project"] == 200_000
+    assert index_limits["database_page_ceiling_bytes"] == LARGE_CAPACITY.database_bytes
+    assert index_limits["temporary_peak_bytes"] == 3 * LARGE_CAPACITY.database_bytes
+    assert index_limits["index_bytes_per_project"] == LARGE_CAPACITY.index_bytes
+    assert index_limits["facts_per_project"] == LARGE_CAPACITY.facts
     assert "return 1" in r.backend.read_file(pid, "module.py")["content"]
     with pytest.raises(WriteError, match="WRITE_DISABLED"):
         begin(r)

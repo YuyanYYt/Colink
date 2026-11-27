@@ -48,7 +48,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           mkdir -p .artifacts
-          colink_test_dir=$(mktemp -d .artifacts/ci-macos14.XXXXXX)
+          colink_test_dir=$(mktemp -d .artifacts/ci-macos.XXXXXX)
           uv run pytest -q --basetemp "$colink_test_dir" \
             tests/test_publication.py tests/test_packaging.py tests/test_macos_assets.py \
             tests/test_project_index.py tests/test_live_index.py \
