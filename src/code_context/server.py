@@ -30,6 +30,7 @@ from code_context.intelligence_tools import (
     register_analysis_tool,
     register_code_tools,
 )
+from code_context.live_capacity import LARGE_CAPACITY
 from code_context.mirror_tools import register_mirror_source_tools
 from code_context.models import FileChange, SyncBatch, validate_project
 from code_context.policy import (
@@ -244,6 +245,28 @@ def build_mcp(
         visible = {p["project_id"] for p in projects}
         write_projects = [p for p in status.get("write_projects", []) if p in visible]
         execution_projects = [p for p in status.get("execution_projects", []) if p in visible]
+        capacity = getattr(store, "capacity", LARGE_CAPACITY)
+        indexes = []
+        index_service = getattr(store, "index_service", None)
+        index_limits = index_service._limits() if live_mode and index_service is not None else {}
+        if live_mode and index_service is not None:
+            for project in projects[:8]:
+                index = index_service.status(project["project_id"])
+                indexes.append(
+                    {
+                        "project_id": project["project_id"],
+                        "status": index["status"],
+                        "index_partial": index["index_partial"],
+                        "requires_validation": True,
+                        "capacity_usage": index.get("capacity_usage", {}),
+                        "budget_exceeded_files": index.get("stats", {}).get(
+                            "budget_exceeded_files", {}
+                        ),
+                        "discovery_limit_reasons": index.get("stats", {}).get(
+                            "discovery_limit_reasons", []
+                        ),
+                    }
+                )
         return {
             "server_reachable": True,
             "source_mode": store.source_mode,
@@ -257,10 +280,42 @@ def build_mcp(
             "limits": {
                 "max_file_bytes": MAX_FILE_BYTES,
                 "max_project_bytes": None if live_mode else MAX_TOTAL_BYTES,
-                "max_text_search_bytes": MAX_TOTAL_BYTES if live_mode else None,
-                "max_files": MAX_FILES,
+                "max_text_search_bytes": LARGE_CAPACITY.source_bytes if live_mode else None,
+                "max_files": capacity.files if live_mode else MAX_FILES,
                 "max_sync_request_bytes": MAX_REQUEST_BYTES,
+                **(
+                    {
+                        "capacity_profile": capacity.name,
+                        "max_directories": capacity.directories,
+                        "index_source_bytes": index_limits.get(
+                            "source_bytes_per_project", capacity.source_bytes
+                        ),
+                        "index_parse_bytes": index_limits.get(
+                            "parse_bytes_per_project", capacity.parse_bytes
+                        ),
+                        "index_payload_bytes": index_limits.get(
+                            "index_bytes_per_project", capacity.index_bytes
+                        ),
+                        "index_facts": index_limits.get("facts_per_project", capacity.facts),
+                        "index_database_bytes": index_limits.get(
+                            "database_bytes", capacity.database_bytes
+                        ),
+                        "index_temporary_peak_bytes": index_limits.get(
+                            "temporary_peak_bytes", 3 * capacity.database_bytes
+                        ),
+                    }
+                    if live_mode
+                    else {}
+                ),
             },
+            **(
+                {
+                    "code_indexes": indexes,
+                    "code_index_details_omitted": len(projects) > len(indexes),
+                }
+                if live_mode
+                else {}
+            ),
             "watcher": status.get("watcher"),
             "write_enabled": bool(status.get("write_enabled", False)) and bool(write_projects),
             "write_available": bool(status.get("write_available", False)),
@@ -312,6 +367,7 @@ def build_mcp(
         structured_output=True,
         description=(
             "List bounded current file metadata and establish a project-bound live read context. "
+            "file_count counts discovered files after path filters, before content checks. "
             "Reuse its opaque snapshot in reads; it is not an immutable historical snapshot. "
             "previous is unavailable. Do not show context handles in ordinary answers."
         )

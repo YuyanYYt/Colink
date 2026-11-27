@@ -10,6 +10,7 @@ from pathlib import PurePosixPath
 import tree_sitter_java
 from tree_sitter import Language, Node, Parser
 
+from code_context.call_conditions import MAX_BOOLEAN_SLOTS, add_guard
 from code_context.intelligence_models import (
     MAX_FILE_NODES,
     MAX_FILE_REFERENCES,
@@ -90,14 +91,18 @@ class _Context:
     class_name: str = ""
     conditional: bool = False
     record_parameters: tuple[tuple[str, str, int], ...] = ()
+    guards: tuple = ()
+    boolean_parameters: dict[str, int] | None = None
 
 
 class _JavaFacts:
-    def __init__(self, result: ParsedFile, source: bytes) -> None:
+    def __init__(self, result: ParsedFile, source: bytes, *, flow_guards=False) -> None:
         self.result = result
         self.source = source
         self.reference_keys: set[tuple] = set()
         self.callables: dict[tuple[str, str], list[Symbol]] = {}
+        self.flow_guards = flow_guards
+        self.exit_summaries = {}
 
     def diagnostic(self, code: str, message: str, node: Node | None = None, **extra) -> None:
         if len(self.result.diagnostics) >= _MAX_DIAGNOSTICS:
@@ -224,6 +229,7 @@ class _JavaFacts:
         ctx: _Context,
         *,
         arity: int | None = None,
+        forwarded=(),
     ) -> None:
         if not name:
             return
@@ -235,6 +241,11 @@ class _JavaFacts:
         if len(self.result.references) >= MAX_FILE_REFERENCES:
             raise _ResourceLimit("references")
         self.reference_keys.add(key)
+        control = {}
+        if ctx.guards and kind in {"CALL", "INSTANTIATION"}:
+            control["guards"] = list(ctx.guards)
+        if forwarded:
+            control["forwarded_booleans"] = forwarded
         self.result.references.append(
             Reference(
                 name=name,
@@ -243,11 +254,12 @@ class _JavaFacts:
                 column=column,
                 scope=ctx.scope,
                 source_qualname=ctx.owner,
-                conditional=ctx.conditional,
+                conditional=ctx.conditional or bool(control.get("guards")),
                 # Java type syntax may participate in runtime linkage. This
                 # extractor does not prove a compile-only conditional context.
                 type_only=False,
                 arity=arity,
+                call_control=control or None,
             )
         )
 
@@ -338,7 +350,13 @@ class _JavaFacts:
         self.binding(name, "symbol", name_node, ctx, value=qualname)
         self.result.scopes.append(Scope(qualname, kind, ctx.scope))
         inner = replace(
-            ctx, scope=qualname, owner=qualname, class_name=qualname, record_parameters=()
+            ctx,
+            scope=qualname,
+            owner=qualname,
+            class_name=qualname,
+            record_parameters=(),
+            guards=(),
+            boolean_parameters=None,
         )
         parameters = node.child_by_field_name("parameters")
         if kind == "record" and parameters is not None:
@@ -399,13 +417,106 @@ class _JavaFacts:
         self.binding(name, "symbol", name_node, ctx, value=qualname)
         self.callables.setdefault((ctx.scope, name), []).append(symbol)
         self.result.scopes.append(Scope(qualname, kind, ctx.scope))
-        inner = replace(ctx, scope=qualname, owner=qualname)
+        inner = replace(ctx, scope=qualname, owner=qualname, guards=(), boolean_parameters=None)
+        if self.flow_guards:
+            inner = replace(
+                inner, conditional=False, boolean_parameters=self._stable_booleans(node)
+            )
         if node.type == "compact_constructor_declaration":
             for pname, annotation, line in ctx.record_parameters:
                 if len(self.result.bindings) >= MAX_FILE_REFERENCES:
                     raise _ResourceLimit("bindings")
                 self.result.bindings.append(Binding(pname, qualname, "parameter", line, annotation))
         return [(c, inner) for c in _children(node) if not _same_node(c, name_node)]
+
+    def _stable_booleans(self, method):
+        """Only unmodified primitive parameters in a static method can prove a conflict."""
+        modifiers = next((n for n in _children(method) if n.type == "modifiers"), None)
+        params = method.child_by_field_name("parameters")
+        body = method.child_by_field_name("body")
+        if (
+            params is None
+            or body is None
+            or modifiers is None
+            or not any(n.type == "static" for n in _children(modifiers, named=False))
+        ):
+            return None
+        parameters = [
+            n for n in _children(params) if n.type in {"formal_parameter", "spread_parameter"}
+        ]
+        slots = {}
+        for index, parameter in enumerate(parameters[:MAX_BOOLEAN_SLOTS]):
+            name, annotation, _ = self.parameter(parameter)
+            if annotation == "boolean":
+                slots[name] = index
+        pending = [body]
+        while slots and pending:
+            node = pending.pop()
+            if node.type in _CLASS_TYPES or node.type in {"class_body", "lambda_expression"}:
+                continue
+            if node.type == "assignment_expression":
+                left = node.child_by_field_name("left")
+                if left is not None and left.type == "identifier":
+                    slots.pop(self.text(left), None)
+            pending.extend(_children(node))
+        return slots or None
+
+    def _guard_context(self, ctx, test, kind, outcome=None):
+        guard = {"kind": kind, "line": test.start_point[0] + 1, "column": self.column(test)}
+        if outcome is not None:
+            guard["outcome"] = outcome
+            value = outcome
+            predicate = test
+            while predicate.type == "parenthesized_expression" and predicate.named_child_count == 1:
+                predicate = predicate.named_child(0)
+            if predicate.type == "unary_expression":
+                operator = predicate.child_by_field_name("operator")
+                if operator is not None and operator.type == "!":
+                    predicate = predicate.child_by_field_name("operand")
+                    value = not value
+            if ctx.boolean_parameters and predicate is not None and predicate.type == "identifier":
+                slot = ctx.boolean_parameters.get(self.text(predicate))
+                if slot is not None:
+                    guard.update(parameter=slot, value=value)
+        return replace(ctx, guards=add_guard(ctx.guards, guard))
+
+    def _exits(self, node, depth=0):
+        """Summarize only ordinary blocks, if branches and explicit return/throw."""
+        if node is None or depth > 32:
+            return 0
+        if node.id in self.exit_summaries:
+            return self.exit_summaries[node.id]
+        status = 0  # no modeled exit, possible exit, certain exit
+        if node.type in {"return_statement", "throw_statement"}:
+            status = 2
+        elif node.type == "if_statement":
+            arm = self._exits(node.child_by_field_name("consequence"), depth + 1)
+            other = self._exits(node.child_by_field_name("alternative"), depth + 1)
+            status = 2 if arm == other == 2 else int(bool(arm or other))
+        elif node.type == "synchronized_statement":
+            status = self._exits(node.child_by_field_name("body"), depth + 1)
+        elif node.type == "block":
+            for child in _children(node):
+                status = max(status, self._exits(child, depth + 1))
+                if status == 2:
+                    break
+        self.exit_summaries[node.id] = status
+        return status
+
+    def _guarded_statements(self, node, ctx):
+        tasks = []
+        for statement in _children(node):
+            tasks.append((statement, ctx))
+            if statement.type != "if_statement":
+                continue
+            body = self._exits(statement.child_by_field_name("consequence"))
+            other = self._exits(statement.child_by_field_name("alternative"))
+            test = statement.child_by_field_name("condition")
+            if test is not None and (body or other):
+                outcome = (other == 2) if (body == 2) != (other == 2) else None
+                kind = "prior_exit" if outcome is None else "fallthrough"
+                ctx = self._guard_context(ctx, test, kind, outcome)
+        return tasks
 
     def variables(self, node: Node, ctx: _Context) -> list[tuple[Node, _Context]]:
         type_node = node.child_by_field_name("type")
@@ -530,12 +641,23 @@ class _JavaFacts:
             receiver = node.child_by_field_name("object")
             if receiver is not None:
                 name = self.expression_name(receiver) + "." + name
+            arguments = node.child_by_field_name("arguments")
+            forwarded = []
+            if ctx.boolean_parameters and receiver is None and arguments is not None:
+                operands = [n for n in _children(arguments) if n.type not in _COMMENTS]
+                for index, argument in enumerate(operands[:MAX_BOOLEAN_SLOTS]):
+                    if (
+                        argument.type == "identifier"
+                        and self.text(argument) in ctx.boolean_parameters
+                    ):
+                        forwarded.append([ctx.boolean_parameters[self.text(argument)], index])
             self.reference(
                 name,
                 "CALL",
                 name_node or node,
                 ctx,
-                arity=self.arity(node.child_by_field_name("arguments")),
+                arity=self.arity(arguments),
+                forwarded=forwarded,
             )
             return [(c, ctx) for c in _children(node) if not _same_node(c, name_node)]
         if kind in {"object_creation_expression", "array_creation_expression"}:
@@ -557,7 +679,13 @@ class _JavaFacts:
                         child,
                     )
                     inner = self.block(child, ctx, "anonymous")
-                    inner = replace(inner, class_name=inner.scope, record_parameters=())
+                    inner = replace(
+                        inner,
+                        class_name=inner.scope,
+                        record_parameters=(),
+                        guards=(),
+                        boolean_parameters=None,
+                    )
                 tasks.append((child, inner))
             return tasks
         if kind == "explicit_constructor_invocation":
@@ -589,6 +717,8 @@ class _JavaFacts:
                 return [(c, ctx) for c in children if not _same_node(c, method)]
         if kind in {"block", "constructor_body", "for_statement", "catch_clause", "switch_block"}:
             inner = self.block(node, ctx)
+            if self.flow_guards and kind in {"block", "constructor_body"}:
+                return self._guarded_statements(node, inner)
             return [(c, inner) for c in _children(node)]
         if kind == "enhanced_for_statement":
             inner = self.block(node, ctx, "for")
@@ -627,6 +757,7 @@ class _JavaFacts:
             return [(c, ctx) for c in _children(node) if not _same_node(c, name_node)]
         if kind == "lambda_expression":
             inner = self.block(node, ctx, "lambda")
+            inner = replace(inner, boolean_parameters=None, guards=())
             params = node.child_by_field_name("parameters")
             tasks = []
             for child in _children(node):
@@ -689,6 +820,19 @@ class _JavaFacts:
         if kind == "identifier":
             self.reference(self.text(node), "REFERENCE", node, ctx)
             return []
+        if self.flow_guards and kind in {"if_statement", "ternary_expression"}:
+            test = node.child_by_field_name("condition")
+            arm = node.child_by_field_name("consequence")
+            other = node.child_by_field_name("alternative")
+            if test is not None:
+                tasks = []
+                for child in _children(node):
+                    context = ctx
+                    if _same_node(child, arm) or _same_node(child, other):
+                        context = self._guard_context(ctx, test, "branch", _same_node(child, arm))
+                        context = replace(context, conditional=True)
+                    tasks.append((child, context))
+                return tasks
         child_ctx = (
             replace(ctx, conditional=True)
             if kind in {"if_statement", "ternary_expression"}
@@ -726,7 +870,7 @@ def _check_nodes(root: Node) -> None:
                 return
 
 
-def parse_java(path: str, content: str) -> ParsedFile:
+def parse_java(path: str, content: str, *, flow_guards: bool = False) -> ParsedFile:
     """Parse supplied Java text into bounded facts; never access the source path."""
     result = ParsedFile(path=path, language="java")
     result.symbols.append(
@@ -751,7 +895,7 @@ def parse_java(path: str, content: str) -> ParsedFile:
         tree = parser.parse(source)
         root = tree.root_node
         _check_nodes(root)
-        facts = _JavaFacts(result, source)
+        facts = _JavaFacts(result, source, flow_guards=flow_guards and not root.has_error)
         if root.has_error:
             facts.partial("syntax_error", "Java source contains missing or invalid syntax.", root)
         facts.extract(root)

@@ -1,17 +1,16 @@
 # 安装与使用 CoLink
 
-当前公开 macOS 安装包为 **0.5.0 Beta 8（`0.5.0b8`，build 39）**，提供原文件按需直读、
+当前公开 macOS 安装包为 **0.5.0（build 43）**，提供原文件按需直读、
 多项目管理、默认关闭的受控写入、本机开发终端和更新后的代码分析能力。旧版安装包仍保留在
-历史发行页；本版功能与验证边界见 [发行说明](RELEASE_0.5.0b8.md)，日常源码读取、
+历史发行页；本版功能与验证边界见 [发行说明](RELEASE_0.5.0.md)，日常源码读取、
 写入和 Diff 见 [LIVE_USAGE.md](LIVE_USAGE.md)。
 
 ## 推荐：直接安装 macOS 应用
 
-安装包面向 **Apple Silicon（M 系列芯片）**，声明最低 **macOS 14**；完整原生运行
-验收在 macOS 27 完成，版本边界见 [发行说明](RELEASE_0.5.0b8.md)。
+安装包面向 **Apple Silicon（M 系列芯片）**，声明最低 **macOS 14**。发行包范围详见 [发行说明](RELEASE_0.5.0.md)。
 Intel Mac、Windows 暂无对应图形安装包；macOS/Linux 可使用源码 CLI。
 
-1. 打开 [0.5.0 Beta 8 下载页](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0b8)。
+1. 打开 [0.5.0 下载页](https://github.com/YuyanYYt/Colink/releases/tag/v0.5.0)。
 2. 下载 `Colink-macos-arm64.dmg`，双击打开，将 `Colink.app` 拖入“应用程序”。
    也可下载 ZIP，解压后把应用放入 `/Applications` 或 `~/Applications`。
 3. 从 Finder“应用程序”打开 **CoLink**，点击菜单栏图标。
@@ -24,7 +23,7 @@ uv 或 Node。运行时只显示菜单栏图标，不占 Dock；仍可从“应�
 
 ### 系统安全提示与文件校验
 
-这是 Beta 预览版，仅采用 ad-hoc 签名，**未完成 Apple Developer ID 签名或公证**。
+安装包采用 ad-hoc 签名，**未完成 Apple Developer ID 签名或公证**。
 macOS 可能提示无法验证开发者。核对来源和校验值后，是否使用系统提供的单个应用
 “仍要打开”入口由你决定；安装脚本和 Agent 不会清除 quarantine、关闭 Gatekeeper
 或绕过系统警告。

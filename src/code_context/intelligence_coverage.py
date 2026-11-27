@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import json
 
-from code_context.language_frontends import detect_language, structure_language
+from code_context.language_frontends import (
+    detect_language,
+    live_structure_language,
+    structure_language,
+)
 
 _MAX_EXAMPLES = 12
 _MAX_DIAGNOSTICS = 5
@@ -45,7 +49,7 @@ def public_index_stats(stats):
     return result
 
 
-def bound_index_coverage(coverage, max_chars, *, compact=False):
+def bound_index_coverage(coverage, max_chars, *, compact=False, summary_only=False):
     """Fit internal-query metadata to an outer read's independent budget."""
     if compact and max_chars < 1600:
         files = coverage.get("files", {})
@@ -59,7 +63,7 @@ def bound_index_coverage(coverage, max_chars, *, compact=False):
     budget = min(3500, max(300, max_chars // 4))
     result = dict(coverage)
     result["details"] = list(result.get("details", []))
-    if budget < 800:
+    if budget < 800 or summary_only:
         result = {
             key: value
             for key, value in result.items()
@@ -71,6 +75,7 @@ def bound_index_coverage(coverage, max_chars, *, compact=False):
                 "static_only",
                 "inventory_complete",
                 "selected_structure",
+                "relations_require_global_coverage",
             }
         }
         result["details_omitted"] = True
@@ -98,6 +103,13 @@ def _diagnostics(payload):
         for name in ("line", "column"):
             if type(item.get(name)) is int and item[name] > 0:
                 diagnostic[name] = item[name]
+        budgets = item.get("budgets")
+        if isinstance(budgets, list):
+            diagnostic["budgets"] = [
+                name
+                for name in budgets[:6]
+                if name in {"parse_bytes", "parse_facts", "index_bytes", "index_facts"}
+            ]
         result.append(diagnostic)
     return result
 
@@ -117,14 +129,15 @@ def _selected_paths(parameters, result):
     return paths[:_MAX_SELECTED_PATHS]
 
 
-def _file_detail(row):
+def _file_detail(row, *, live=False):
     status = row["status"] or "not_analyzed"
     diagnostics = _diagnostics(row["diagnostics"]) if row["diagnostics"] else []
     detected = detect_language(row["path"])
     if detected == "unsupported":
         detected = None
     if row["status"] is None:
-        if structure_language(row["path"]) != "unsupported":
+        language_for_index = live_structure_language if live else structure_language
+        if language_for_index(row["path"]) != "unsupported":
             status = "not_indexed"
             diagnostics = [{"code": "PROJECT_INDEX_BUDGET_EXCEEDED"}]
         elif detected is not None:
@@ -226,6 +239,8 @@ def index_coverage(
         details_are_samples=True,
         details=[],
         limitation_codes=stats.get("index_diagnostics", {}),
+        budget_exceeded_files=stats.get("budget_exceeded_files", {}),
+        discovery_limit_reasons=stats.get("discovery_limit_reasons", []),
         guidance="Use file_context for one path or read_code for authorized source; "
         "missing static results do not prove absence.",
     )
@@ -248,7 +263,7 @@ def index_coverage(
             (project_id, revision, path),
         ).fetchone()
         if row is not None:
-            coverage["details"].append(_file_detail(row))
+            coverage["details"].append(_file_detail(row, live=inventory is not None))
         elif inventory is not None and any(item["path"] == path for item in inventory["files"]):
             coverage["details"].append(
                 {
@@ -301,7 +316,7 @@ def index_coverage(
         if len(coverage["details"]) >= _MAX_EXAMPLES:
             break
         if row["path"] not in {item["path"] for item in coverage["details"]}:
-            coverage["details"].append(_file_detail(row))
+            coverage["details"].append(_file_detail(row, live=inventory is not None))
     for path, reason in list(skipped.items())[:3]:
         if len(coverage["details"]) >= _MAX_EXAMPLES:
             break

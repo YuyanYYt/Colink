@@ -13,7 +13,7 @@ from pathlib import Path
 
 from watchfiles import watch
 
-from code_context.policy import MAX_FILES, excluded_path, validate_path
+from code_context.policy import excluded_path, validate_path
 from code_context.source_access import SourceError
 
 
@@ -138,7 +138,7 @@ class WatchCoordinator:
                 if project not in allocated:
                     raise SourceError("WATCH_DIRECTORY_LIMIT: metadata validation still applies")
                 metadata = source.manifest(
-                    max_files=MAX_FILES,
+                    max_files=source.capacity.files,
                     max_directories=allowance,
                     max_seconds=self.manifest_seconds,
                 )

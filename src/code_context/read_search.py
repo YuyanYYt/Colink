@@ -10,7 +10,7 @@ import time
 import weakref
 from threading import RLock
 
-from code_context.policy import MAX_TOTAL_BYTES
+from code_context.live_capacity import LARGE_CAPACITY
 from code_context.read_requests import TextSearchRequest, read_budgets
 from code_context.source_access import SourceError
 from code_context.source_page import physical_lines, source_page
@@ -19,6 +19,9 @@ _CURSOR = struct.Struct(">BIId32s")
 _CURSOR_CHARS = 5 + ((_CURSOR.size + 32) * 8 + 5) // 6
 _CURSOR_LOCK = RLock()
 _CURSOR_KEYS = weakref.WeakKeyDictionary()
+
+# A per-page scan ceiling; response and elapsed-time budgets remain independent.
+MAX_TOTAL_BYTES = LARGE_CAPACITY.source_bytes
 
 
 def json_chars(value):

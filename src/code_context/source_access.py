@@ -6,6 +6,7 @@ require before/after identity and content validation.
 """
 
 import hashlib
+import math
 import os
 import stat
 import threading
@@ -16,8 +17,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from code_context.fingerprint_cache import FingerprintCache, SourceFingerprints
+from code_context.live_capacity import LARGE_CAPACITY, MAX_LIVE_DIRECTORIES, MAX_LIVE_FILES
 from code_context.models import content_hash
-from code_context.policy import MAX_FILE_BYTES, MAX_FILES, validate_path
+from code_context.policy import MAX_FILE_BYTES, validate_path
 from code_context.scanner import ScanError, Scanner, _identity, _version
 from code_context.source_identity import stable_source_identities
 from code_context.storage import MirrorError
@@ -127,7 +129,8 @@ class _FingerprintBatch:
 
 
 class SourceAccess:
-    def __init__(self, root: Path, excluded_roots=()):
+    def __init__(self, root: Path, excluded_roots=(), *, capacity=LARGE_CAPACITY):
+        self.capacity = capacity
         try:
             self.scanner = Scanner(root, excluded_roots=tuple(excluded_roots))
             with self.scanner._root_fd() as fd:
@@ -428,11 +431,24 @@ class SourceAccess:
                 return None
             raise
 
-    def manifest(self, *, max_files=MAX_FILES, max_directories=10000, max_seconds=5.0):
+    def manifest(self, *, max_files=None, max_directories=None, max_seconds=None):
         """Return bounded metadata, never full text or an immutable historical snapshot."""
-        if not 1 <= max_files <= MAX_FILES or max_directories < 1 or max_seconds <= 0:
+        max_files = self.capacity.files if max_files is None else max_files
+        max_directories = self.capacity.directories if max_directories is None else max_directories
+        max_seconds = self.capacity.manifest_seconds if max_seconds is None else max_seconds
+        if (
+            type(max_files) is not int
+            or not 1 <= max_files <= MAX_LIVE_FILES
+            or type(max_directories) is not int
+            or not 1 <= max_directories <= MAX_LIVE_DIRECTORIES
+            or isinstance(max_seconds, bool)
+            or not isinstance(max_seconds, (float, int))
+            or not math.isfinite(max_seconds)
+            or max_seconds <= 0
+        ):
             raise SourceError("INVALID_BUDGET: invalid discovery limits")
         result, skipped, watch_directories = [], {}, [""]
+        limit_reasons = set()
         started = time.monotonic()
         directories = 0
         partial = False
@@ -443,6 +459,9 @@ class SourceAccess:
                 nonlocal directories, partial
                 directories += 1
                 if directories > max_directories or time.monotonic() - started > max_seconds:
+                    limit_reasons.add(
+                        "directory_limit" if directories > max_directories else "time_limit"
+                    )
                     partial = True
                     return
                 with os.scandir(fd) as iterator:
@@ -451,10 +470,12 @@ class SourceAccess:
                     for entry in iterator:
                         entries.append(entry.name)
                         if len(entries) > max_files + max_directories:
+                            limit_reasons.add("directory_entry_limit")
                             partial = True
                             return
                 for name in sorted(entries):
                     if time.monotonic() - started > max_seconds:
+                        limit_reasons.add("time_limit")
                         partial = True
                         return
                     path = f"{prefix}/{name}" if prefix else name
@@ -485,6 +506,7 @@ class SourceAccess:
                                 skipped[path] = "file_size_limit"
                             continue
                         if len(result) >= max_files:
+                            limit_reasons.add("file_limit")
                             partial = True
                             return
                         result.append(
@@ -496,6 +518,7 @@ class SourceAccess:
         return {
             "files": sorted(result, key=lambda item: item["path"]),
             "partial": partial,
+            "limit_reasons": sorted(limit_reasons),
             "skipped": skipped,
             "directories": min(directories, max_directories),
             "watch_directories": watch_directories,

@@ -275,31 +275,42 @@ def register_code_tools(mcp, store, authorize, display_name, annotations):
             include_imports=include_imports,
         )
 
-    @mcp.tool(annotations=annotations, structured_output=True)
-    def get_project_architecture(
-        project_id: str,
-        snapshot: str | None = None,
-        path_prefix: str | None = None,
-        max_nodes: int = 100,
-        max_edges: int = 200,
-        include_type_only: bool = False,
-        max_chars: int = 20_000,
-    ) -> dict[str, Any]:
-        """Get bounded dependency-first file layers and cycle groups, not a giant UML
-        dump. Layer zero has no resolved local dependencies outside its cycle group;
-        cycles are condensed for ordering.
-        These are static structural facts, not inferred business architecture. Narrow by path.
-        """
-        return query(
-            project_id,
-            snapshot,
-            "project_architecture",
-            max_chars,
-            path_prefix=path_prefix,
-            max_nodes=max_nodes,
-            max_edges=max_edges,
-            include_type_only=include_type_only,
-        )
+    if store.source_mode == "live":
+
+        @mcp.tool(annotations=annotations, structured_output=True)
+        def get_project_architecture(
+            project_id: str,
+            snapshot: str | None = None,
+            path_prefix: str | None = None,
+            max_nodes: int = 100,
+            max_edges: int = 200,
+            include_type_only: bool = False,
+            max_chars: int = 20_000,
+            cursor: str | None = None,
+        ) -> dict[str, Any]:
+            """Get bounded dependency-first file layers and cycle groups, not a giant UML
+            dump. Layer zero has no resolved local dependencies outside its cycle group;
+            cycles are condensed for ordering.
+            Follow next_cursor with the same scope and snapshot to recover all files and edges;
+            file and edge pages are independent, so edge endpoints may be on other pages.
+            max_nodes <= 5000 and max_edges <= 10000; the response still obeys max_chars.
+            Large cycle groups carry a stable ID, size and at most 32 sample members.
+            total_files includes indexed structure files and explicitly imported, authorized CSS
+            files in scope. Their counts are reported separately. A module import establishes
+            the target file even when a member or a runtime call remains unresolved.
+            These are static structural facts, not inferred business architecture. Narrow by path.
+            """
+            return query(
+                project_id,
+                snapshot,
+                "project_architecture",
+                max_chars,
+                path_prefix=path_prefix,
+                max_nodes=max_nodes,
+                max_edges=max_edges,
+                include_type_only=include_type_only,
+                cursor=cursor,
+            )
 
     @mcp.tool(annotations=annotations, structured_output=True)
     def get_external_dependencies(

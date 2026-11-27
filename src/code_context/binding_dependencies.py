@@ -42,7 +42,15 @@ def declaration_summary(parsed):
             name: [asdict(value) for value in getattr(parsed, name)]
             for name in ("symbols", "scopes", "bindings", "imports")
         },
-        "references": [asdict(r) for r in parsed.references if r.kind == "DECORATOR"],
+        "references": [
+            asdict(r)
+            for r in parsed.references
+            if r.kind == "DECORATOR"
+            or (
+                r.kind in {"MODULE_IMPORT", "MODULE_REEXPORT", "MODULE_DYNAMIC_IMPORT"}
+                and r.name.endswith(".css")
+            )
+        ],
         "diagnostics": parsed.diagnostics,
     }
 
@@ -92,6 +100,8 @@ class BindingReads:
             "imports",
             "scope_maps",
             "by_id",
+            "vite_scopes",
+            "module_languages",
         ):
             value = getattr(resolver, name)
             setattr(
@@ -124,6 +134,8 @@ class BindingReads:
                 "imports",
                 "scope_maps",
                 "by_id",
+                "vite_scopes",
+                "module_languages",
             }:
                 raise ValueError("invalid binding lookup")
             value = dict.get(getattr(self.resolver, name), key)
@@ -147,6 +159,8 @@ class BindingReads:
                 value = [asdict(v) for v in value or []]
             elif name == "modules":
                 value = value or []
+            elif name == "vite_scopes":
+                value = [asdict(config) for config in value or ()]
         digest = hashlib.sha256(
             json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()

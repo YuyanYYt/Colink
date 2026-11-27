@@ -20,6 +20,7 @@ CALLABLE_KINDS = frozenset({"function", "method", "constructor"})
 RELATION_KINDS = frozenset(
     {
         "IMPORT",
+        "MODULE_IMPORT",
         "REFERENCE",
         "CALL",
         "TYPE_REFERENCE",
@@ -124,6 +125,7 @@ class Reference:
     arity: int | None = None
     execution_context: str = "body"
     execution_scope: str = ""
+    call_control: dict | None = None
 
 
 @dataclass
@@ -140,7 +142,11 @@ class ParsedFile:
     diagnostics: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        value = asdict(self)
+        for reference in value["references"]:
+            if reference["call_control"] is None:
+                del reference["call_control"]
+        return value
 
     @classmethod
     def from_dict(cls, value: dict) -> "ParsedFile":
@@ -177,6 +183,9 @@ class Relation:
     conditional: bool = False
     execution_context: str = "body"
     execution_scope: str = ""
+    call_control: dict | None = None
+    module_syntax: str = ""
+    config_path: str = ""
 
     def to_dict(self) -> dict:
         value = asdict(self)
@@ -186,4 +195,10 @@ class Relation:
             value.pop("execution_context")
         if not value["execution_scope"]:
             value.pop("execution_scope")
+        if value["call_control"] is None:
+            value.pop("call_control")
+        if not value["module_syntax"]:
+            value.pop("module_syntax")
+        if not value["config_path"]:
+            value.pop("config_path")
         return value

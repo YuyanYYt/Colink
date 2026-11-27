@@ -147,3 +147,29 @@ def register_mirror_code_tools(mcp, query, annotations):
             max_edges=max_edges,
             include_type_only=include_type_only,
         )
+
+    @mcp.tool(annotations=annotations, structured_output=True)
+    def get_project_architecture(
+        project_id: str,
+        snapshot: str | None = None,
+        path_prefix: str | None = None,
+        max_nodes: int = 100,
+        max_edges: int = 200,
+        include_type_only: bool = False,
+        max_chars: int = 20_000,
+    ) -> dict[str, Any]:
+        """Get bounded dependency-first file layers and cycle groups, not a giant UML
+        dump. Layer zero has no resolved local dependencies outside its cycle group;
+        cycles are condensed for ordering.
+        These are static structural facts, not inferred business architecture. Narrow by path.
+        """
+        return query(
+            project_id,
+            snapshot,
+            "project_architecture",
+            max_chars,
+            path_prefix=path_prefix,
+            max_nodes=max_nodes,
+            max_edges=max_edges,
+            include_type_only=include_type_only,
+        )

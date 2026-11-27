@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from threading import RLock
 
 from code_context.fingerprint_cache import FingerprintCache
+from code_context.live_capacity import LARGE_CAPACITY
 from code_context.models import validate_project
 from code_context.read_context import ContextCapacityError, ContextError, ReadContexts
 from code_context.source_access import SourceAccess, SourceError
@@ -21,7 +22,9 @@ class LiveQueries:
         registry=None,
         *,
         index_factory=None,
+        capacity=LARGE_CAPACITY,
     ):
+        self.capacity = capacity
         sources = sources or (registry.authorized_sources() if registry is not None else {})
         for project_id in sources:
             validate_project(project_id)
@@ -32,9 +35,10 @@ class LiveQueries:
         self.fingerprint_cache = FingerprintCache()
         self.fingerprint_cache.retain_sources(self._source_ids.values())
         for source in self.sources.values():
+            source.capacity = capacity
             source.attach_fingerprint_cache(self.fingerprint_cache)
         self.registry = registry
-        self.contexts = contexts or ReadContexts()
+        self.contexts = contexts or ReadContexts(max_files=max(1_000_000, capacity.files * 4))
         self.index_service = None
         self._index_factory = index_factory
         self.write_coordinator = None
@@ -56,6 +60,7 @@ class LiveQueries:
                 raise SourceError("PROJECT_NOT_AUTHORIZED: choose from list_projects")
             else:
                 source.ensure_available()
+            source.capacity = self.capacity
         except SourceError:
             with self._source_lock:
                 self._source_ids.pop(project_id, None)
@@ -114,6 +119,7 @@ class LiveQueries:
                 self._source_ids = {p: source.source_id for p, source in sources.items()}
                 self.fingerprint_cache.retain_sources(self._source_ids.values())
             for source in sources.values():
+                source.capacity = self.capacity
                 source.attach_fingerprint_cache(self.fingerprint_cache)
             self.contexts.clear()
             if self.index_service is not None:
@@ -223,9 +229,12 @@ class LiveQueries:
                 "created_at": datetime.now(UTC).isoformat(),
                 "files": page,
                 "file_count": len(files),
+                "file_count_scope": "authorized directory entries after path filters, "
+                "before content checks",
                 "offset": offset,
                 "has_more": offset + len(page) < len(files),
                 "discovery_partial": metadata["partial"],
+                "discovery_limit_reasons": metadata.get("limit_reasons", []),
                 "hashes_available": False,
                 "history_available": False,
                 "code_intelligence": {"status": "on_demand"},
